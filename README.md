@@ -202,6 +202,12 @@ codex-acp
 XUANNIAO_ACP_CMD="/path/to/codex-acp" npm start -- prd.md
 ```
 
+如果 `codex login status` 已经显示登录，但 ACP 仍提示需要认证，可以允许 ACP adapter 使用现有凭据：
+
+```bash
+XUANNIAO_ACP_SKIP_AUTH=1 npm start -- prd.md
+```
+
 指定 Codex CLI fallback：
 
 ```bash
@@ -443,6 +449,12 @@ Use a specific ACP adapter:
 
 ```bash
 XUANNIAO_ACP_CMD="/path/to/codex-acp" npm start -- prd.md
+```
+
+If `codex login status` already reports a logged-in account but ACP still asks for authentication, allow the adapter to use existing credentials:
+
+```bash
+XUANNIAO_ACP_SKIP_AUTH=1 npm start -- prd.md
 ```
 
 Use a specific Codex CLI fallback:
