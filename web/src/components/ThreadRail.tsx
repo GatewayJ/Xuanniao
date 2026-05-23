@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { renderMessageMarkdown } from "../markdown";
-import type { Message, Thread } from "../types";
+import type { Message, PermissionOption, PermissionRequest, Thread } from "../types";
 
 type ThreadRailProps = {
   threads: Thread[];
   activeThreadId: string | null;
+  permissionRequests: PermissionRequest[];
+  resolvingPermissionIds: Set<string>;
   editingMessage: string | null;
   editText: string;
   message: string;
@@ -16,6 +18,7 @@ type ThreadRailProps = {
   onSaveEdit: (threadId: string, messageId: string) => void;
   onRetryAssistant: (threadId: string, messageId: string) => void;
   onDeleteMessage: (threadId: string, messageId: string) => void;
+  onResolvePermission: (requestId: string, optionId: string | null) => void;
   setEditText: (value: string) => void;
   setMessage: (value: string) => void;
   onSend: (askAgent: boolean) => void;
@@ -24,7 +27,7 @@ type ThreadRailProps = {
 export function ThreadRail(props: ThreadRailProps) {
   const active = props.threads.find((thread) => thread.id === props.activeThreadId) || null;
   const listRef = useRef<HTMLDivElement | null>(null);
-  const clickTimerRef = useRef<number | null>(null);
+  const previousThreadIdsRef = useRef<Set<string>>(new Set(props.threads.map((thread) => thread.id)));
   const [expandedThreadIds, setExpandedThreadIds] = useState<Set<string>>(() => {
     return props.activeThreadId ? new Set([props.activeThreadId]) : new Set();
   });
@@ -33,41 +36,44 @@ export function ThreadRail(props: ThreadRailProps) {
     if (!props.activeThreadId) return;
     const activeCard = listRef.current?.querySelector<HTMLElement>(`[data-thread-id="${CSS.escape(props.activeThreadId)}"]`);
     activeCard?.scrollIntoView({ block: "nearest" });
-    setExpandedThreadIds((current) => {
-      if (current.has(props.activeThreadId || "")) return current;
-      const next = new Set(current);
-      next.add(props.activeThreadId || "");
-      return next;
-    });
   }, [props.activeThreadId]);
 
   useEffect(() => {
     const threadIds = new Set(props.threads.map((thread) => thread.id));
+    const previousThreadIds = previousThreadIdsRef.current;
     setExpandedThreadIds((current) => {
-      const next = new Set([...current].filter((threadId) => threadIds.has(threadId)));
-      return next.size === current.size ? current : next;
+      let changed = false;
+      const next = new Set<string>();
+      for (const threadId of current) {
+        if (threadIds.has(threadId)) next.add(threadId);
+        else changed = true;
+      }
+      for (const thread of props.threads) {
+        if (!previousThreadIds.has(thread.id)) {
+          next.add(thread.id);
+          changed = true;
+        }
+      }
+      for (const request of props.permissionRequests) {
+        if (request.threadId && threadIds.has(request.threadId) && !next.has(request.threadId)) {
+          next.add(request.threadId);
+          changed = true;
+        }
+        if (!request.threadId && props.activeThreadId && threadIds.has(props.activeThreadId) && !next.has(props.activeThreadId)) {
+          next.add(props.activeThreadId);
+          changed = true;
+        }
+      }
+      return changed || next.size !== current.size ? next : current;
     });
-  }, [props.threads]);
-
-  useEffect(() => () => clearClickTimer(), []);
-
-  function clearClickTimer() {
-    if (clickTimerRef.current) {
-      window.clearTimeout(clickTimerRef.current);
-      clickTimerRef.current = null;
-    }
-  }
+    previousThreadIdsRef.current = threadIds;
+  }, [props.threads, props.permissionRequests]);
 
   function activateThread(thread: Thread) {
-    clearClickTimer();
-    clickTimerRef.current = window.setTimeout(() => {
-      props.onActivate(thread);
-      clickTimerRef.current = null;
-    }, 160);
+    props.onActivate(thread);
   }
 
   function toggleThread(thread: Thread) {
-    clearClickTimer();
     props.onActivate(thread);
     setExpandedThreadIds((current) => {
       const next = new Set(current);
@@ -91,6 +97,9 @@ export function ThreadRail(props: ThreadRailProps) {
         {props.threads.map((thread) => {
           const isActive = thread.id === props.activeThreadId;
           const isExpanded = expandedThreadIds.has(thread.id);
+          const threadPermissionRequests = props.permissionRequests.filter((request) => (
+            request.threadId === thread.id || (!request.threadId && thread.id === props.activeThreadId)
+          ));
           return (
             <article key={thread.id} data-thread-id={thread.id} className={`threadCard ${isActive ? "active" : ""} ${isExpanded ? "expanded" : "collapsed"}`}>
               <div className="threadAccent" aria-hidden="true" />
@@ -100,23 +109,30 @@ export function ThreadRail(props: ThreadRailProps) {
                   role="button"
                   tabIndex={0}
                   aria-expanded={isExpanded}
-                  title="Double-click to show or hide replies"
+                  title="Open thread"
                   onClick={() => activateThread(thread)}
-                  onDoubleClick={() => toggleThread(thread)}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") {
+                    if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       props.onActivate(thread);
-                    }
-                    if (event.key === " ") {
-                      event.preventDefault();
-                      toggleThread(thread);
                     }
                   }}
                 >
                   <div className="threadAnchorHeader">
                     <span className="threadCount">{(thread.messages || []).length} msg</span>
-                    <span className="threadToggleIcon" aria-hidden="true" />
+                    {threadPermissionRequests.length > 0 && <span className="permissionBadge">Permission</span>}
+                    <button
+                      type="button"
+                      className="threadToggleButton"
+                      aria-label={isExpanded ? "Collapse thread" : "Expand thread"}
+                      title={isExpanded ? "Collapse thread" : "Expand thread"}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        toggleThread(thread);
+                      }}
+                    >
+                      <span className="threadToggleIcon" aria-hidden="true" />
+                    </button>
                     <button
                       type="button"
                       className="threadDeleteButton"
@@ -174,6 +190,14 @@ export function ThreadRail(props: ThreadRailProps) {
                         </div>
                       </section>
                     ))}
+                    {threadPermissionRequests.map((request) => (
+                      <PermissionRequestPanel
+                        key={request.id}
+                        request={request}
+                        resolving={props.resolvingPermissionIds.has(request.id)}
+                        onResolve={props.onResolvePermission}
+                      />
+                    ))}
                   </div>
                 )}
               </div>
@@ -195,6 +219,71 @@ export function ThreadRail(props: ThreadRailProps) {
       </form>
     </aside>
   );
+}
+
+function PermissionRequestPanel(props: {
+  request: PermissionRequest;
+  resolving: boolean;
+  onResolve: (requestId: string, optionId: string | null) => void;
+}) {
+  const allowOnce = optionByKind(props.request.options, "allow_once");
+  const allowAlways = optionByKind(props.request.options, "allow_always");
+  const rejectOnce = optionByKind(props.request.options, "reject_once");
+  const rejectAlways = optionByKind(props.request.options, "reject_always");
+  const fallbackOptions = props.request.options.filter((option) => (
+    option !== allowOnce && option !== allowAlways && option !== rejectOnce && option !== rejectAlways
+  ));
+
+  return (
+    <section className="permissionRequest">
+      <div className="permissionRequestHeader">
+        <span>Permission request</span>
+        <time>{formatMessageTime(props.request.createdAt)}</time>
+      </div>
+      <div className="permissionRequestTitle">{props.request.title}</div>
+      {props.request.rawInput && <div className="permissionRequestDetail">{props.request.rawInput}</div>}
+      <div className="permissionRequestActions">
+        {allowOnce && (
+          <button type="button" className="primaryButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, allowOnce.optionId)}>
+            Allow
+          </button>
+        )}
+        {allowAlways && (
+          <button type="button" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, allowAlways.optionId)}>
+            Allow & remember
+          </button>
+        )}
+        {rejectOnce && (
+          <button type="button" className="dangerButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, rejectOnce.optionId)}>
+            Deny
+          </button>
+        )}
+        {rejectAlways && (
+          <button type="button" className="dangerButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, rejectAlways.optionId)}>
+            Always deny
+          </button>
+        )}
+        {fallbackOptions.map((option) => (
+          <button key={option.optionId} type="button" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, option.optionId)}>
+            {labelForPermissionOption(option)}
+          </button>
+        ))}
+        <button type="button" className="ghostButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, null)}>
+          Cancel
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function optionByKind(options: PermissionOption[], kind: string): PermissionOption | null {
+  return options.find((option) => option.kind === kind) || null;
+}
+
+function labelForPermissionOption(option: PermissionOption): string {
+  const label = option.name.trim();
+  if (label) return label;
+  return option.kind.replace(/_/g, " ");
 }
 
 function formatMessageTime(value: string): string {

@@ -43,6 +43,25 @@ export type Message = {
   updatedAt?: string;
 };
 
+export type PermissionOption = {
+  optionId: string;
+  name: string;
+  kind: "allow_once" | "allow_always" | "reject_once" | "reject_always" | string;
+};
+
+export type PermissionRequest = {
+  id: string;
+  sessionId: string | null;
+  threadId: string | null;
+  toolCallId: string | null;
+  title: string;
+  kind: string | null;
+  status: string | null;
+  rawInput: string | null;
+  options: PermissionOption[];
+  createdAt: string;
+};
+
 export type Thread = {
   id: string;
   title: string;

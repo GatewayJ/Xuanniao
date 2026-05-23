@@ -19,7 +19,7 @@ import {
   titleForSelection,
   updateMessageWithPendingReply
 } from "./thread-utils";
-import type { DocumentPayload, MarkdownFile, Message, SelectionContext, Thread } from "./types";
+import type { DocumentPayload, MarkdownFile, Message, PermissionRequest, SelectionContext, Thread } from "./types";
 
 export function App() {
   const [documentData, setDocumentData] = useState<DocumentPayload | null>(null);
@@ -34,6 +34,8 @@ export function App() {
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [markdownFiles, setMarkdownFiles] = useState<MarkdownFile[]>([]);
   const [diagramViewer, setDiagramViewer] = useState<{ title: string; svg: string } | null>(null);
+  const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
+  const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(() => new Set());
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MarkdownThreadEditor | null>(null);
   const previewRef = useRef<HTMLElement | null>(null);
@@ -54,6 +56,28 @@ export function App() {
 
   useEffect(() => {
     void loadAll();
+  }, []);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer: number | null = null;
+
+    async function pollPermissions() {
+      try {
+        const payload = await api.permissions();
+        if (!stopped) setPermissionRequests(payload.requests);
+      } catch {
+        if (!stopped) setPermissionRequests([]);
+      } finally {
+        if (!stopped) timer = window.setTimeout(pollPermissions, 900);
+      }
+    }
+
+    void pollPermissions();
+    return () => {
+      stopped = true;
+      if (timer) window.clearTimeout(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -350,6 +374,30 @@ export function App() {
     }
   }
 
+  async function resolvePermissionRequest(requestId: string, optionId: string | null) {
+    setResolvingPermissionIds((current) => new Set(current).add(requestId));
+    setStatus(optionId ? "Sending permission decision" : "Cancelling permission request");
+    try {
+      const payload = await api.resolvePermission(requestId, optionId ? { optionId } : { cancelled: true });
+      setPermissionRequests(payload.requests);
+      setStatus("Permission decision sent");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+      try {
+        const payload = await api.permissions();
+        setPermissionRequests(payload.requests);
+      } catch {
+        setPermissionRequests([]);
+      }
+    } finally {
+      setResolvingPermissionIds((current) => {
+        const next = new Set(current);
+        next.delete(requestId);
+        return next;
+      });
+    }
+  }
+
   async function deleteMessage(threadId: string, messageId: string) {
     const thread = threadsRef.current.find((item) => item.id === threadId);
     const target = thread?.messages.find((msg) => msg.id === messageId);
@@ -463,6 +511,8 @@ export function App() {
         <ThreadRail
           threads={orderedThreads}
           activeThreadId={activeThreadId}
+          permissionRequests={permissionRequests}
+          resolvingPermissionIds={resolvingPermissionIds}
           editingMessage={editingMessage}
           editText={editText}
           message={message}
@@ -477,6 +527,7 @@ export function App() {
           onSaveEdit={saveEditedMessage}
           onRetryAssistant={retryAssistantReply}
           onDeleteMessage={deleteMessage}
+          onResolvePermission={resolvePermissionRequest}
           setEditText={setEditText}
           setMessage={setMessage}
           onSend={send}

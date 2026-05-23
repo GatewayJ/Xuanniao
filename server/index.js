@@ -108,6 +108,21 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { threads });
     }
 
+    if (url.pathname === "/api/permissions" && req.method === "GET") {
+      return sendJson(res, 200, { requests: agent.listPermissionRequests() });
+    }
+
+    const permissionMatch = url.pathname.match(/^\/api\/permissions\/([^/]+)\/resolve$/);
+    if (permissionMatch && req.method === "POST") {
+      const permissionId = decodeURIComponent(permissionMatch[1]);
+      const body = await readJson(req);
+      agent.resolvePermissionRequest(permissionId, {
+        optionId: typeof body.optionId === "string" ? body.optionId : "",
+        cancelled: body.cancelled === true
+      });
+      return sendJson(res, 200, { requests: agent.listPermissionRequests() });
+    }
+
     const threadMatch = url.pathname.match(/^\/api\/threads\/([^/]+)$/);
     if (threadMatch && req.method === "DELETE") {
       const threadId = decodeURIComponent(threadMatch[1]);
@@ -232,7 +247,7 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
   try {
     const document = await readDocumentPayload();
     const thread = await threadStore.get(threadId);
-    const editRequested = wantsDocumentEdit(content) && canReplaceSelection(thread);
+    const editRequested = process.env.XUANNIAO_CONTROLLED_REPLACEMENT === "1" && wantsDocumentEdit(content) && canReplaceSelection(thread);
     const answer = await agent.prompt({
       question: content,
       document,
@@ -268,6 +283,13 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
         "```"
       ].join("\n");
       answer.appliedEdit = true;
+    }
+
+    if (!updatedDocument) {
+      const latestDocument = await readDocumentPayload();
+      if (latestDocument.content !== document.content) {
+        updatedDocument = latestDocument;
+      }
     }
 
     assistantMessage = await saveAssistantMessage({

@@ -1,4 +1,4 @@
-import type { Anchor, DocumentPayload, MarkdownFile, Message, Thread } from "./types";
+import type { Anchor, DocumentPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
 
 type JsonRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
 
@@ -71,5 +71,11 @@ export const api = {
       {
         method: "DELETE"
       }
-    )
+    ),
+  permissions: () => request<{ requests: PermissionRequest[] }>("/api/permissions"),
+  resolvePermission: (requestId: string, body: { optionId?: string; cancelled?: boolean }) =>
+    request<{ requests: PermissionRequest[] }>(`/api/permissions/${encodeURIComponent(requestId)}/resolve`, {
+      method: "POST",
+      body
+    })
 };

@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -21,6 +22,11 @@ export class AcpDocumentAgent extends EventEmitter {
     this.stderrTail = "";
     this.activeTurn = null;
     this.promptLock = Promise.resolve();
+    this.pendingPermissions = new Map();
+    this.writePermission = {
+      always: false,
+      turnIds: new Set()
+    };
   }
 
   status() {
@@ -29,11 +35,13 @@ export class AcpDocumentAgent extends EventEmitter {
       fallbackCommand: parseCommandLine(this.fallbackCommandLine),
       sessionId: this.sessionId,
       running: Boolean(this.process && !this.process.killed),
-      stderrTail: this.stderrTail
+      stderrTail: this.stderrTail,
+      pendingPermissions: this.listPermissionRequests().length
     };
   }
 
   dispose() {
+    this.cancelPendingPermissions();
     this.failAll(new Error("ACP document session closed."));
     this.pending.clear();
     this.sessionId = null;
@@ -41,6 +49,8 @@ export class AcpDocumentAgent extends EventEmitter {
       this.process.kill();
     }
     this.process = null;
+    this.writePermission.always = false;
+    this.writePermission.turnIds.clear();
   }
 
   async prompt({ question, document, thread, mode = "chat" }) {
@@ -62,31 +72,40 @@ export class AcpDocumentAgent extends EventEmitter {
 
   async promptViaAcp({ question, document, thread, mode }) {
     await this.ensureSession();
-    this.activeTurn = {
+    const turn = {
+      id: randomUUID(),
       sessionId: this.sessionId,
+      threadId: thread.id,
       chunks: [],
       updates: []
     };
+    this.activeTurn = turn;
 
-    const result = await this.request("session/prompt", {
-      sessionId: this.sessionId,
-      prompt: [
-        {
-          type: "text",
-          text: buildPrompt({ question, document, thread, mode })
-        }
-      ]
-    });
+    try {
+      const result = await this.request("session/prompt", {
+        sessionId: this.sessionId,
+        prompt: [
+          {
+            type: "text",
+            text: buildPrompt({ question, document, thread, mode })
+          }
+        ]
+      });
 
-    const turn = this.activeTurn;
-    this.activeTurn = null;
-    const content = turn.chunks.join("").trim();
-    return {
-      content: content || "Codex completed without returning text.",
-      stopReason: result?.stopReason ?? null,
-      transport: "acp",
-      updates: turn.updates.slice(-30)
-    };
+      const content = turn.chunks.join("").trim();
+      return {
+        content: content || "Codex completed without returning text.",
+        stopReason: result?.stopReason ?? null,
+        transport: "acp",
+        updates: turn.updates.slice(-30)
+      };
+    } finally {
+      if (this.activeTurn?.id === turn.id) {
+        this.activeTurn = null;
+      }
+      this.writePermission.turnIds.delete(turn.id);
+      this.cancelPendingPermissionsForTurn(turn.id);
+    }
   }
 
   async promptViaCodexExec({ question, document, thread, mode, acpError }) {
@@ -171,7 +190,7 @@ export class AcpDocumentAgent extends EventEmitter {
       clientCapabilities: {
         fs: {
           readTextFile: true,
-          writeTextFile: false
+          writeTextFile: true
         },
         terminal: false
       },
@@ -319,15 +338,14 @@ export class AcpDocumentAgent extends EventEmitter {
         return this.writeMessage({ jsonrpc: "2.0", id: message.id, result });
       }
 
+      if (message.method === "fs/write_text_file") {
+        const result = await this.writeTextFile(message.params || {});
+        return this.writeMessage({ jsonrpc: "2.0", id: message.id, result });
+      }
+
       if (message.method === "session/request_permission") {
-        return this.writeMessage({
-          jsonrpc: "2.0",
-          id: message.id,
-          result: {
-            outcome: "denied",
-            message: "Xuanniao MVP denies agent-side mutations. Use the UI patch flow instead."
-          }
-        });
+        const result = await this.requestUserPermission(message.params || {});
+        return this.writeMessage({ jsonrpc: "2.0", id: message.id, result });
       }
 
       return this.writeMessage({
@@ -347,6 +365,91 @@ export class AcpDocumentAgent extends EventEmitter {
           message: error instanceof Error ? error.message : String(error)
         }
       });
+    }
+  }
+
+  listPermissionRequests() {
+    return [...this.pendingPermissions.values()].map((permission) => permission.snapshot);
+  }
+
+  resolvePermissionRequest(id, { optionId, cancelled = false }) {
+    const permission = this.pendingPermissions.get(id);
+    if (!permission) {
+      throw new Error(`permission request not found: ${id}`);
+    }
+
+    if (cancelled) {
+      permission.resolve({ outcome: { outcome: "cancelled" } });
+      return;
+    }
+
+    const selected = permission.snapshot.options.find((option) => option.optionId === optionId);
+    if (!selected) {
+      throw new Error(`permission option not found: ${optionId}`);
+    }
+
+    this.applyPermissionGrant(permission, selected);
+
+    permission.resolve({
+      outcome: {
+        outcome: "selected",
+        optionId: selected.optionId
+      }
+    });
+  }
+
+  applyPermissionGrant(permission, selected) {
+    if (selected.kind === "allow_always") {
+      this.writePermission.always = true;
+      return;
+    }
+    if (selected.kind === "allow_once" && permission.turnId) {
+      this.writePermission.turnIds.add(permission.turnId);
+    }
+  }
+
+  requestUserPermission(params) {
+    const turn = this.activeTurn;
+    const toolCall = params.toolCall || {};
+    const id = randomUUID();
+    const snapshot = {
+      id,
+      sessionId: params.sessionId || this.sessionId || null,
+      threadId: turn?.threadId || null,
+      toolCallId: toolCall.toolCallId || null,
+      title: toolCall.title || "Codex requests permission",
+      kind: toolCall.kind || null,
+      status: toolCall.status || null,
+      rawInput: previewRawValue(toolCall.rawInput),
+      options: normalizePermissionOptions(params.options),
+      createdAt: new Date().toISOString()
+    };
+
+    return new Promise((resolve) => {
+      this.pendingPermissions.set(id, {
+        turnId: turn?.id || null,
+        snapshot,
+        resolve: (result) => {
+          this.pendingPermissions.delete(id);
+          resolve(result);
+        }
+      });
+    });
+  }
+
+  cancelPendingPermissionsForTurn(turnId) {
+    if (!turnId) return;
+    for (const [id, permission] of this.pendingPermissions) {
+      if (permission.turnId !== turnId) continue;
+      this.pendingPermissions.delete(id);
+      permission.resolve({ outcome: { outcome: "cancelled" } });
+    }
+  }
+
+  cancelPendingPermissions() {
+    for (const [id, permission] of this.pendingPermissions) {
+      this.pendingPermissions.delete(id);
+      permission.resolve({ outcome: { outcome: "cancelled" } });
     }
   }
 
@@ -385,11 +488,46 @@ export class AcpDocumentAgent extends EventEmitter {
     return { content: lines.slice(start, end).join("\n") };
   }
 
+  async writeTextFile(params) {
+    const requestedPath = path.resolve(String(params.path || ""));
+    if (requestedPath !== this.documentPath) {
+      throw new Error(`write denied outside active document: ${requestedPath}`);
+    }
+    if (!this.writePermission.always && !this.writePermission.turnIds.has(this.activeTurn?.id)) {
+      throw new Error("write denied until the user approves the active permission request");
+    }
+
+    await writeFile(this.documentPath, String(params.content ?? ""), "utf8");
+    return {};
+  }
+
   failAll(error) {
     for (const [id, pending] of this.pending) {
       this.pending.delete(id);
       pending.reject(error);
     }
+  }
+}
+
+function normalizePermissionOptions(options) {
+  if (!Array.isArray(options)) return [];
+  return options.map((option) => ({
+    optionId: String(option.optionId || ""),
+    name: String(option.name || option.optionId || "Permission option"),
+    kind: String(option.kind || "other")
+  })).filter((option) => option.optionId);
+}
+
+function previewRawValue(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string") {
+    return value.length > 240 ? `${value.slice(0, 240)}...` : value;
+  }
+  try {
+    const json = JSON.stringify(value);
+    return json.length > 240 ? `${json.slice(0, 240)}...` : json;
+  } catch {
+    return String(value);
   }
 }
 
@@ -478,7 +616,8 @@ function buildPrompt({ question, document, thread, mode = "chat" }) {
     "You are Codex collaborating with the user in Xuanniao, a local Markdown plan document workspace.",
     "The document is the source of truth. Discuss the selected details and propose precise improvements.",
     "For normal chat replies, return Markdown-compatible plain text. Use fenced code blocks for code, XML, JSON, diffs, logs, and protocol examples.",
-    "Do not write files directly. Xuanniao will apply any approved replacement itself.",
+    "When the user asks you to change the active document, you may write only that document after Xuanniao grants an explicit permission request.",
+    "Never write files outside the active document path.",
     "",
     `Document path: ${document.path}`,
     `Document title: ${document.title}`,
