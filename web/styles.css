@@ -563,6 +563,18 @@ body.resizing .splitter::before {
   padding: 8px 8px 14px;
 }
 
+.threadListSpatial {
+  overflow: hidden;
+  overflow-anchor: none;
+  scroll-behavior: auto;
+  padding: 0;
+}
+
+.threadSpatialCanvas {
+  min-height: 100%;
+  position: relative;
+}
+
 .threadCard {
   background: var(--panel);
   border: 1px solid #d9dee8;
@@ -573,6 +585,13 @@ body.resizing .splitter::before {
   overflow: hidden;
   position: relative;
   transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.threadListSpatial .threadCard {
+  left: 8px;
+  margin-bottom: 0;
+  position: absolute;
+  right: 8px;
 }
 
 .threadCard::before {
@@ -666,36 +685,48 @@ body.resizing .splitter::before {
   text-transform: none;
 }
 
-.threadToggleButton {
+.threadNavControls {
+  align-items: center;
+  display: inline-flex;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.threadNavButton {
   align-items: center;
   background: transparent;
   border: 1px solid transparent;
   display: inline-flex;
-  height: 24px;
+  height: 22px;
   justify-content: center;
-  margin-left: auto;
-  min-height: 24px;
+  min-height: 22px;
   padding: 0;
-  width: 24px;
+  width: 22px;
 }
 
-.threadToggleButton:hover {
+.threadNavButton:hover:not(:disabled) {
   background: #eef2f7;
   border-color: #d9dee8;
 }
 
-.threadToggleIcon {
+.threadNavButton:disabled {
+  opacity: 0.35;
+}
+
+.threadNavIcon {
   border-bottom: 1.5px solid #6b7280;
   border-right: 1.5px solid #6b7280;
   display: inline-block;
   height: 7px;
-  transform: rotate(45deg) translateY(-2px);
-  transition: transform 140ms ease;
   width: 7px;
 }
 
-.threadCard.expanded .threadToggleIcon {
-  transform: rotate(225deg) translate(-2px, -1px);
+.threadNavIcon.up {
+  transform: rotate(225deg) translate(-1px, -1px);
+}
+
+.threadNavIcon.down {
+  transform: rotate(45deg) translate(-1px, -1px);
 }
 
 .threadAnchorText {

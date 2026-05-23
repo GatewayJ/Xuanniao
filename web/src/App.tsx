@@ -10,6 +10,7 @@ import { TopBar } from "./components/TopBar";
 import { useRenderedPreview } from "./hooks/useRenderedPreview";
 import { useThreadPaneWidth } from "./hooks/useThreadPaneWidth";
 import { MarkdownThreadEditor, nearestThreadForLine } from "./ThreadEditor";
+import { buildPreviewThreadLayout } from "./thread-spatial";
 import {
   appendPendingMessage,
   findThreadForSelection,
@@ -19,7 +20,7 @@ import {
   titleForSelection,
   updateMessageWithPendingReply
 } from "./thread-utils";
-import type { DocumentPayload, MarkdownFile, Message, PermissionRequest, SelectionContext, Thread } from "./types";
+import type { DocumentPayload, MarkdownFile, Message, PermissionRequest, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 export function App() {
   const [documentData, setDocumentData] = useState<DocumentPayload | null>(null);
@@ -36,13 +37,16 @@ export function App() {
   const [diagramViewer, setDiagramViewer] = useState<{ title: string; svg: string } | null>(null);
   const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
   const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(() => new Set());
+  const [threadSpatialLayout, setThreadSpatialLayout] = useState<ThreadSpatialLayout | null>(null);
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MarkdownThreadEditor | null>(null);
   const previewRef = useRef<HTMLElement | null>(null);
   const saveTimerRef = useRef<number | null>(null);
   const anchorSaveTimerRef = useRef<number | null>(null);
+  const scrollSyncFrameRef = useRef<number | null>(null);
   const threadsRef = useRef<Thread[]>([]);
   const activeThreadIdRef = useRef<string | null>(null);
+  const modeRef = useRef<Mode>("edit");
   const { threadWidth, startResize } = useThreadPaneWidth();
 
   const activeThread = threads.find((thread) => thread.id === activeThreadId) || null;
@@ -55,7 +59,17 @@ export function App() {
   }, [threads, activeThreadId]);
 
   useEffect(() => {
+    modeRef.current = mode;
+  }, [mode]);
+
+  useEffect(() => {
     void loadAll();
+  }, []);
+
+  useEffect(() => () => {
+    if (scrollSyncFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollSyncFrameRef.current);
+    }
   }, []);
 
   useEffect(() => {
@@ -84,6 +98,7 @@ export function App() {
     if (!documentData || !editorHostRef.current || editorRef.current) return;
     editorRef.current = new MarkdownThreadEditor(editorHostRef.current, documentData.content, handleEditorChange, handleEditorScroll, activateThread);
     editorRef.current.setThreads(threads, activeThreadId);
+    scheduleThreadSpatialSync();
     return () => {
       editorRef.current?.destroy();
       editorRef.current = null;
@@ -92,7 +107,12 @@ export function App() {
 
   useEffect(() => {
     editorRef.current?.setThreads(threads, activeThreadId);
+    scheduleThreadSpatialSync();
   }, [threads, activeThreadId]);
+
+  useEffect(() => {
+    scheduleThreadSpatialSync();
+  }, [mode, documentData?.content]);
 
   useRenderedPreview({
     previewRef,
@@ -100,7 +120,8 @@ export function App() {
     threads,
     activeThreadId,
     onActivateThread: activateThreadById,
-    onOpenDiagram: setDiagramViewer
+    onOpenDiagram: setDiagramViewer,
+    onRendered: scheduleThreadSpatialSync
   });
 
   async function loadAll() {
@@ -123,13 +144,76 @@ export function App() {
     }
     setDocumentData((current) => current ? { ...current, content } : current);
     setStatus("Editing");
+    scheduleThreadSpatialSync();
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => void saveDocument(content), 1000);
   }
 
   function handleEditorScroll() {
-    const next = editorRef.current?.nearestThreadForViewport(threadsRef.current);
-    if (next && next.id !== activeThreadIdRef.current) setActiveThreadId(next.id);
+    scheduleThreadSpatialSync();
+  }
+
+  function scheduleThreadSpatialSync() {
+    if (scrollSyncFrameRef.current !== null) return;
+    scrollSyncFrameRef.current = window.requestAnimationFrame(() => {
+      scrollSyncFrameRef.current = null;
+      syncThreadSpatialLayout();
+    });
+  }
+
+  function syncThreadSpatialLayout() {
+    const layout = readThreadSpatialLayout();
+    setThreadSpatialLayout(layout);
+
+    const next = nearestThreadForCurrentViewport();
+    if (next && next.id !== activeThreadIdRef.current) {
+      setActiveThreadId(next.id);
+    }
+  }
+
+  function readThreadSpatialLayout(): ThreadSpatialLayout | null {
+    if (modeRef.current === "edit") {
+      return editorRef.current?.threadSpatialLayout(threadsRef.current) || null;
+    }
+    if (modeRef.current === "preview") {
+      return buildPreviewThreadLayout(previewRef.current, threadsRef.current);
+    }
+    return null;
+  }
+
+  function nearestThreadForCurrentViewport(): Thread | null {
+    if (modeRef.current === "edit") {
+      return editorRef.current?.nearestThreadForViewport(threadsRef.current) || null;
+    }
+    if (modeRef.current === "preview") {
+      const line = previewLineAtViewport();
+      return line ? nearestThreadForLine(threadsRef.current, line) : null;
+    }
+    return null;
+  }
+
+  function previewLineAtViewport(): number | null {
+    const root = previewRef.current;
+    if (!root) return null;
+    const target = root.scrollTop + root.clientHeight * 0.28;
+    let line: number | null = null;
+    for (const block of [...root.querySelectorAll<HTMLElement>("[data-source-line]")]) {
+      if (block.offsetTop <= target) line = Number(block.dataset.sourceLine || 1);
+      else break;
+    }
+    return line;
+  }
+
+  function syncDocumentScrollFromThreadRail(scrollTop: number) {
+    if (modeRef.current === "edit") {
+      editorRef.current?.setScrollTop(scrollTop);
+      scheduleThreadSpatialSync();
+      return;
+    }
+    if (modeRef.current === "preview" && previewRef.current) {
+      previewRef.current.scrollTop = Math.max(0, scrollTop);
+      scheduleThreadSpatialSync();
+    }
   }
 
   async function saveDocument(content = editorRef.current?.getContent() || documentData?.content || "") {
@@ -449,9 +533,11 @@ export function App() {
     setActiveThreadId(thread.id);
     if (mode === "preview") {
       scrollPreviewToThread(thread.id);
+      scheduleThreadSpatialSync();
       return;
     }
     editorRef.current?.focusThread(thread);
+    scheduleThreadSpatialSync();
   }
 
   function activateThreadById(threadId: string | null) {
@@ -475,16 +561,7 @@ export function App() {
   }
 
   function syncPreviewScroll() {
-    const root = previewRef.current;
-    if (!root) return;
-    const target = root.scrollTop + root.clientHeight * 0.28;
-    let line = 1;
-    for (const block of [...root.querySelectorAll<HTMLElement>("[data-source-line]")]) {
-      if (block.offsetTop <= target) line = Number(block.dataset.sourceLine || 1);
-      else break;
-    }
-    const next = nearestThreadForLine(threads, line);
-    if (next && next.id !== activeThreadId) setActiveThreadId(next.id);
+    scheduleThreadSpatialSync();
   }
 
   return (
@@ -511,6 +588,7 @@ export function App() {
         <ThreadRail
           threads={orderedThreads}
           activeThreadId={activeThreadId}
+          spatialLayout={threadSpatialLayout}
           permissionRequests={permissionRequests}
           resolvingPermissionIds={resolvingPermissionIds}
           editingMessage={editingMessage}
@@ -528,6 +606,7 @@ export function App() {
           onRetryAssistant={retryAssistantReply}
           onDeleteMessage={deleteMessage}
           onResolvePermission={resolvePermissionRequest}
+          onSpatialScroll={syncDocumentScrollFromThreadRail}
           setEditText={setEditText}
           setMessage={setMessage}
           onSend={send}

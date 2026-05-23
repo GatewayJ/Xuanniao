@@ -1,6 +1,5 @@
 import MarkdownIt from "markdown-it";
 import mermaid from "mermaid";
-import type { Thread } from "./types";
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 const messageMd = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: true });
@@ -25,18 +24,8 @@ addSourceLineRule("bullet_list_open");
 addSourceLineRule("ordered_list_open");
 addSourceLineRule("list_item_open");
 
-export function renderMarkdown(content: string, threads: Thread[], activeThreadId: string | null): string {
-  let html = md.render(content);
-  for (const thread of threads) {
-    const selected = thread.selectedText.trim();
-    if (!selected) continue;
-    const className = thread.id === activeThreadId ? "threadMark active" : "threadMark";
-    html = html.replace(
-      new RegExp(escapeRegExp(escapeHtml(selected)), "m"),
-      `<span class="${className}" data-preview-thread-id="${escapeHtml(thread.id)}">$&</span>`
-    );
-  }
-  return html;
+export function renderMarkdown(content: string): string {
+  return md.render(content);
 }
 
 export function renderMessageMarkdown(content: string): string {
@@ -79,10 +68,6 @@ function sizeMermaidSvg(block: HTMLElement) {
   svg.style.height = "auto";
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
-}
-
 function addSourceLineRule(ruleName: string) {
   const defaultRule = md.renderer.rules[ruleName];
   md.renderer.rules[ruleName] = (tokens, idx, options, env, self) => {
@@ -98,13 +83,4 @@ function addSourceLineRule(ruleName: string) {
 function sourceLineAttribute(token: { map: [number, number] | null }): string {
   const line = token.map?.[0];
   return typeof line === "number" ? ` data-source-line="${line + 1}"` : "";
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
 }

@@ -2,7 +2,7 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap, ViewPlugin, type ViewUpdate } from "@codemirror/view";
-import type { SelectionContext, Thread } from "./types";
+import type { SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 type ChangeListener = (update: ViewUpdate) => void;
 type ScrollListener = (view: EditorView) => void;
@@ -127,15 +127,53 @@ export class MarkdownThreadEditor {
     this.view.focus();
   }
 
+  setScrollTop(scrollTop: number) {
+    this.view.scrollDOM.scrollTop = Math.max(0, scrollTop);
+  }
+
   setThreads(threads: Thread[], activeId: string | null) {
     this.threads = threads;
     this.view.dispatch({ effects: [updateThreadsEffect.of(threads), activeThreadEffect.of(activeId)] });
+  }
+
+  threadSpatialLayout(threads: Thread[]): ThreadSpatialLayout {
+    const positions: ThreadSpatialLayout["positions"] = {};
+    for (const thread of threads) {
+      const top = this.topForThread(thread);
+      if (top === null) continue;
+      positions[thread.id] = {
+        threadId: thread.id,
+        line: thread.anchor.lineStart,
+        top
+      };
+    }
+
+    return {
+      contentHeight: Math.max(this.view.scrollDOM.scrollHeight, this.view.scrollDOM.clientHeight),
+      viewportHeight: this.view.scrollDOM.clientHeight,
+      scrollTop: this.view.scrollDOM.scrollTop,
+      positions
+    };
   }
 
   nearestThreadForViewport(threads: Thread[]): Thread | null {
     const pos = this.view.lineBlockAtHeight(this.view.scrollDOM.scrollTop + this.view.scrollDOM.clientHeight * 0.28).from;
     const line = this.view.state.doc.lineAt(pos).number;
     return nearestThreadForLine(threads, line);
+  }
+
+  private topForThread(thread: Thread): number | null {
+    const pos = Number.isInteger(thread.anchor.start) && thread.anchor.start !== null
+      ? thread.anchor.start
+      : this.positionForLine(thread.anchor.lineStart);
+    if (pos === null) return null;
+    return Math.max(0, this.view.lineBlockAt(pos).top);
+  }
+
+  private positionForLine(lineNumber: number | null): number | null {
+    if (!Number.isInteger(lineNumber) || lineNumber === null) return null;
+    const line = this.view.state.doc.line(Math.max(1, Math.min(lineNumber, this.view.state.doc.lines)));
+    return line.from;
   }
 
   private threadAtPointer(event: MouseEvent): Thread | null {

@@ -62,6 +62,19 @@ export type PermissionRequest = {
   createdAt: string;
 };
 
+export type ThreadPosition = {
+  threadId: string;
+  line: number | null;
+  top: number;
+};
+
+export type ThreadSpatialLayout = {
+  contentHeight: number;
+  viewportHeight: number;
+  scrollTop: number;
+  positions: Record<string, ThreadPosition>;
+};
+
 export type Thread = {
   id: string;
   title: string;

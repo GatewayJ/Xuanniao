@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
 import { renderMarkdown, renderMermaidBlocks } from "../markdown";
+import { findPreviewBlockForThread } from "../thread-spatial";
 import type { Thread } from "../types";
 
 type UseRenderedPreviewOptions = {
@@ -10,6 +11,7 @@ type UseRenderedPreviewOptions = {
   activeThreadId: string | null;
   onActivateThread: (threadId: string | null) => void;
   onOpenDiagram: (diagram: { title: string; svg: string }) => void;
+  onRendered?: () => void;
 };
 
 export function useRenderedPreview({
@@ -18,10 +20,12 @@ export function useRenderedPreview({
   threads,
   activeThreadId,
   onActivateThread,
-  onOpenDiagram
+  onOpenDiagram,
+  onRendered
 }: UseRenderedPreviewOptions) {
   const onActivateThreadRef = useRef(onActivateThread);
   const onOpenDiagramRef = useRef(onOpenDiagram);
+  const onRenderedRef = useRef(onRendered);
 
   useEffect(() => {
     onActivateThreadRef.current = onActivateThread;
@@ -32,11 +36,16 @@ export function useRenderedPreview({
   }, [onOpenDiagram]);
 
   useEffect(() => {
+    onRenderedRef.current = onRendered;
+  }, [onRendered]);
+
+  useEffect(() => {
     const root = previewRef.current;
     if (!root || content === null) return;
 
-    root.innerHTML = renderMarkdown(content, threads, activeThreadId);
-    decoratePreviewThreadAnchors(root, threads, activeThreadId);
+    root.innerHTML = renderMarkdown(content);
+    decoratePreviewThreadAnchors(root, threads);
+    updatePreviewActiveThread(root, activeThreadId);
     const handleClick = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       const diagramButton = target?.closest<HTMLElement>("[data-diagram-action='open']");
@@ -58,35 +67,30 @@ export function useRenderedPreview({
     };
 
     root.addEventListener("click", handleClick);
-    void renderMermaidBlocks(root);
+    void renderMermaidBlocks(root).finally(() => onRenderedRef.current?.());
+    onRenderedRef.current?.();
     return () => root.removeEventListener("click", handleClick);
-  }, [previewRef, content, threads, activeThreadId]);
+  }, [previewRef, content, threads]);
+
+  useEffect(() => {
+    const root = previewRef.current;
+    if (!root) return;
+    updatePreviewActiveThread(root, activeThreadId);
+  }, [previewRef, activeThreadId]);
 }
 
-function decoratePreviewThreadAnchors(root: HTMLElement, threads: Thread[], activeThreadId: string | null) {
+function decoratePreviewThreadAnchors(root: HTMLElement, threads: Thread[]) {
   for (const thread of threads) {
     const block = findPreviewBlockForThread(root, thread);
     if (!block) continue;
     if (block.dataset.previewThreadId && block.dataset.previewThreadId !== thread.id) continue;
     block.dataset.previewThreadId = thread.id;
     block.classList.add("threadBlockMark");
-    if (thread.id === activeThreadId) block.classList.add("active");
   }
 }
 
-function findPreviewBlockForThread(root: HTMLElement, thread: Thread): HTMLElement | null {
-  const lineStart = thread.anchor.lineStart;
-  if (!Number.isInteger(lineStart)) return null;
-
-  const blocks = [...root.querySelectorAll<HTMLElement>("[data-source-line]")]
-    .sort((left, right) => Number(left.dataset.sourceLine || 0) - Number(right.dataset.sourceLine || 0));
-
-  let candidate: HTMLElement | null = null;
-  for (const block of blocks) {
-    const blockLine = Number(block.dataset.sourceLine || 0);
-    if (blockLine === lineStart) return block;
-    if (blockLine <= (lineStart || 0)) candidate = block;
-    else break;
+function updatePreviewActiveThread(root: HTMLElement, activeThreadId: string | null) {
+  for (const marker of root.querySelectorAll<HTMLElement>("[data-preview-thread-id]")) {
+    marker.classList.toggle("active", Boolean(activeThreadId && marker.dataset.previewThreadId === activeThreadId));
   }
-  return candidate;
 }
