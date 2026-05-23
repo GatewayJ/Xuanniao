@@ -2,6 +2,8 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent 
 import { renderMessageMarkdown } from "../markdown";
 import type { Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
 
+const THREAD_ACTIVATION_DELAY_MS = 180;
+
 type ThreadRailProps = {
   threads: Thread[];
   activeThreadId: string | null;
@@ -31,6 +33,9 @@ export function ThreadRail(props: ThreadRailProps) {
   const listRef = useRef<HTMLDivElement | null>(null);
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
   const applyingScrollRef = useRef(false);
+  const applyingScrollFrameRef = useRef<number | null>(null);
+  const activationTimerRef = useRef<number | null>(null);
+  const scrollPositionRef = useRef(0);
   const previousThreadIdsRef = useRef<Set<string>>(new Set(props.threads.map((thread) => thread.id)));
   const [cardHeights, setCardHeights] = useState<Record<string, number>>({});
   const [railViewportHeight, setRailViewportHeight] = useState(0);
@@ -72,14 +77,18 @@ export function ThreadRail(props: ThreadRailProps) {
   useEffect(() => {
     const list = listRef.current;
     if (!list || !props.spatialLayout) return;
+    scrollPositionRef.current = props.spatialLayout.scrollTop;
     if (Math.abs(list.scrollTop - props.spatialLayout.scrollTop) < 1) return;
 
-    applyingScrollRef.current = true;
-    list.scrollTop = props.spatialLayout.scrollTop;
-    window.requestAnimationFrame(() => {
-      applyingScrollRef.current = false;
-    });
+    applyRailScrollTop(props.spatialLayout.scrollTop);
   }, [props.spatialLayout?.scrollTop]);
+
+  useEffect(() => () => {
+    if (applyingScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(applyingScrollFrameRef.current);
+    }
+    clearPendingActivation();
+  }, []);
 
   useLayoutEffect(() => {
     const list = listRef.current;
@@ -121,10 +130,26 @@ export function ThreadRail(props: ThreadRailProps) {
   );
 
   function activateThread(thread: Thread) {
+    clearPendingActivation();
     props.onActivate(thread);
   }
 
+  function scheduleThreadActivation(thread: Thread) {
+    clearPendingActivation();
+    activationTimerRef.current = window.setTimeout(() => {
+      activationTimerRef.current = null;
+      props.onActivate(thread);
+    }, THREAD_ACTIVATION_DELAY_MS);
+  }
+
+  function clearPendingActivation() {
+    if (activationTimerRef.current === null) return;
+    window.clearTimeout(activationTimerRef.current);
+    activationTimerRef.current = null;
+  }
+
   function toggleThread(thread: Thread) {
+    clearPendingActivation();
     props.onActivate(thread);
     setExpandedThreadIds((current) => {
       const next = new Set(current);
@@ -138,13 +163,40 @@ export function ThreadRail(props: ThreadRailProps) {
     if (applyingScrollRef.current) return;
     const list = listRef.current;
     if (!list || !props.spatialLayout) return;
+    scrollPositionRef.current = list.scrollTop;
     props.onSpatialScroll(list.scrollTop);
   }
 
   function handleListWheel(event: WheelEvent<HTMLDivElement>) {
-    if (!props.spatialLayout) return;
+    const list = listRef.current;
+    if (!list || !props.spatialLayout) return;
+
+    const deltaY = normalizeWheelDeltaY(event, list.clientHeight);
+    if (deltaY === 0 || canNestedTargetScroll(event, list, deltaY)) return;
+
+    const maxScrollTop = maxSpatialScrollTop(props.spatialLayout);
+    const nextScrollTop = clampScrollTop(scrollPositionRef.current + deltaY, maxScrollTop);
+
     event.preventDefault();
-    props.onSpatialScroll(props.spatialLayout.scrollTop + event.deltaY);
+    if (Math.abs(nextScrollTop - scrollPositionRef.current) < 0.5) return;
+
+    scrollPositionRef.current = nextScrollTop;
+    applyRailScrollTop(nextScrollTop);
+    props.onSpatialScroll(nextScrollTop);
+  }
+
+  function applyRailScrollTop(scrollTop: number) {
+    const list = listRef.current;
+    if (!list) return;
+    applyingScrollRef.current = true;
+    list.scrollTop = scrollTop;
+    if (applyingScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(applyingScrollFrameRef.current);
+    }
+    applyingScrollFrameRef.current = window.requestAnimationFrame(() => {
+      applyingScrollRef.current = false;
+      applyingScrollFrameRef.current = null;
+    });
   }
 
   function setCardRef(threadId: string, element: HTMLElement | null) {
@@ -189,8 +241,17 @@ export function ThreadRail(props: ThreadRailProps) {
                   tabIndex={0}
                   aria-expanded={isExpanded}
                   title="Double-click to show or hide replies"
-                  onClick={() => activateThread(thread)}
-                  onDoubleClick={() => toggleThread(thread)}
+                  onClick={(event) => {
+                    if (event.detail > 1) {
+                      clearPendingActivation();
+                      return;
+                    }
+                    scheduleThreadActivation(thread);
+                  }}
+                  onDoubleClick={(event) => {
+                    event.preventDefault();
+                    toggleThread(thread);
+                  }}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") {
                       event.preventDefault();
@@ -419,6 +480,38 @@ function alignedSpatialHeight(layout: ThreadSpatialLayout | null, railViewportHe
   if (!layout) return 0;
   const viewportDelta = Math.max(0, railViewportHeight - layout.viewportHeight);
   return layout.contentHeight + viewportDelta;
+}
+
+function normalizeWheelDeltaY(event: WheelEvent<HTMLElement>, viewportHeight: number): number {
+  if (event.deltaMode === WheelEvent.DOM_DELTA_LINE) return event.deltaY * 16;
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) return event.deltaY * Math.max(viewportHeight, 1);
+  return event.deltaY;
+}
+
+function maxSpatialScrollTop(layout: ThreadSpatialLayout): number {
+  return Math.max(0, layout.contentHeight - layout.viewportHeight);
+}
+
+function clampScrollTop(scrollTop: number, maxScrollTop: number): number {
+  return Math.max(0, Math.min(scrollTop, maxScrollTop));
+}
+
+function canNestedTargetScroll(event: WheelEvent<HTMLElement>, root: HTMLElement, deltaY: number): boolean {
+  let node = event.target instanceof Element ? event.target : null;
+  while (node && node !== root) {
+    if (node instanceof HTMLElement && canElementScrollVertically(node, deltaY)) return true;
+    node = node.parentElement;
+  }
+  return false;
+}
+
+function canElementScrollVertically(element: HTMLElement, deltaY: number): boolean {
+  const style = window.getComputedStyle(element);
+  if (!/(auto|scroll)/.test(style.overflowY)) return false;
+  if (element.scrollHeight <= element.clientHeight + 1) return false;
+  if (deltaY > 0) return element.scrollTop + element.clientHeight < element.scrollHeight - 1;
+  if (deltaY < 0) return element.scrollTop > 1;
+  return false;
 }
 
 function shallowEqualNumberRecord(left: Record<string, number>, right: Record<string, number>): boolean {

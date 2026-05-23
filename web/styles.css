@@ -284,6 +284,7 @@ body.resizing .splitter::before {
 
 .preview,
 .outline {
+  overscroll-behavior: contain;
   overflow: auto;
   padding: 34px clamp(26px, 4vw, 72px) 96px;
 }
@@ -310,6 +311,7 @@ body.resizing .splitter::before {
   background: #111827;
   border-radius: 8px;
   color: #f8fafc;
+  overscroll-behavior: contain;
   overflow: auto;
   padding: 12px;
 }
@@ -345,6 +347,7 @@ body.resizing .splitter::before {
 }
 
 .diagramCanvas {
+  overscroll-behavior: contain;
   overflow: auto;
   padding: 18px;
 }
@@ -559,6 +562,7 @@ body.resizing .splitter::before {
 
 .threadList {
   background: #f8fafc;
+  overscroll-behavior: contain;
   overflow: auto;
   padding: 8px 8px 14px;
 }
@@ -895,6 +899,7 @@ body.resizing .splitter::before {
   line-height: 1.5;
   max-height: 260px;
   min-width: 0;
+  overscroll-behavior: contain;
   overflow: auto;
   overflow-wrap: anywhere;
   word-break: normal;
@@ -931,6 +936,7 @@ body.resizing .splitter::before {
   border: 1px solid var(--line);
   border-radius: 6px;
   min-height: 88px;
+  overscroll-behavior: contain;
   padding: 8px;
   resize: vertical;
   width: 100%;
@@ -1009,6 +1015,7 @@ body.resizing .splitter::before {
   line-height: 16px;
   margin-top: 8px;
   max-height: 84px;
+  overscroll-behavior: contain;
   overflow: auto;
   padding: 7px;
   white-space: pre-wrap;
@@ -1038,6 +1045,7 @@ body.resizing .splitter::before {
   line-height: 1.4;
   min-height: 88px;
   outline: 0;
+  overscroll-behavior: contain;
   padding: 10px;
   resize: vertical;
 }

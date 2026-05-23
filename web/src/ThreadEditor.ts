@@ -228,6 +228,7 @@ const editorTheme: Extension = EditorView.theme({
   ".cm-scroller": {
     fontFamily: '"SFMono-Regular", Consolas, "Liberation Mono", monospace',
     lineHeight: "1.55",
+    overscrollBehavior: "contain",
     overflow: "auto"
   },
   ".cm-content": { padding: "18px 20px 80px" },
