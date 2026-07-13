@@ -1,39 +1,36 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import os from "node:os";
+import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export class AcpDocumentAgent extends EventEmitter {
-  constructor({ documentPath, cwd, commandLine, fallbackCommandLine, timeoutMs }) {
+  constructor({ documentPath, cwd, commandLine, accessMode = "full-access", timeoutMs }) {
     super();
     this.documentPath = path.resolve(documentPath);
     this.cwd = cwd;
     this.commandLine = commandLine;
-    this.fallbackCommandLine = fallbackCommandLine;
+    this.accessMode = normalizeAgentMode(accessMode);
     this.timeoutMs = timeoutMs;
     this.protocolId = 0;
     this.pending = new Map();
-    this.sessionId = null;
+    this.initialized = false;
+    this.agentCapabilities = {};
+    this.threadSessions = new Map();
     this.process = null;
     this.stdoutBuffer = "";
     this.stderrTail = "";
     this.activeTurn = null;
     this.promptLock = Promise.resolve();
     this.pendingPermissions = new Map();
-    this.writePermission = {
-      always: false,
-      turnIds: new Set()
-    };
   }
 
   status() {
     return {
       command: parseCommandLine(this.commandLine),
-      fallbackCommand: parseCommandLine(this.fallbackCommandLine),
-      sessionId: this.sessionId,
+      accessMode: this.accessMode,
+      initialized: this.initialized,
+      sessionCount: this.threadSessions.size,
       running: Boolean(this.process && !this.process.killed),
       stderrTail: this.stderrTail,
       pendingPermissions: this.listPermissionRequests().length
@@ -44,37 +41,32 @@ export class AcpDocumentAgent extends EventEmitter {
     this.cancelPendingPermissions();
     this.failAll(new Error("ACP document session closed."));
     this.pending.clear();
-    this.sessionId = null;
+    this.initialized = false;
+    this.agentCapabilities = {};
+    this.threadSessions.clear();
     if (this.process && !this.process.killed) {
       this.process.kill();
     }
     this.process = null;
-    this.writePermission.always = false;
-    this.writePermission.turnIds.clear();
   }
 
-  async prompt({ question, document, thread, mode = "chat" }) {
-    const task = async () => {
-      try {
-        return await this.promptViaAcp({ question, document, thread, mode });
-      } catch (error) {
-        if (!this.shouldFallback(error)) {
-          throw error;
-        }
-        return this.promptViaCodexExec({ question, document, thread, mode, acpError: error });
-      }
-    };
+  async start() {
+    await this.ensureInitialized();
+  }
+
+  async prompt({ question, document, thread, mode = "chat", onSessionId }) {
+    const task = () => this.promptViaAcp({ question, document, thread, mode, onSessionId });
 
     const run = this.promptLock.then(task, task);
     this.promptLock = run.catch(() => {});
     return run;
   }
 
-  async promptViaAcp({ question, document, thread, mode }) {
-    await this.ensureSession();
+  async promptViaAcp({ question, document, thread, mode, onSessionId }) {
+    const sessionId = await this.ensureThreadSession(thread, onSessionId);
     const turn = {
       id: randomUUID(),
-      sessionId: this.sessionId,
+      sessionId,
       threadId: thread.id,
       chunks: [],
       updates: []
@@ -83,11 +75,11 @@ export class AcpDocumentAgent extends EventEmitter {
 
     try {
       const result = await this.request("session/prompt", {
-        sessionId: this.sessionId,
+        sessionId,
         prompt: [
           {
             type: "text",
-            text: buildPrompt({ question, document, thread, mode })
+            text: buildPrompt({ question, document, thread, mode, accessMode: this.accessMode })
           }
         ]
       });
@@ -103,85 +95,12 @@ export class AcpDocumentAgent extends EventEmitter {
       if (this.activeTurn?.id === turn.id) {
         this.activeTurn = null;
       }
-      this.writePermission.turnIds.delete(turn.id);
       this.cancelPendingPermissionsForTurn(turn.id);
     }
   }
 
-  async promptViaCodexExec({ question, document, thread, mode, acpError }) {
-    const [command, ...configuredArgs] = parseCommandLine(this.fallbackCommandLine || "codex");
-    if (!command) {
-      throw new Error(`ACP failed (${messageOf(acpError)}) and XUANNIAO_CODEX_CMD is empty.`);
-    }
-
-    const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-codex-"));
-    const outputPath = path.join(tempDir, "last-message.md");
-    const args = [
-      ...configuredArgs,
-      "exec",
-      "--cd",
-      this.cwd,
-      "--sandbox",
-      "read-only",
-      "--skip-git-repo-check",
-      "--color",
-      "never",
-      "--output-last-message",
-      outputPath,
-      "-"
-    ];
-
-    try {
-      const result = await runStdioProcess({
-        command,
-        args,
-        cwd: this.cwd,
-        input: buildPrompt({ question, document, thread, mode }),
-        timeoutMs: this.timeoutMs
-      });
-
-      if (result.code !== 0) {
-        throw new Error([
-          `ACP failed (${messageOf(acpError)}).`,
-          `Codex fallback exited with code ${result.code}.`,
-          result.stderr.trim() ? `stderr:\n${result.stderr.trim()}` : "",
-          result.stdout.trim() ? `stdout:\n${result.stdout.trim()}` : ""
-        ].filter(Boolean).join("\n\n"));
-      }
-
-      const content = existsSync(outputPath)
-        ? (await readFile(outputPath, "utf8")).trim()
-        : result.stdout.trim();
-
-      return {
-        content: content || "Codex fallback completed without returning text.",
-        stopReason: "codex_exec_fallback",
-        transport: "codex-exec",
-        updates: [
-          {
-            sessionUpdate: "fallback",
-            reason: messageOf(acpError)
-          }
-        ]
-      };
-    } finally {
-      await rm(tempDir, { recursive: true, force: true });
-    }
-  }
-
-  shouldFallback(error) {
-    if (process.env.XUANNIAO_DISABLE_CODEX_FALLBACK === "1") {
-      return false;
-    }
-    if (process.env.XUANNIAO_ACP_CMD) {
-      return false;
-    }
-    const message = messageOf(error);
-    return message.includes("ENOENT") || message.includes("ACP process is not writable");
-  }
-
-  async ensureSession() {
-    if (this.sessionId && this.process && !this.process.killed) {
+  async ensureInitialized() {
+    if (this.initialized && this.process && !this.process.killed) {
       return;
     }
     await this.startProcess();
@@ -206,15 +125,46 @@ export class AcpDocumentAgent extends EventEmitter {
       const ids = authMethods.map((method) => method.id || method.name || "unknown").join(", ");
       throw new Error(`ACP agent requires authentication (${ids}). Authenticate the adapter first or set XUANNIAO_ACP_SKIP_AUTH=1 if it can use existing credentials.`);
     }
+    this.agentCapabilities = init?.agentCapabilities || {};
+    this.initialized = true;
+  }
 
-    const session = await this.request("session/new", {
-      cwd: this.cwd,
-      mcpServers: []
-    });
-    if (!session?.sessionId) {
-      throw new Error("ACP session/new did not return a sessionId");
+  async ensureThreadSession(thread, onSessionId) {
+    await this.ensureInitialized();
+    const activeSessionId = this.threadSessions.get(thread.id);
+    if (activeSessionId) {
+      if (thread.acpSessionId !== activeSessionId && onSessionId) {
+        await onSessionId(activeSessionId);
+      }
+      return activeSessionId;
     }
-    this.sessionId = session.sessionId;
+
+    let sessionId = thread.acpSessionId || null;
+    if (sessionId) {
+      if (this.agentCapabilities.loadSession !== true) {
+        throw new Error("ACP agent does not support session/load; persisted thread sessions cannot be restored.");
+      }
+      await this.request("session/load", {
+        sessionId,
+        cwd: this.cwd,
+        mcpServers: []
+      });
+    } else {
+      const session = await this.request("session/new", {
+        cwd: this.cwd,
+        mcpServers: []
+      });
+      if (!session?.sessionId) {
+        throw new Error("ACP session/new did not return a sessionId");
+      }
+      sessionId = session.sessionId;
+    }
+
+    this.threadSessions.set(thread.id, sessionId);
+    if (thread.acpSessionId !== sessionId && onSessionId) {
+      await onSessionId(sessionId);
+    }
+    return sessionId;
   }
 
   async startProcess() {
@@ -227,24 +177,39 @@ export class AcpDocumentAgent extends EventEmitter {
       throw new Error("XUANNIAO_ACP_CMD is empty");
     }
 
-    this.process = spawn(command, args, {
+    const child = spawn(command, args, {
       cwd: this.cwd,
       stdio: ["pipe", "pipe", "pipe"],
-      env: process.env
+      env: {
+        ...process.env,
+        CODEX_PATH: process.env.CODEX_PATH ?? "codex",
+        INITIAL_AGENT_MODE: acpAgentMode(this.accessMode)
+      }
+    });
+    this.process = child;
+
+    await new Promise((resolve, reject) => {
+      child.once("spawn", resolve);
+      child.once("error", (error) => {
+        if (this.process === child) this.process = null;
+        reject(new Error(`Failed to start ACP command '${command}': ${error.message}`));
+      });
     });
 
-    this.process.stdout.setEncoding("utf8");
-    this.process.stdout.on("data", (chunk) => this.handleStdout(chunk));
-    this.process.stderr.setEncoding("utf8");
-    this.process.stderr.on("data", (chunk) => {
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => this.handleStdout(chunk));
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk) => {
       this.stderrTail = `${this.stderrTail}${chunk}`.slice(-4000);
     });
-    this.process.on("error", (error) => this.failAll(error));
-    this.process.on("close", (code) => {
+    child.on("error", (error) => this.failAll(error));
+    child.on("close", (code) => {
       const detail = this.stderrTail ? `\n\nstderr:\n${this.stderrTail}` : "";
       this.failAll(new Error(`ACP process exited with code ${code}.${detail}`));
-      this.process = null;
-      this.sessionId = null;
+      if (this.process === child) this.process = null;
+      this.initialized = false;
+      this.agentCapabilities = {};
+      this.threadSessions.clear();
     });
   }
 
@@ -388,8 +353,6 @@ export class AcpDocumentAgent extends EventEmitter {
       throw new Error(`permission option not found: ${optionId}`);
     }
 
-    this.applyPermissionGrant(permission, selected);
-
     permission.resolve({
       outcome: {
         outcome: "selected",
@@ -398,43 +361,21 @@ export class AcpDocumentAgent extends EventEmitter {
     });
   }
 
-  applyPermissionGrant(permission, selected) {
-    if (selected.kind === "allow_always") {
-      this.writePermission.always = true;
-      return;
-    }
-    if (selected.kind === "allow_once" && permission.turnId) {
-      this.writePermission.turnIds.add(permission.turnId);
-    }
-  }
-
   requestUserPermission(params) {
-    const turn = this.activeTurn;
-    const toolCall = params.toolCall || {};
-    const id = randomUUID();
-    const snapshot = {
-      id,
-      sessionId: params.sessionId || this.sessionId || null,
-      threadId: turn?.threadId || null,
-      toolCallId: toolCall.toolCallId || null,
-      title: toolCall.title || "Codex requests permission",
-      kind: toolCall.kind || null,
-      status: toolCall.status || null,
-      rawInput: previewRawValue(toolCall.rawInput),
-      options: normalizePermissionOptions(params.options),
-      createdAt: new Date().toISOString()
-    };
-
-    return new Promise((resolve) => {
-      this.pendingPermissions.set(id, {
-        turnId: turn?.id || null,
-        snapshot,
-        resolve: (result) => {
-          this.pendingPermissions.delete(id);
-          resolve(result);
+    const options = normalizePermissionOptions(params.options);
+    const automaticOption = this.accessMode === "full-access"
+      ? optionByPreferredKinds(options, ["allow_always", "allow_once"])
+      : optionByPreferredKinds(options, ["reject_always", "reject_once"]);
+    if (automaticOption) {
+      return Promise.resolve({
+        outcome: {
+          outcome: "selected",
+          optionId: automaticOption.optionId
         }
       });
-    });
+    }
+    return Promise.resolve({ outcome: { outcome: "cancelled" } });
+
   }
 
   cancelPendingPermissionsForTurn(turnId) {
@@ -471,11 +412,7 @@ export class AcpDocumentAgent extends EventEmitter {
 
   async readTextFile(params) {
     const requestedPath = path.resolve(String(params.path || ""));
-    if (requestedPath !== this.documentPath) {
-      throw new Error(`read denied outside active document: ${requestedPath}`);
-    }
-
-    const content = await readFile(this.documentPath, "utf8");
+    const content = await readFile(requestedPath, "utf8");
     const line = Number.isInteger(params.line) ? params.line : null;
     const limit = Number.isInteger(params.limit) ? params.limit : null;
     if (!line && !limit) {
@@ -490,14 +427,11 @@ export class AcpDocumentAgent extends EventEmitter {
 
   async writeTextFile(params) {
     const requestedPath = path.resolve(String(params.path || ""));
-    if (requestedPath !== this.documentPath) {
-      throw new Error(`write denied outside active document: ${requestedPath}`);
-    }
-    if (!this.writePermission.always && !this.writePermission.turnIds.has(this.activeTurn?.id)) {
-      throw new Error("write denied until the user approves the active permission request");
+    if (this.accessMode !== "full-access") {
+      throw new Error(`write denied in read-only mode: ${requestedPath}`);
     }
 
-    await writeFile(this.documentPath, String(params.content ?? ""), "utf8");
+    await writeFile(requestedPath, String(params.content ?? ""), "utf8");
     return {};
   }
 
@@ -518,17 +452,24 @@ function normalizePermissionOptions(options) {
   })).filter((option) => option.optionId);
 }
 
-function previewRawValue(value) {
-  if (value === undefined || value === null) return null;
-  if (typeof value === "string") {
-    return value.length > 240 ? `${value.slice(0, 240)}...` : value;
+function optionByPreferredKinds(options, kinds) {
+  for (const kind of kinds) {
+    const option = options.find((candidate) => candidate.kind === kind);
+    if (option) return option;
   }
-  try {
-    const json = JSON.stringify(value);
-    return json.length > 240 ? `${json.slice(0, 240)}...` : json;
-  } catch {
-    return String(value);
+  return null;
+}
+
+export function normalizeAgentMode(value) {
+  const mode = String(value ?? "full-access").trim().toLowerCase();
+  if (mode === "full-access" || mode === "read-only") {
+    return mode;
   }
+  throw new Error(`Unsupported XUANNIAO_AGENT_MODE: ${value}. Expected full-access or read-only.`);
+}
+
+export function acpAgentMode(value) {
+  return normalizeAgentMode(value) === "full-access" ? "agent-full-access" : "read-only";
 }
 
 export function parseCommandLine(commandLine) {
@@ -567,48 +508,8 @@ export function parseCommandLine(commandLine) {
   return tokens;
 }
 
-function runStdioProcess({ command, args, cwd, input, timeoutMs }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: process.env
-    });
-
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error(`${command} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk;
-    });
-    child.on("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({ code, stdout, stderr });
-    });
-    child.stdin.end(input);
-  });
-}
-
-function messageOf(error) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function buildPrompt({ question, document, thread, mode = "chat" }) {
+export function buildPrompt({ question, document, thread, mode = "chat", accessMode = "full-access" }) {
   const history = (thread.messages || [])
-    .slice(-12)
     .map((message) => `${message.role}: ${message.content}`)
     .join("\n\n");
 
@@ -616,11 +517,17 @@ function buildPrompt({ question, document, thread, mode = "chat" }) {
     "You are Codex collaborating with the user in Xuanniao, a local Markdown plan document workspace.",
     "The document is the source of truth. Discuss the selected details and propose precise improvements.",
     "For normal chat replies, return Markdown-compatible plain text. Use fenced code blocks for code, XML, JSON, diffs, logs, and protocol examples.",
-    "When the user asks you to change the active document, you may write only that document after Xuanniao grants an explicit permission request.",
-    "Never write files outside the active document path.",
+    accessMode === "full-access"
+      ? "Xuanniao has granted full filesystem, command, and network access for this session. Do not ask for permission before acting on the user's request."
+      : "This session is read-only. You may inspect files, but do not modify files or perform mutating operations.",
     "",
     `Document path: ${document.path}`,
     `Document title: ${document.title}`,
+    "",
+    "Complete document content:",
+    "<XUANNIAO_DOCUMENT>",
+    document.content || "",
+    "</XUANNIAO_DOCUMENT>",
     "",
     "Selected text:",
     thread.selectedText || "(no selection)",
@@ -628,7 +535,8 @@ function buildPrompt({ question, document, thread, mode = "chat" }) {
     "Anchor:",
     JSON.stringify(thread.anchor || {}),
     "",
-    "Recent thread history:",
+    "Complete current thread message history:",
+    "Treat this explicit history as authoritative if it differs from older session context.",
     history || "(new thread)",
     "",
     "Current user question:",

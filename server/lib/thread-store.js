@@ -35,6 +35,7 @@ export class ThreadStore {
       title,
       selectedText,
       anchor,
+      acpSessionId: null,
       messages: [],
       createdAt: now,
       updatedAt: now
@@ -214,7 +215,7 @@ export class ThreadStore {
     const data = JSON.parse(raw);
     return {
       version: data.version || 1,
-      threads: Array.isArray(data.threads) ? data.threads : []
+      threads: Array.isArray(data.threads) ? data.threads.map(normalizeStoredThread) : []
     };
   }
 
@@ -222,6 +223,14 @@ export class ThreadStore {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     await writeFile(this.filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
   }
+}
+
+function normalizeStoredThread(thread) {
+  return {
+    ...thread,
+    acpSessionId: typeof thread.acpSessionId === "string" && thread.acpSessionId ? thread.acpSessionId : null,
+    messages: Array.isArray(thread.messages) ? thread.messages : []
+  };
 }
 
 function makeSavedMessage(message, now) {

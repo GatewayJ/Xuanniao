@@ -29,6 +29,7 @@ await ensureDocument(documentPath);
 
 let threadStore = new ThreadStore(sidecarPathFor(documentPath));
 let agent = createAgentFor(documentPath);
+await agent.start();
 
 const server = createServer(async (req, res) => {
   try {
@@ -207,6 +208,7 @@ server.listen(port, host, () => {
   const url = `http://${host}:${port}`;
   console.log(`Xuanniao serving ${documentPath}`);
   console.log(`Open ${url}`);
+  console.log(`Agent mode: ${agent.accessMode}`);
   console.log(`ACP command: ${parseCommandLine(agent.commandLine).join(" ")}`);
 });
 
@@ -215,7 +217,7 @@ function createAgentFor(filePath) {
     documentPath: filePath,
     cwd: path.dirname(filePath),
     commandLine: process.env.XUANNIAO_ACP_CMD ?? "codex-acp",
-    fallbackCommandLine: process.env.XUANNIAO_CODEX_CMD ?? "codex",
+    accessMode: process.env.XUANNIAO_AGENT_MODE ?? "full-access",
     timeoutMs: Number(process.env.XUANNIAO_ACP_TIMEOUT_MS ?? 180000)
   });
 }
@@ -225,10 +227,12 @@ async function switchDocument(nextPath) {
   if (resolved === documentPath) {
     return;
   }
+  const nextAgent = createAgentFor(resolved);
+  await nextAgent.start();
   agent.dispose();
   documentPath = resolved;
   threadStore = new ThreadStore(sidecarPathFor(documentPath));
-  agent = createAgentFor(documentPath);
+  agent = nextAgent;
 }
 
 async function readDocumentPayload() {
@@ -252,7 +256,8 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
       question: content,
       document,
       thread,
-      mode: editRequested ? "replace-selection" : "chat"
+      mode: editRequested ? "replace-selection" : "chat",
+      onSessionId: (acpSessionId) => threadStore.updateThread(threadId, { acpSessionId })
     });
 
     if (editRequested) {
@@ -310,11 +315,11 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
         "",
         error instanceof Error ? error.message : String(error),
         "",
-        "Set XUANNIAO_ACP_CMD to an ACP-compatible Codex adapter, or configure the fallback Codex CLI:",
+        "Install codex-acp or set XUANNIAO_ACP_CMD to an ACP-compatible Codex adapter:",
         "",
         "```bash",
+        "npm install -g @agentclientprotocol/codex-acp",
         "XUANNIAO_ACP_CMD=\"/path/to/codex-acp\" npm start -- prd.md",
-        "XUANNIAO_CODEX_CMD=\"/path/to/codex\" npm start -- prd.md",
         "```"
       ].join("\n"),
       error: true

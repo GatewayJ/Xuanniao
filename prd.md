@@ -6,6 +6,13 @@
 
 其目标是：
 
+```mermaid
+flowchart LR
+  User[用户] --> Browser[浏览器文档工作区]
+  Browser --> Codex[Codex 协作]
+  Codex --> Document[Markdown 文档更新]
+```
+
 > 让用户能够在浏览器中直接围绕 Markdown 文档与 Codex 进行协作式设计、讨论与文档完善。
 
 玄鸟不强调多人协作、云同步或复杂权限。
@@ -112,7 +119,7 @@ Markdown + Browser + ACP + Local Server
 * Markdown 源文本必须稳定
 * 选区和评论必须能重新定位
 * ACP session 必须可控
-* Codex 文件读写权限必须收敛
+* Codex 权限模式必须明确，并支持从默认完全访问降级为只读
 * Patch 必须可验证后再写入
 
 因此 MVP 不应该一开始进入富文本编辑器和复杂 AST 写回。
@@ -549,8 +556,9 @@ session/prompt(result)
 ## Session 数据结构
 
 ```ts
-ACPDocumentSession {
+ACPThreadSession {
   documentPath: string
+  threadId: string
   sessionId: string
   createdAt: Date
   lastUsedAt: Date
@@ -561,20 +569,19 @@ ACPDocumentSession {
 
 # 6.3 Thread 与 ACP 的关系
 
-不要：
+当前方式：
 
 ```text
+一个文档一个 ACP 进程
 一个 thread 一个 ACP session
 ```
 
-正确方式：
-
-```text
-一个文档一个 ACP session
-多个 thread 共享 session
-```
-
 原因：
+
+* thread 讨论上下文相互隔离
+* 每轮显式注入完整文档和当前 thread 的全部消息
+* session ID 保存到 sidecar，服务重启后通过 `session/load` 恢复
+* 同一文档的 session 复用一个 ACP 进程，避免重复启动 adapter
 
 ACP session 维护：
 
@@ -1045,16 +1052,12 @@ patch
 
 # 原则四：ACP Session 长生命周期
 
-一个 Markdown 文件：
-
-对应一个 ACP session。
-
-不要频繁创建 session。
+一个 Markdown 文件对应一个 ACP 进程，每个 UI thread 对应一个长生命周期 ACP session。
 
 MVP 约束：
 
-* 同一个文档内多个 UI thread 可以共享一个 ACP session
-* server 必须串行化同一个 ACP session 的 prompt
+* 同一个文档内多个 UI thread 使用不同 ACP session
+* server 串行化同一个 ACP 进程上的 prompt
 * UI thread 历史由 玄鸟 自己保存
-* ACP session 用于保持 Codex 的工作上下文
-* 如果后续发现上下文污染严重，再增加 thread-level session 策略
+* 每轮 prompt 包含完整文档内容和当前 thread 的全部消息
+* sidecar 保存 thread 到 ACP session ID 的映射，重启后恢复原 session

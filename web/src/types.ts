@@ -77,6 +77,7 @@ export type ThreadSpatialLayout = {
 
 export type Thread = {
   id: string;
+  acpSessionId: string | null;
   title: string;
   selectedText: string;
   anchor: Anchor;
