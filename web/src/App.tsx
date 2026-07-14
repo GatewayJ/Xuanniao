@@ -28,7 +28,7 @@ export function App() {
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("edit");
   const [status, setStatus] = useState("Loading");
-  const [message, setMessage] = useState("");
+  const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
   const [editingMessage, setEditingMessage] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const [filePickerOpen, setFilePickerOpen] = useState(false);
@@ -285,7 +285,7 @@ export function App() {
       setThreads(payload.threads);
       setActiveThreadId(payload.threads[0]?.id || null);
       setMarkdownFiles(payload.files);
-      setMessage("");
+      setMessageDrafts({});
       setEditingMessage(null);
       setEditText("");
       setFilePickerOpen(false);
@@ -361,10 +361,10 @@ export function App() {
     return created.thread;
   }
 
-  async function send(askAgent: boolean) {
-    const thread = activeThread || await openOrCreateThread();
+  async function send(threadId: string, askAgent: boolean) {
+    const thread = threadsRef.current.find((item) => item.id === threadId) || null;
     if (!thread) return;
-    await sendThreadMessage(thread, message, askAgent, true);
+    await sendThreadMessage(thread, messageDrafts[thread.id] || "", askAgent, true);
   }
 
   async function sendThreadMessage(thread: Thread, content: string, askAgent: boolean, clearComposer = false) {
@@ -373,7 +373,13 @@ export function App() {
       setStatus("Type a message first");
       return;
     }
-    if (clearComposer) setMessage("");
+    if (clearComposer) {
+      setMessageDrafts((current) => {
+        const next = { ...current };
+        delete next[thread.id];
+        return next;
+      });
+    }
     setStatus(askAgent ? "Asking Codex" : "Adding comment");
     setThreads((current) => appendPendingMessage(current, thread.id, trimmed, askAgent));
 
@@ -571,7 +577,6 @@ export function App() {
         status={status}
         onOpenFileManager={() => void openFileManager()}
         onSave={() => void saveDocument()}
-        onAskSelection={() => void askSelection()}
       />
       <main className="workspace">
         <DocumentPane
@@ -593,10 +598,10 @@ export function App() {
           resolvingPermissionIds={resolvingPermissionIds}
           editingMessage={editingMessage}
           editText={editText}
-          message={message}
+          messageDrafts={messageDrafts}
           onActivate={activateThread}
           onDelete={(thread) => void deleteThread(thread)}
-          onNewThread={() => void openOrCreateThread()}
+          onAskSelection={() => void askSelection()}
           onEdit={(msg: Message) => {
             setEditingMessage(msg.id);
             setEditText(msg.content);
@@ -608,7 +613,7 @@ export function App() {
           onResolvePermission={resolvePermissionRequest}
           onSpatialScroll={syncDocumentScrollFromThreadRail}
           setEditText={setEditText}
-          setMessage={setMessage}
+          setMessageDraft={(threadId, value) => setMessageDrafts((current) => ({ ...current, [threadId]: value }))}
           onSend={send}
         />
       </main>

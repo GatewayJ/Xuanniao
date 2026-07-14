@@ -4,7 +4,8 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 const STORAGE_KEY = "xuanniao.threadWidth.v1";
 const DEFAULT_WIDTH = 360;
 const MIN_WIDTH = 320;
-const MAX_WIDTH = 560;
+const MIN_MAX_WIDTH = 560;
+const MAX_WIDTH_RATIO = 0.5;
 
 export function useThreadPaneWidth() {
   const [threadWidth, setThreadWidth] = useState(() => clampWidth(Number(localStorage.getItem(STORAGE_KEY) || DEFAULT_WIDTH)));
@@ -14,7 +15,7 @@ export function useThreadPaneWidth() {
     document.body.classList.add("resizing");
 
     const move = (moveEvent: PointerEvent) => {
-      const width = Math.min(Math.max(window.innerWidth - moveEvent.clientX - 24, MIN_WIDTH), MAX_WIDTH);
+      const width = clampWidth(window.innerWidth - moveEvent.clientX - 24);
       setThreadWidth(width);
       localStorage.setItem(STORAGE_KEY, String(Math.round(width)));
     };
@@ -33,5 +34,6 @@ export function useThreadPaneWidth() {
 
 function clampWidth(width: number): number {
   if (!Number.isFinite(width)) return DEFAULT_WIDTH;
-  return Math.min(Math.max(width, MIN_WIDTH), MAX_WIDTH);
+  const maxWidth = Math.max(MIN_MAX_WIDTH, Math.floor(window.innerWidth * MAX_WIDTH_RATIO));
+  return Math.min(Math.max(width, MIN_WIDTH), maxWidth);
 }

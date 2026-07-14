@@ -5,10 +5,9 @@ type TopBarProps = {
   status: string;
   onOpenFileManager: () => void;
   onSave: () => void;
-  onAskSelection: () => void;
 };
 
-export function TopBar({ documentPath, status, onOpenFileManager, onSave, onAskSelection }: TopBarProps) {
+export function TopBar({ documentPath, status, onOpenFileManager, onSave }: TopBarProps) {
   const fileName = documentPath.split(/[\\/]/).pop() || documentPath;
   const directory = documentPath.slice(0, Math.max(documentPath.length - fileName.length - 1, 0));
 
@@ -24,7 +23,6 @@ export function TopBar({ documentPath, status, onOpenFileManager, onSave, onAskS
       <div className="actions">
         <span className="status">{status}</span>
         <button type="button" onClick={onSave}>Save</button>
-        <button type="button" className="primaryButton" onClick={onAskSelection}>Ask Codex About Selection</button>
       </div>
     </header>
   );

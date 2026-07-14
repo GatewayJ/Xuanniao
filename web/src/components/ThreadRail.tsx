@@ -12,10 +12,10 @@ type ThreadRailProps = {
   resolvingPermissionIds: Set<string>;
   editingMessage: string | null;
   editText: string;
-  message: string;
+  messageDrafts: Record<string, string>;
   onActivate: (thread: Thread) => void;
   onDelete: (thread: Thread) => void;
-  onNewThread: () => void;
+  onAskSelection: () => void;
   onEdit: (message: Message) => void;
   onCancelEdit: () => void;
   onSaveEdit: (threadId: string, messageId: string) => void;
@@ -24,12 +24,11 @@ type ThreadRailProps = {
   onResolvePermission: (requestId: string, optionId: string | null) => void;
   onSpatialScroll: (scrollTop: number) => void;
   setEditText: (value: string) => void;
-  setMessage: (value: string) => void;
-  onSend: (askAgent: boolean) => void;
+  setMessageDraft: (threadId: string, value: string) => void;
+  onSend: (threadId: string, askAgent: boolean) => void;
 };
 
 export function ThreadRail(props: ThreadRailProps) {
-  const active = props.threads.find((thread) => thread.id === props.activeThreadId) || null;
   const listRef = useRef<HTMLDivElement | null>(null);
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
   const applyingScrollRef = useRef(false);
@@ -211,7 +210,7 @@ export function ThreadRail(props: ThreadRailProps) {
           <h2>Comments</h2>
           <p>{props.threads.length} anchored thread{props.threads.length === 1 ? "" : "s"}</p>
         </div>
-        <button type="button" className="secondaryButton" onClick={props.onNewThread}>New Thread</button>
+        <button type="button" className="primaryButton" onClick={props.onAskSelection}>Ask Selection</button>
       </div>
       <div className="threadList threadListSpatial" ref={listRef} onScroll={handleListScroll} onWheel={handleListWheel}>
         {props.threads.length === 0 && <div className="emptyState">No comments yet.</div>}
@@ -357,6 +356,22 @@ export function ThreadRail(props: ThreadRailProps) {
                         onResolve={props.onResolvePermission}
                       />
                     ))}
+                    <form
+                      className="inlineComposer"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        props.onSend(thread.id, true);
+                      }}
+                    >
+                      <textarea
+                        value={props.messageDrafts[thread.id] || ""}
+                        onChange={(event) => props.setMessageDraft(thread.id, event.target.value)}
+                        placeholder="Reply to this thread..."
+                      />
+                      <div className="inlineComposerActions">
+                        <button className="primaryButton">Ask Codex</button>
+                      </div>
+                    </form>
                   </div>
                 )}
               </div>
@@ -366,18 +381,6 @@ export function ThreadRail(props: ThreadRailProps) {
           </div>
         )}
       </div>
-      <form className="composer" onSubmit={(event) => { event.preventDefault(); props.onSend(true); }}>
-        <textarea
-          value={props.message}
-          onChange={(event) => props.setMessage(event.target.value)}
-          placeholder={active ? "Reply to this thread..." : "Select text and create a thread first."}
-          disabled={!active}
-        />
-        <div className="composerActions">
-          <button type="button" disabled={!active} onClick={() => props.onSend(false)}>Add Comment</button>
-          <button className="primaryButton" disabled={!active}>Ask Codex</button>
-        </div>
-      </form>
     </aside>
   );
 }
