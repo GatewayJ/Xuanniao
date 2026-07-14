@@ -1,23 +1,29 @@
+import { compareThreadsByAnchor, normalizeSearchText, resolveThreadAnchor } from "./thread-anchors";
 import type { Message, SelectionContext, Thread } from "./types";
 
-export function orderThreads(threads: Thread[]): Thread[] {
-  return [...threads].sort((a, b) => (a.anchor.lineStart || 999999) - (b.anchor.lineStart || 999999));
+export function orderThreads(threads: Thread[], content?: string | null): Thread[] {
+  return [...threads].sort((left, right) => compareThreadsByAnchor(left, right, content));
 }
 
 export function titleForSelection(selectedText: string): string {
   return selectedText.trim().split(/\s+/).slice(0, 10).join(" ");
 }
 
-export function findThreadForSelection(threads: Thread[], selection: SelectionContext): Thread | null {
+export function findThreadForSelection(threads: Thread[], selection: SelectionContext, content?: string | null): Thread | null {
   if (Number.isInteger(selection.anchor.start) && Number.isInteger(selection.anchor.end)) {
-    return threads.find((thread) => thread.anchor.start === selection.anchor.start && thread.anchor.end === selection.anchor.end) || null;
+    return threads.find((thread) => {
+      const location = content ? resolveThreadAnchor(content, thread) : null;
+      return (location?.start ?? thread.anchor.start) === selection.anchor.start && (location?.end ?? thread.anchor.end) === selection.anchor.end;
+    }) || null;
   }
 
   const selectedText = normalizeText(selection.selectedText);
   return threads.find((thread) => {
     if (normalizeText(thread.selectedText) !== selectedText) return false;
-    if (Number.isInteger(selection.anchor.lineStart) && Number.isInteger(thread.anchor.lineStart)) {
-      return selection.anchor.lineStart === thread.anchor.lineStart;
+    const location = content ? resolveThreadAnchor(content, thread) : null;
+    const threadLineStart = location?.lineStart ?? thread.anchor.lineStart;
+    if (Number.isInteger(selection.anchor.lineStart) && Number.isInteger(threadLineStart)) {
+      return selection.anchor.lineStart === threadLineStart;
     }
     return true;
   }) || null;
@@ -93,5 +99,5 @@ function findAssistantReplyIndex(messages: Message[], userMessageIndex: number):
 }
 
 function normalizeText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+  return normalizeSearchText(value);
 }

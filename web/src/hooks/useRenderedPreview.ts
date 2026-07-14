@@ -44,7 +44,7 @@ export function useRenderedPreview({
     if (!root || content === null) return;
 
     root.innerHTML = renderMarkdown(content);
-    decoratePreviewThreadAnchors(root, threads);
+    decoratePreviewThreadAnchors(root, threads, content);
     updatePreviewActiveThread(root, activeThreadId);
     const handleClick = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target : null;
@@ -63,7 +63,7 @@ export function useRenderedPreview({
         return;
       }
       const marker = target?.closest<HTMLElement>("[data-preview-thread-id]");
-      if (marker) onActivateThreadRef.current(marker.dataset.previewThreadId || null);
+      if (marker) onActivateThreadRef.current(marker.dataset.previewThreadId?.split(" ")[0] || null);
     };
 
     root.addEventListener("click", handleClick);
@@ -79,18 +79,20 @@ export function useRenderedPreview({
   }, [previewRef, activeThreadId]);
 }
 
-function decoratePreviewThreadAnchors(root: HTMLElement, threads: Thread[]) {
+function decoratePreviewThreadAnchors(root: HTMLElement, threads: Thread[], content: string) {
   for (const thread of threads) {
-    const block = findPreviewBlockForThread(root, thread);
+    const block = findPreviewBlockForThread(root, thread, content);
     if (!block) continue;
-    if (block.dataset.previewThreadId && block.dataset.previewThreadId !== thread.id) continue;
-    block.dataset.previewThreadId = thread.id;
+    const threadIds = new Set((block.dataset.previewThreadId || "").split(" ").filter(Boolean));
+    threadIds.add(thread.id);
+    block.dataset.previewThreadId = [...threadIds].join(" ");
     block.classList.add("threadBlockMark");
   }
 }
 
 function updatePreviewActiveThread(root: HTMLElement, activeThreadId: string | null) {
   for (const marker of root.querySelectorAll<HTMLElement>("[data-preview-thread-id]")) {
-    marker.classList.toggle("active", Boolean(activeThreadId && marker.dataset.previewThreadId === activeThreadId));
+    const threadIds = (marker.dataset.previewThreadId || "").split(" ");
+    marker.classList.toggle("active", Boolean(activeThreadId && threadIds.includes(activeThreadId)));
   }
 }

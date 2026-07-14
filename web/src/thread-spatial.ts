@@ -1,15 +1,17 @@
+import { resolveThreadAnchor } from "./thread-anchors";
 import type { Thread, ThreadSpatialLayout } from "./types";
 
-export function buildPreviewThreadLayout(root: HTMLElement | null, threads: Thread[]): ThreadSpatialLayout | null {
+export function buildPreviewThreadLayout(root: HTMLElement | null, threads: Thread[], content = ""): ThreadSpatialLayout | null {
   if (!root) return null;
 
   const positions: ThreadSpatialLayout["positions"] = {};
   for (const thread of threads) {
-    const block = findPreviewBlockForThread(root, thread);
+    const location = content ? resolveThreadAnchor(content, thread) : null;
+    const block = findPreviewBlockForThread(root, thread, content);
     if (!block) continue;
     positions[thread.id] = {
       threadId: thread.id,
-      line: thread.anchor.lineStart,
+      line: location?.lineStart ?? thread.anchor.lineStart,
       top: Math.max(0, block.offsetTop)
     };
   }
@@ -22,8 +24,9 @@ export function buildPreviewThreadLayout(root: HTMLElement | null, threads: Thre
   };
 }
 
-export function findPreviewBlockForThread(root: HTMLElement, thread: Thread): HTMLElement | null {
-  const lineStart = thread.anchor.lineStart;
+export function findPreviewBlockForThread(root: HTMLElement, thread: Thread, content = ""): HTMLElement | null {
+  const location = content ? resolveThreadAnchor(content, thread) : null;
+  const lineStart = location?.lineStart ?? thread.anchor.lineStart;
   if (!Number.isInteger(lineStart)) return null;
 
   const blocks = [...root.querySelectorAll<HTMLElement>("[data-source-line]")]

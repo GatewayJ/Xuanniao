@@ -1,13 +1,15 @@
 import { createServer } from "node:http";
 import { execFile } from "node:child_process";
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { AcpDocumentAgent, parseCommandLine } from "./lib/acp-client.js";
 import { buildBlockIndex } from "./lib/block-index.js";
+import { legacyThreadStorePathFor, threadStorePathFor } from "./lib/metadata-paths.js";
+import { reconcileThreadsForContent, remapThreadsForReplacement } from "./lib/thread-anchor-remap.js";
 import { ThreadStore } from "./lib/thread-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,7 +29,7 @@ const ignoredFileManagerDirs = new Set([".git", "node_modules", "dist", ".xuanni
 let documentPath = path.resolve(workspaceRoot, args.file ?? "prd.md");
 await ensureDocument(documentPath);
 
-let threadStore = new ThreadStore(sidecarPathFor(documentPath));
+let threadStore = await createThreadStoreFor(documentPath);
 let agent = createAgentFor(documentPath);
 await agent.start();
 
@@ -85,7 +87,14 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 400, { error: "content must be a string" });
       }
       await writeFile(documentPath, body.content, "utf8");
-      return sendJson(res, 200, await readDocumentPayload());
+      const patches = Array.isArray(body.threads) ? body.threads.map(normalizeThreadAnchorPatch).filter((patch) => patch.id) : null;
+      const deletedThreadIds = Array.isArray(body.deletedThreadIds)
+        ? [...new Set(body.deletedThreadIds.map((id) => String(id)).filter(Boolean))]
+        : [];
+      const threads = patches
+        ? await threadStore.updateAnchors(patches, deletedThreadIds)
+        : await reconcileThreadStoreForContent(body.content);
+      return sendJson(res, 200, { document: await readDocumentPayload(), threads });
     }
 
     if (url.pathname === "/api/threads" && req.method === "GET") {
@@ -105,7 +114,10 @@ const server = createServer(async (req, res) => {
     if (url.pathname === "/api/threads/anchors" && req.method === "PUT") {
       const body = await readJson(req);
       const patches = Array.isArray(body.threads) ? body.threads.map(normalizeThreadAnchorPatch).filter((patch) => patch.id) : [];
-      const threads = await threadStore.updateAnchors(patches);
+      const deletedThreadIds = Array.isArray(body.deletedThreadIds)
+        ? [...new Set(body.deletedThreadIds.map((id) => String(id)).filter(Boolean))]
+        : [];
+      const threads = await threadStore.updateAnchors(patches, deletedThreadIds);
       return sendJson(res, 200, { threads });
     }
 
@@ -231,7 +243,7 @@ async function switchDocument(nextPath) {
   await nextAgent.start();
   agent.dispose();
   documentPath = resolved;
-  threadStore = new ThreadStore(sidecarPathFor(documentPath));
+  threadStore = await createThreadStoreFor(documentPath);
   agent = nextAgent;
 }
 
@@ -269,17 +281,8 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
       const edit = applySelectionReplacement(document.content, thread, replacement);
       await writeFile(documentPath, edit.content, "utf8");
       updatedDocument = await readDocumentPayload();
-      await threadStore.updateThread(threadId, {
-        selectedText: replacement,
-        anchor: {
-          ...thread.anchor,
-          start: edit.start,
-          end: edit.start + replacement.length,
-          lineStart: lineNumberAt(edit.content, edit.start),
-          lineEnd: lineNumberAt(edit.content, edit.start + replacement.length),
-          blockId: null
-        }
-      });
+      const remapped = remapThreadsForReplacement(await threadStore.list(), document.content, edit, threadId);
+      await threadStore.updateAnchors(remapped.threads, remapped.deletedThreadIds);
       answer.content = [
         "Applied this replacement to the document:",
         "",
@@ -294,6 +297,7 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
       const latestDocument = await readDocumentPayload();
       if (latestDocument.content !== document.content) {
         updatedDocument = latestDocument;
+        await reconcileThreadStoreForContent(latestDocument.content);
       }
     }
 
@@ -581,6 +585,8 @@ function applySelectionReplacement(content, thread, replacement) {
 
   return {
     start,
+    end,
+    replacement,
     content: `${content.slice(0, start)}${replacement}${content.slice(end)}`
   };
 }
@@ -597,8 +603,16 @@ async function ensureDocument(filePath) {
   await writeFile(filePath, "", "utf8");
 }
 
-function sidecarPathFor(filePath) {
-  return path.join(path.dirname(filePath), ".xuanniao", `${path.basename(filePath)}.threads.json`);
+async function createThreadStoreFor(filePath) {
+  const storePath = threadStorePathFor(filePath);
+  const legacyStorePath = legacyThreadStorePathFor(filePath);
+
+  if (!existsSync(storePath) && existsSync(legacyStorePath)) {
+    await mkdir(path.dirname(storePath), { recursive: true });
+    await copyFile(legacyStorePath, storePath);
+  }
+
+  return new ThreadStore(storePath);
 }
 
 function normalizeAnchor(anchor) {
@@ -608,8 +622,15 @@ function normalizeAnchor(anchor) {
     end: Number.isInteger(value.end) ? value.end : null,
     lineStart: Number.isInteger(value.lineStart) ? value.lineStart : null,
     lineEnd: Number.isInteger(value.lineEnd) ? value.lineEnd : null,
-    blockId: typeof value.blockId === "string" ? value.blockId : null
+    blockId: typeof value.blockId === "string" ? value.blockId : null,
+    contextBefore: typeof value.contextBefore === "string" ? value.contextBefore.slice(-32) : null,
+    contextAfter: typeof value.contextAfter === "string" ? value.contextAfter.slice(0, 32) : null
   };
+}
+
+async function reconcileThreadStoreForContent(content) {
+  const reconciled = reconcileThreadsForContent(await threadStore.list(), content);
+  return threadStore.updateAnchors(reconciled.threads, reconciled.deletedThreadIds);
 }
 
 function normalizeThreadAnchorPatch(value) {

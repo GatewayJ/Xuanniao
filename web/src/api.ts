@@ -30,9 +30,9 @@ export const api = {
     method: "POST",
     body: { path }
   }),
-  saveDocument: (content: string) => request<DocumentPayload>("/api/document", {
+  saveDocument: (content: string, threads?: Array<{ id: string; selectedText: string; anchor: Anchor }>, deletedThreadIds: string[] = []) => request<{ document: DocumentPayload; threads: Thread[] }>("/api/document", {
     method: "PUT",
-    body: { content }
+    body: { content, threads, deletedThreadIds }
   }),
   threads: () => request<{ threads: Thread[] }>("/api/threads"),
   createThread: (body: { title: string; selectedText: string; anchor: unknown }) =>
@@ -40,10 +40,10 @@ export const api = {
       method: "POST",
       body
     }),
-  saveThreadAnchors: (threads: Array<{ id: string; selectedText: string; anchor: Anchor }>) =>
+  saveThreadAnchors: (threads: Array<{ id: string; selectedText: string; anchor: Anchor }>, deletedThreadIds: string[] = []) =>
     request<{ threads: Thread[] }>("/api/threads/anchors", {
       method: "PUT",
-      body: { threads }
+      body: { threads, deletedThreadIds }
     }),
   deleteThread: (threadId: string) =>
     request<{ threads: Thread[] }>(`/api/threads/${encodeURIComponent(threadId)}`, {

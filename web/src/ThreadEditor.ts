@@ -2,6 +2,7 @@ import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
 import { EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap, ViewPlugin, type ViewUpdate } from "@codemirror/view";
+import { anchorContextForRange, compareThreadsByAnchor, resolveThreadAnchor } from "./thread-anchors";
 import type { SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 type ChangeListener = (update: ViewUpdate) => void;
@@ -102,14 +103,16 @@ export class MarkdownThreadEditor {
         end: range.to,
         lineStart: this.view.state.doc.lineAt(range.from).number,
         lineEnd: this.view.state.doc.lineAt(range.to).number,
-        blockId: null
+        blockId: null,
+        ...anchorContextForRange(this.view.state.doc.toString(), range.from, range.to)
       }
     };
   }
 
   focusThread(thread: Thread) {
-    const start = thread.anchor.start ?? 0;
-    const end = thread.anchor.end ?? start;
+    const location = resolveThreadAnchor(this.view.state.doc.toString(), thread);
+    const start = location?.start ?? this.positionForLine(thread.anchor.lineStart) ?? 0;
+    const end = location?.end ?? start;
     this.view.dispatch({
       selection: EditorSelection.range(start, end),
       effects: activeThreadEffect.of(thread.id),
@@ -138,12 +141,14 @@ export class MarkdownThreadEditor {
 
   threadSpatialLayout(threads: Thread[]): ThreadSpatialLayout {
     const positions: ThreadSpatialLayout["positions"] = {};
+    const content = this.view.state.doc.toString();
     for (const thread of threads) {
+      const location = resolveThreadAnchor(content, thread);
       const top = this.topForThread(thread);
       if (top === null) continue;
       positions[thread.id] = {
         threadId: thread.id,
-        line: thread.anchor.lineStart,
+        line: location?.lineStart ?? thread.anchor.lineStart,
         top
       };
     }
@@ -159,13 +164,12 @@ export class MarkdownThreadEditor {
   nearestThreadForViewport(threads: Thread[]): Thread | null {
     const pos = this.view.lineBlockAtHeight(this.view.scrollDOM.scrollTop + this.view.scrollDOM.clientHeight * 0.28).from;
     const line = this.view.state.doc.lineAt(pos).number;
-    return nearestThreadForLine(threads, line);
+    return nearestThreadForLine(threads, line, this.view.state.doc.toString());
   }
 
   private topForThread(thread: Thread): number | null {
-    const pos = Number.isInteger(thread.anchor.start) && thread.anchor.start !== null
-      ? thread.anchor.start
-      : this.positionForLine(thread.anchor.lineStart);
+    const location = resolveThreadAnchor(this.view.state.doc.toString(), thread);
+    const pos = location?.start ?? this.positionForLine(thread.anchor.lineStart);
     if (pos === null) return null;
     return Math.max(0, this.view.lineBlockAt(pos).top);
   }
@@ -179,18 +183,19 @@ export class MarkdownThreadEditor {
   private threadAtPointer(event: MouseEvent): Thread | null {
     const pos = this.view.posAtCoords({ x: event.clientX, y: event.clientY });
     if (pos === null) return null;
-    return threadAtPosition(this.threads, pos);
+    return threadAtPosition(this.threads, pos, this.view.state.doc.toString());
   }
 }
 
-export function nearestThreadForLine(threads: Thread[], line: number): Thread | null {
+export function nearestThreadForLine(threads: Thread[], line: number, content?: string | null): Thread | null {
   const ordered = [...threads]
-    .filter((thread) => Number.isInteger(thread.anchor.lineStart))
-    .sort((left, right) => (left.anchor.lineStart || 0) - (right.anchor.lineStart || 0));
+    .map((thread) => ({ thread, lineStart: content ? resolveThreadAnchor(content, thread)?.lineStart ?? thread.anchor.lineStart : thread.anchor.lineStart }))
+    .filter((item): item is { thread: Thread; lineStart: number } => Number.isInteger(item.lineStart))
+    .sort((left, right) => compareThreadsByAnchor(left.thread, right.thread, content));
   if (ordered.length === 0) return null;
-  let candidate = ordered[0];
-  for (const thread of ordered) {
-    if ((thread.anchor.lineStart || 0) <= line) candidate = thread;
+  let candidate = ordered[0].thread;
+  for (const item of ordered) {
+    if (item.lineStart <= line) candidate = item.thread;
     else break;
   }
   return candidate;
@@ -198,29 +203,31 @@ export function nearestThreadForLine(threads: Thread[], line: number): Thread | 
 
 function buildDecorations(state: EditorState, threads: Thread[], activeId: string | null): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
-  for (const thread of [...threads].sort((a, b) => (a.anchor.start || 0) - (b.anchor.start || 0))) {
-    const from = thread.anchor.start;
-    const to = thread.anchor.end;
-    if (from === null || to === null || !Number.isInteger(from) || !Number.isInteger(to) || to <= from || from < 0 || to > state.doc.length) continue;
-    builder.add(from, to, Decoration.mark({
+  const content = state.doc.toString();
+  const ranges = threads
+    .map((thread) => ({ thread, location: resolveThreadAnchor(content, thread) }))
+    .filter((item): item is { thread: Thread; location: NonNullable<ReturnType<typeof resolveThreadAnchor>> } => item.location !== null)
+    .sort((left, right) => left.location.start - right.location.start || left.location.end - right.location.end);
+
+  for (const { thread, location } of ranges) {
+    builder.add(location.start, location.end, Decoration.mark({
       class: thread.id === activeId ? "cm-threadMark cm-threadMark-active" : "cm-threadMark"
     }));
   }
   return builder.finish();
 }
 
-function threadAtPosition(threads: Thread[], pos: number): Thread | null {
+function threadAtPosition(threads: Thread[], pos: number, content: string): Thread | null {
   return threads
-    .filter((thread) => {
-      const from = thread.anchor.start;
-      const to = thread.anchor.end;
-      return Number.isInteger(from) && Number.isInteger(to) && from !== null && to !== null && pos >= from && pos <= to;
-    })
+    .map((thread) => ({ thread, location: resolveThreadAnchor(content, thread) }))
+    .filter((item): item is { thread: Thread; location: NonNullable<ReturnType<typeof resolveThreadAnchor>> } => (
+      item.location !== null && pos >= item.location.start && pos <= item.location.end
+    ))
     .sort((left, right) => {
-      const leftSpan = (left.anchor.end || 0) - (left.anchor.start || 0);
-      const rightSpan = (right.anchor.end || 0) - (right.anchor.start || 0);
+      const leftSpan = left.location.end - left.location.start;
+      const rightSpan = right.location.end - right.location.start;
       return leftSpan - rightSpan;
-    })[0] || null;
+    })[0]?.thread || null;
 }
 
 const editorTheme: Extension = EditorView.theme({

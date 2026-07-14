@@ -14,6 +14,8 @@ export type Anchor = {
   lineStart: number | null;
   lineEnd: number | null;
   blockId: string | null;
+  contextBefore?: string | null;
+  contextAfter?: string | null;
 };
 
 export type DocumentPayload = {

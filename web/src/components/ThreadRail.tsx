@@ -1,8 +1,13 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type WheelEvent } from "react";
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type WheelEvent
+} from "react";
 import { renderMessageMarkdown } from "../markdown";
 import type { Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
-
-const THREAD_ACTIVATION_DELAY_MS = 180;
 
 type ThreadRailProps = {
   threads: Thread[];
@@ -33,7 +38,6 @@ export function ThreadRail(props: ThreadRailProps) {
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
   const applyingScrollRef = useRef(false);
   const applyingScrollFrameRef = useRef<number | null>(null);
-  const activationTimerRef = useRef<number | null>(null);
   const scrollPositionRef = useRef(0);
   const previousThreadIdsRef = useRef<Set<string>>(new Set(props.threads.map((thread) => thread.id)));
   const [cardHeights, setCardHeights] = useState<Record<string, number>>({});
@@ -86,7 +90,6 @@ export function ThreadRail(props: ThreadRailProps) {
     if (applyingScrollFrameRef.current !== null) {
       window.cancelAnimationFrame(applyingScrollFrameRef.current);
     }
-    clearPendingActivation();
   }, []);
 
   useLayoutEffect(() => {
@@ -122,6 +125,17 @@ export function ThreadRail(props: ThreadRailProps) {
     return placeThreadCards(threadItems, cardHeights, expandedThreadIds);
   }, [threadItems, cardHeights, expandedThreadIds]);
 
+  const threadNavigation = useMemo(() => {
+    const navigation: Record<string, { previous: Thread | null; next: Thread | null }> = {};
+    props.threads.forEach((thread, index) => {
+      navigation[thread.id] = {
+        previous: props.threads[index - 1] || null,
+        next: props.threads[index + 1] || null
+      };
+    });
+    return navigation;
+  }, [props.threads]);
+
   const spatialHeight = Math.max(
     alignedSpatialHeight(props.spatialLayout, railViewportHeight),
     ...placedThreads.map((item) => item.top + (cardHeights[item.thread.id] || estimatedThreadHeight(item.thread, expandedThreadIds.has(item.thread.id))) + 16),
@@ -129,26 +143,10 @@ export function ThreadRail(props: ThreadRailProps) {
   );
 
   function activateThread(thread: Thread) {
-    clearPendingActivation();
     props.onActivate(thread);
   }
 
-  function scheduleThreadActivation(thread: Thread) {
-    clearPendingActivation();
-    activationTimerRef.current = window.setTimeout(() => {
-      activationTimerRef.current = null;
-      props.onActivate(thread);
-    }, THREAD_ACTIVATION_DELAY_MS);
-  }
-
-  function clearPendingActivation() {
-    if (activationTimerRef.current === null) return;
-    window.clearTimeout(activationTimerRef.current);
-    activationTimerRef.current = null;
-  }
-
   function toggleThread(thread: Thread) {
-    clearPendingActivation();
     props.onActivate(thread);
     setExpandedThreadIds((current) => {
       const next = new Set(current);
@@ -219,8 +217,8 @@ export function ThreadRail(props: ThreadRailProps) {
         {placedThreads.map(({ thread, top }, index) => {
           const isActive = thread.id === props.activeThreadId;
           const isExpanded = expandedThreadIds.has(thread.id);
-          const previousThread = placedThreads[index - 1]?.thread || null;
-          const nextThread = placedThreads[index + 1]?.thread || null;
+          const previousThread = threadNavigation[thread.id]?.previous || null;
+          const nextThread = threadNavigation[thread.id]?.next || null;
           const threadPermissionRequests = props.permissionRequests.filter((request) => (
             request.threadId === thread.id || (!request.threadId && thread.id === props.activeThreadId)
           ));
@@ -234,33 +232,34 @@ export function ThreadRail(props: ThreadRailProps) {
             >
               <div className="threadAccent" aria-hidden="true" />
               <div className="threadCardBody">
-                <div
-                  className="threadCardButton"
-                  role="button"
-                  tabIndex={0}
-                  aria-expanded={isExpanded}
-                  title="Double-click to show or hide replies"
-                  onClick={(event) => {
-                    if (event.detail > 1) {
-                      clearPendingActivation();
-                      return;
-                    }
-                    scheduleThreadActivation(thread);
-                  }}
-                  onDoubleClick={(event) => {
-                    event.preventDefault();
-                    toggleThread(thread);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
+                <div className="threadCardHeader">
+                  <div
+                    className="threadCardButton"
+                    role="button"
+                    tabIndex={0}
+                    aria-expanded={isExpanded}
+                    title="Double-click to show or hide replies"
+                    onClick={(event) => {
+                      if (event.detail < 2) activateThread(thread);
+                    }}
+                    onDoubleClick={(event) => {
                       event.preventDefault();
-                      props.onActivate(thread);
-                    }
-                  }}
-                >
-                  <div className="threadAnchorHeader">
-                    <span className="threadCount">{(thread.messages || []).length} msg</span>
-                    {threadPermissionRequests.length > 0 && <span className="permissionBadge">Permission</span>}
+                      toggleThread(thread);
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        props.onActivate(thread);
+                      }
+                    }}
+                  >
+                    <div className="threadAnchorHeader">
+                      <span className="threadCount">{(thread.messages || []).length} msg</span>
+                      {threadPermissionRequests.length > 0 && <span className="permissionBadge">Permission</span>}
+                    </div>
+                    <div className="threadAnchorText">{thread.selectedText || thread.title || "Untitled thread"}</div>
+                  </div>
+                  <div className="threadCardActions">
                     <span className="threadNavControls" aria-label="Thread navigation">
                       <button
                         type="button"
@@ -268,11 +267,15 @@ export function ThreadRail(props: ThreadRailProps) {
                         aria-label="Previous thread"
                         title="Previous thread"
                         disabled={!previousThread}
-                        onClick={(event) => {
-                          event.stopPropagation();
+                        onClick={() => {
                           if (previousThread) activateThread(previousThread);
                         }}
-                        onDoubleClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => {
+                          if (previousThread && (event.key === "Enter" || event.key === " ")) {
+                            event.preventDefault();
+                            activateThread(previousThread);
+                          }
+                        }}
                       >
                         <span className="threadNavIcon up" aria-hidden="true" />
                       </button>
@@ -282,11 +285,15 @@ export function ThreadRail(props: ThreadRailProps) {
                         aria-label="Next thread"
                         title="Next thread"
                         disabled={!nextThread}
-                        onClick={(event) => {
-                          event.stopPropagation();
+                        onClick={() => {
                           if (nextThread) activateThread(nextThread);
                         }}
-                        onDoubleClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => {
+                          if (nextThread && (event.key === "Enter" || event.key === " ")) {
+                            event.preventDefault();
+                            activateThread(nextThread);
+                          }
+                        }}
                       >
                         <span className="threadNavIcon down" aria-hidden="true" />
                       </button>
@@ -305,7 +312,6 @@ export function ThreadRail(props: ThreadRailProps) {
                       Delete
                     </button>
                   </div>
-                  <div className="threadAnchorText">{thread.selectedText || thread.title || "Untitled thread"}</div>
                 </div>
                 {isExpanded && (
                   <div className="threadMessages">

@@ -10,6 +10,8 @@ import { TopBar } from "./components/TopBar";
 import { useRenderedPreview } from "./hooks/useRenderedPreview";
 import { useThreadPaneWidth } from "./hooks/useThreadPaneWidth";
 import { MarkdownThreadEditor, nearestThreadForLine } from "./ThreadEditor";
+import { anchorContextForRange, locateTextInMarkdown, resolveThreadAnchor } from "./thread-anchors";
+import { remapThreadsForChange } from "./thread-anchor-remap";
 import { buildPreviewThreadLayout } from "./thread-spatial";
 import {
   appendPendingMessage,
@@ -21,6 +23,8 @@ import {
   updateMessageWithPendingReply
 } from "./thread-utils";
 import type { DocumentPayload, MarkdownFile, Message, PermissionRequest, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
+
+const EXPLICIT_THREAD_ACTIVATION_HOLD_MS = 2500;
 
 export function App() {
   const [documentData, setDocumentData] = useState<DocumentPayload | null>(null);
@@ -42,15 +46,18 @@ export function App() {
   const editorRef = useRef<MarkdownThreadEditor | null>(null);
   const previewRef = useRef<HTMLElement | null>(null);
   const saveTimerRef = useRef<number | null>(null);
-  const anchorSaveTimerRef = useRef<number | null>(null);
+  const deletedThreadIdsRef = useRef<Set<string>>(new Set());
+  const hasPendingDocumentSaveRef = useRef(false);
   const scrollSyncFrameRef = useRef<number | null>(null);
+  const explicitThreadActivationTimerRef = useRef<number | null>(null);
+  const explicitlyActivatedThreadIdRef = useRef<string | null>(null);
   const threadsRef = useRef<Thread[]>([]);
   const activeThreadIdRef = useRef<string | null>(null);
   const modeRef = useRef<Mode>("edit");
   const { threadWidth, startResize } = useThreadPaneWidth();
 
   const activeThread = threads.find((thread) => thread.id === activeThreadId) || null;
-  const orderedThreads = useMemo(() => orderThreads(threads), [threads]);
+  const orderedThreads = useMemo(() => orderThreads(threads, documentData?.content), [threads, documentData?.content]);
   const shellStyle = { "--thread-width": `${threadWidth}px` } as CSSProperties;
 
   useEffect(() => {
@@ -69,6 +76,9 @@ export function App() {
   useEffect(() => () => {
     if (scrollSyncFrameRef.current !== null) {
       window.cancelAnimationFrame(scrollSyncFrameRef.current);
+    }
+    if (explicitThreadActivationTimerRef.current !== null) {
+      window.clearTimeout(explicitThreadActivationTimerRef.current);
     }
   }, []);
 
@@ -136,15 +146,23 @@ export function App() {
 
   function handleEditorChange(update: ViewUpdate) {
     const content = update.state.doc.toString();
-    const remappedThreads = remapThreadsForEditorChange(threadsRef.current, update);
-    if (remappedThreads !== threadsRef.current) {
-      threadsRef.current = remappedThreads;
-      setThreads(remappedThreads);
-      scheduleThreadAnchorSave(remappedThreads);
+    const remapped = remapThreadsForEditorChange(threadsRef.current, update);
+    if (remapped.threads !== threadsRef.current) {
+      threadsRef.current = remapped.threads;
+      setThreads(remapped.threads);
+      if (remapped.deletedThreadIds.includes(activeThreadIdRef.current || "")) {
+        const fallbackId = remapped.threads[0]?.id || null;
+        activeThreadIdRef.current = fallbackId;
+        setActiveThreadId(fallbackId);
+        setEditingMessage(null);
+        setEditText("");
+      }
+      for (const threadId of remapped.deletedThreadIds) deletedThreadIdsRef.current.add(threadId);
     }
     setDocumentData((current) => current ? { ...current, content } : current);
     setStatus("Editing");
     scheduleThreadSpatialSync();
+    hasPendingDocumentSaveRef.current = true;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(() => void saveDocument(content), 1000);
   }
@@ -165,8 +183,12 @@ export function App() {
     const layout = readThreadSpatialLayout();
     setThreadSpatialLayout(layout);
 
+    const explicitlyActivatedThreadId = explicitlyActivatedThreadIdRef.current;
+    if (explicitlyActivatedThreadId && threadsRef.current.some((thread) => thread.id === explicitlyActivatedThreadId)) return;
+
     const next = nearestThreadForCurrentViewport();
     if (next && next.id !== activeThreadIdRef.current) {
+      activeThreadIdRef.current = next.id;
       setActiveThreadId(next.id);
     }
   }
@@ -176,7 +198,7 @@ export function App() {
       return editorRef.current?.threadSpatialLayout(threadsRef.current) || null;
     }
     if (modeRef.current === "preview") {
-      return buildPreviewThreadLayout(previewRef.current, threadsRef.current);
+      return buildPreviewThreadLayout(previewRef.current, threadsRef.current, documentData?.content || "");
     }
     return null;
   }
@@ -187,7 +209,7 @@ export function App() {
     }
     if (modeRef.current === "preview") {
       const line = previewLineAtViewport();
-      return line ? nearestThreadForLine(threadsRef.current, line) : null;
+      return line ? nearestThreadForLine(threadsRef.current, line, documentData?.content || "") : null;
     }
     return null;
   }
@@ -216,28 +238,39 @@ export function App() {
     }
   }
 
-  async function saveDocument(content = editorRef.current?.getContent() || documentData?.content || "") {
-    const next = await api.saveDocument(content);
-    setDocumentData(next);
-    setStatus("Saved");
-  }
-
-  function scheduleThreadAnchorSave(nextThreads: Thread[]) {
-    if (anchorSaveTimerRef.current) window.clearTimeout(anchorSaveTimerRef.current);
-    anchorSaveTimerRef.current = window.setTimeout(() => void saveThreadAnchors(nextThreads), 1000);
-  }
-
-  async function saveThreadAnchors(nextThreads = threadsRef.current) {
-    anchorSaveTimerRef.current = null;
+  async function saveDocument(content = editorRef.current?.getContent() || documentData?.content || ""): Promise<boolean> {
+    saveTimerRef.current = null;
+    const threadSnapshot = threadsRef.current;
+    const deletedThreadIds = [...deletedThreadIdsRef.current];
+    deletedThreadIdsRef.current.clear();
+    hasPendingDocumentSaveRef.current = false;
     try {
-      await api.saveThreadAnchors(nextThreads.map((thread) => ({
+      const payload = await api.saveDocument(content, threadSnapshot.map((thread) => ({
         id: thread.id,
         selectedText: thread.selectedText,
         anchor: thread.anchor
-      })));
+      })), deletedThreadIds);
+      if (editorRef.current?.getContent() === content) {
+        threadsRef.current = payload.threads;
+        setThreads(payload.threads);
+        setDocumentData(payload.document);
+        setStatus("Saved");
+      }
+      return true;
     } catch (error) {
+      for (const threadId of deletedThreadIds) deletedThreadIdsRef.current.add(threadId);
+      hasPendingDocumentSaveRef.current = true;
       setStatus(error instanceof Error ? error.message : String(error));
+      return false;
     }
+  }
+
+  async function flushDocumentSave(): Promise<boolean> {
+    if (saveTimerRef.current) {
+      window.clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    return hasPendingDocumentSaveRef.current ? saveDocument() : true;
   }
 
   async function refreshFiles() {
@@ -272,12 +305,8 @@ export function App() {
         window.clearTimeout(saveTimerRef.current);
         saveTimerRef.current = null;
       }
-      if (anchorSaveTimerRef.current) {
-        window.clearTimeout(anchorSaveTimerRef.current);
-        anchorSaveTimerRef.current = null;
-      }
       if (documentData) {
-        await saveDocument();
+        if (!await flushDocumentSave()) return;
       }
       const payload = await api.openDocument(path);
       setDocumentData(payload.document);
@@ -334,7 +363,8 @@ export function App() {
         end: located?.end ?? null,
         lineStart: located?.lineStart ?? previewLines.lineStart,
         lineEnd: located?.lineEnd ?? previewLines.lineEnd,
-        blockId: null
+        blockId: null,
+        ...(located ? anchorContextForRange(content, located.start, located.end) : {})
       }
     };
   }
@@ -345,7 +375,7 @@ export function App() {
       return null;
     }
 
-    const existing = findThreadForSelection(threads, selection);
+    const existing = findThreadForSelection(threads, selection, documentData?.content);
     if (existing) {
       activateThread(existing);
       return existing;
@@ -373,6 +403,7 @@ export function App() {
       setStatus("Type a message first");
       return;
     }
+    if (!await flushDocumentSave()) return;
     if (clearComposer) {
       setMessageDrafts((current) => {
         const next = { ...current };
@@ -536,6 +567,8 @@ export function App() {
   }
 
   function activateThread(thread: Thread) {
+    holdExplicitThreadActivation(thread.id);
+    activeThreadIdRef.current = thread.id;
     setActiveThreadId(thread.id);
     if (mode === "preview") {
       scrollPreviewToThread(thread.id);
@@ -548,16 +581,32 @@ export function App() {
 
   function activateThreadById(threadId: string | null) {
     if (!threadId) {
+      activeThreadIdRef.current = null;
       setActiveThreadId(null);
       return;
     }
     const thread = threadsRef.current.find((item) => item.id === threadId);
     if (thread) activateThread(thread);
-    else setActiveThreadId(threadId);
+    else {
+      activeThreadIdRef.current = threadId;
+      setActiveThreadId(threadId);
+    }
+  }
+
+  function holdExplicitThreadActivation(threadId: string) {
+    explicitlyActivatedThreadIdRef.current = threadId;
+    if (explicitThreadActivationTimerRef.current !== null) {
+      window.clearTimeout(explicitThreadActivationTimerRef.current);
+    }
+    explicitThreadActivationTimerRef.current = window.setTimeout(() => {
+      explicitThreadActivationTimerRef.current = null;
+      explicitlyActivatedThreadIdRef.current = null;
+      scheduleThreadSpatialSync();
+    }, EXPLICIT_THREAD_ACTIVATION_HOLD_MS);
   }
 
   function scrollPreviewToThread(threadId: string) {
-    const marker = previewRef.current?.querySelector<HTMLElement>(`[data-preview-thread-id="${CSS.escape(threadId)}"]`);
+    const marker = previewRef.current?.querySelector<HTMLElement>(`[data-preview-thread-id~="${CSS.escape(threadId)}"]`);
     marker?.scrollIntoView({ block: "center", behavior: "smooth" });
   }
 
@@ -640,64 +689,23 @@ function findUserMessageBefore(messages: Message[], assistantIndex: number): Mes
   return null;
 }
 
-function remapThreadsForEditorChange(threads: Thread[], update: ViewUpdate): Thread[] {
-  let changed = false;
-  const nextThreads = threads.map((thread) => {
-    const start = thread.anchor.start;
-    const end = thread.anchor.end;
-    if (!Number.isInteger(start) || !Number.isInteger(end) || start === null || end === null) {
-      return thread;
-    }
-
-    const mappedStart = clampPosition(update.changes.mapPos(start, 1), update.state.doc.length);
-    const mappedEnd = clampPosition(update.changes.mapPos(end, -1), update.state.doc.length);
-    const nextStart = Math.min(mappedStart, mappedEnd);
-    const nextEnd = Math.max(mappedStart, mappedEnd);
-    const lineStart = update.state.doc.lineAt(nextStart).number;
-    const lineEnd = update.state.doc.lineAt(nextEnd).number;
-    const selectedText = nextEnd > nextStart ? update.state.doc.sliceString(nextStart, nextEnd) : thread.selectedText;
-
-    if (
-      nextStart === start &&
-      nextEnd === end &&
-      lineStart === thread.anchor.lineStart &&
-      lineEnd === thread.anchor.lineEnd &&
-      selectedText === thread.selectedText
-    ) {
-      return thread;
-    }
-
-    changed = true;
-    return {
-      ...thread,
-      selectedText,
-      anchor: {
-        ...thread.anchor,
-        start: nextStart,
-        end: nextEnd,
-        lineStart,
-        lineEnd
-      }
-    };
-  });
-
-  return changed ? nextThreads : threads;
-}
-
-function clampPosition(position: number, documentLength: number): number {
-  return Math.max(0, Math.min(position, documentLength));
+function remapThreadsForEditorChange(threads: Thread[], update: ViewUpdate) {
+  const selection = update.startState.selection.main;
+  const preservedThreadId = threads.find((thread) => (
+    thread.anchor.start === selection.from && thread.anchor.end === selection.to
+  ))?.id || null;
+  return remapThreadsForChange(
+    threads,
+    update.startState.doc.toString(),
+    update.state.doc.toString(),
+    update.changes,
+    preservedThreadId
+  );
 }
 
 type SourceLines = {
   lineStart: number | null;
   lineEnd: number | null;
-};
-
-type MarkdownTextLocation = {
-  start: number;
-  end: number;
-  lineStart: number;
-  lineEnd: number;
 };
 
 function sourceLinesForPreviewRange(root: HTMLElement, range: Range): SourceLines {
@@ -726,71 +734,4 @@ function sourceLineForNode(node: Node): number | null {
   const sourceBlock = element?.closest<HTMLElement>("[data-source-line]");
   const line = Number(sourceBlock?.dataset.sourceLine);
   return Number.isInteger(line) ? line : null;
-}
-
-function locateTextInMarkdown(content: string, selectedText: string, lineHint: number | null): MarkdownTextLocation | null {
-  const needle = normalizeSearchText(selectedText);
-  if (!needle) return null;
-
-  const haystack = normalizeWithOffsets(content);
-  const matches: Array<{ start: number; end: number }> = [];
-  let index = haystack.text.indexOf(needle);
-  while (index >= 0) {
-    const start = haystack.offsets[index];
-    const end = haystack.offsets[index + needle.length - 1] + 1;
-    matches.push({ start, end });
-    index = haystack.text.indexOf(needle, index + 1);
-  }
-
-  if (matches.length === 0) {
-    return null;
-  }
-
-  const best = lineHint === null
-    ? matches[0]
-    : matches.sort((left, right) => (
-      Math.abs(lineNumberAt(content, left.start) - lineHint) - Math.abs(lineNumberAt(content, right.start) - lineHint)
-    ))[0];
-
-  return {
-    ...best,
-    lineStart: lineNumberAt(content, best.start),
-    lineEnd: lineNumberAt(content, best.end)
-  };
-}
-
-function normalizeWithOffsets(value: string): { text: string; offsets: number[] } {
-  const text: string[] = [];
-  const offsets: number[] = [];
-  let previousWasSpace = false;
-
-  for (let index = 0; index < value.length; index += 1) {
-    const character = value[index];
-    if (/\s/.test(character)) {
-      if (!previousWasSpace && text.length > 0) {
-        text.push(" ");
-        offsets.push(index);
-        previousWasSpace = true;
-      }
-      continue;
-    }
-    text.push(character);
-    offsets.push(index);
-    previousWasSpace = false;
-  }
-
-  if (text[text.length - 1] === " ") {
-    text.pop();
-    offsets.pop();
-  }
-
-  return { text: text.join(""), offsets };
-}
-
-function normalizeSearchText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
-}
-
-function lineNumberAt(content: string, offset: number): number {
-  return content.slice(0, Math.max(0, offset)).split(/\r?\n/).length;
 }

@@ -174,10 +174,13 @@ export class ThreadStore {
     return thread;
   }
 
-  async updateAnchors(patches) {
+  async updateAnchors(patches, deletedThreadIds = []) {
     const data = await this.read();
     const patchById = new Map(patches.map((patch) => [patch.id, patch]));
-    let changed = false;
+    const deletedIds = new Set(deletedThreadIds);
+    const originalLength = data.threads.length;
+    data.threads = data.threads.filter((thread) => !deletedIds.has(thread.id));
+    let changed = data.threads.length !== originalLength;
     const now = new Date().toISOString();
 
     for (const thread of data.threads) {
