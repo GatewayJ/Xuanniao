@@ -22,7 +22,7 @@ import {
   titleForSelection,
   updateMessageWithPendingReply
 } from "./thread-utils";
-import type { DocumentPayload, MarkdownFile, Message, PermissionRequest, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
+import type { BranchSelection, DocumentPayload, FileBrowserPayload, Message, PermissionRequest, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 const EXPLICIT_THREAD_ACTIVATION_HOLD_MS = 2500;
 
@@ -37,7 +37,9 @@ export function App() {
   const [editText, setEditText] = useState("");
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [workspaceRoot, setWorkspaceRoot] = useState("");
-  const [markdownFiles, setMarkdownFiles] = useState<MarkdownFile[]>([]);
+  const [fileBrowser, setFileBrowser] = useState<FileBrowserPayload>({ directory: "", parent: null, selectedPath: null, entries: [] });
+  const [fileBrowserLoading, setFileBrowserLoading] = useState(false);
+  const [fileBrowserError, setFileBrowserError] = useState("");
   const [diagramViewer, setDiagramViewer] = useState<{ title: string; svg: string } | null>(null);
   const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
   const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(() => new Set());
@@ -140,7 +142,6 @@ export function App() {
     setThreads(threadPayload.threads);
     setActiveThreadId(threadPayload.threads[0]?.id || null);
     setWorkspaceRoot(filePayload.root);
-    setMarkdownFiles(filePayload.files);
     setStatus("Ready");
   }
 
@@ -273,28 +274,21 @@ export function App() {
     return hasPendingDocumentSaveRef.current ? saveDocument() : true;
   }
 
-  async function refreshFiles() {
-    const filePayload = await api.files();
-    setWorkspaceRoot(filePayload.root);
-    setMarkdownFiles(filePayload.files);
-  }
-
   async function openFileManager() {
     setFilePickerOpen(true);
-    await refreshFiles();
+    await browseFiles(documentData?.path || workspaceRoot);
   }
 
-  async function browseMarkdownFile() {
-    setStatus("Opening file picker");
+  async function browseFiles(targetPath: string) {
+    if (!targetPath.trim()) return;
+    setFileBrowserLoading(true);
+    setFileBrowserError("");
     try {
-      const result = await api.pickMarkdownFile(documentData?.path || workspaceRoot);
-      if (!result.path) {
-        setStatus("File picker canceled");
-        return;
-      }
-      await openDocument(result.path);
+      setFileBrowser(await api.browseFiles(targetPath));
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      setFileBrowserError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setFileBrowserLoading(false);
     }
   }
 
@@ -313,14 +307,16 @@ export function App() {
       editorRef.current?.setContent(payload.document.content);
       setThreads(payload.threads);
       setActiveThreadId(payload.threads[0]?.id || null);
-      setMarkdownFiles(payload.files);
       setMessageDrafts({});
       setEditingMessage(null);
       setEditText("");
       setFilePickerOpen(false);
+      setFileBrowserError("");
       setStatus("Document opened");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setFileBrowserError(message);
+      setStatus(message);
     }
   }
 
@@ -391,31 +387,49 @@ export function App() {
     return created.thread;
   }
 
-  async function send(threadId: string, askAgent: boolean) {
+  async function send(
+    threadId: string,
+    content: string,
+    draftKey: string,
+    askAgent: boolean,
+    nodeId: string | null = null,
+    parentMessageId: string | null = null,
+    branchSelection: BranchSelection | null = null,
+    adoptExistingChildren = false
+  ) {
     const thread = threadsRef.current.find((item) => item.id === threadId) || null;
     if (!thread) return;
-    await sendThreadMessage(thread, messageDrafts[thread.id] || "", askAgent, true);
+    await sendThreadMessage(thread, content, askAgent, draftKey, nodeId, parentMessageId, branchSelection, adoptExistingChildren);
   }
 
-  async function sendThreadMessage(thread: Thread, content: string, askAgent: boolean, clearComposer = false) {
+  async function sendThreadMessage(
+    thread: Thread,
+    content: string,
+    askAgent: boolean,
+    clearDraftKey: string | null = null,
+    nodeId: string | null = null,
+    parentMessageId: string | null = null,
+    branchSelection: BranchSelection | null = null,
+    adoptExistingChildren = false
+  ) {
     const trimmed = content.trim();
     if (!trimmed) {
       setStatus("Type a message first");
       return;
     }
     if (!await flushDocumentSave()) return;
-    if (clearComposer) {
+    if (clearDraftKey) {
       setMessageDrafts((current) => {
         const next = { ...current };
-        delete next[thread.id];
+        delete next[clearDraftKey];
         return next;
       });
     }
     setStatus(askAgent ? "Asking Codex" : "Adding comment");
-    setThreads((current) => appendPendingMessage(current, thread.id, trimmed, askAgent));
+    setThreads((current) => appendPendingMessage(current, thread.id, trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren));
 
     try {
-      const payload = await api.sendMessage(thread.id, { content: trimmed, askAgent });
+      const payload = await api.sendMessage(thread.id, { content: trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren });
       setThreads(payload.threads);
       if (payload.document) {
         setDocumentData(payload.document);
@@ -471,7 +485,7 @@ export function App() {
   async function retryAssistantReply(threadId: string, assistantMessageId: string) {
     const thread = threadsRef.current.find((item) => item.id === threadId);
     const assistantIndex = thread?.messages.findIndex((msg) => msg.id === assistantMessageId) ?? -1;
-    const userMessage = thread ? findUserMessageBefore(thread.messages, assistantIndex) : null;
+    const userMessage = thread ? findUserMessageForAssistant(thread.messages, assistantIndex) : null;
     if (!userMessage) {
       setStatus("No user message found for this Codex reply");
       return;
@@ -523,8 +537,15 @@ export function App() {
     const thread = threadsRef.current.find((item) => item.id === threadId);
     const target = thread?.messages.find((msg) => msg.id === messageId);
     const deletesReply = target?.role === "user" && hasAssistantReplyAfter(threadsRef.current, threadId, messageId);
+    const descendantCount = target?.role === "user" && target.nodeId === target.id && thread
+      ? countDescendantNodes(thread.messages, target.nodeId)
+      : 0;
     const confirmed = window.confirm(
-      deletesReply ? "Delete this comment and its Codex reply?" : target?.role === "user" ? "Delete this comment?" : "Delete this Codex reply?"
+      descendantCount > 0
+        ? `Delete this question, its answer, and ${descendantCount} child question${descendantCount === 1 ? "" : "s"}?`
+        : deletesReply
+          ? "Delete this question and its Codex answer?"
+          : target?.role === "user" ? "Delete this question?" : "Delete this Codex answer?"
     );
     if (!confirmed) return;
 
@@ -662,18 +683,18 @@ export function App() {
           onResolvePermission={resolvePermissionRequest}
           onSpatialScroll={syncDocumentScrollFromThreadRail}
           setEditText={setEditText}
-          setMessageDraft={(threadId, value) => setMessageDrafts((current) => ({ ...current, [threadId]: value }))}
+          setMessageDraft={(draftKey, value) => setMessageDrafts((current) => ({ ...current, [draftKey]: value }))}
           onSend={send}
         />
       </main>
       <FilePickerModal
         open={filePickerOpen}
-        root={workspaceRoot}
         currentPath={documentData?.path || ""}
-        files={markdownFiles}
+        browser={fileBrowser}
+        loading={fileBrowserLoading}
+        error={fileBrowserError}
         onClose={() => setFilePickerOpen(false)}
-        onRefresh={() => void refreshFiles()}
-        onBrowse={() => void browseMarkdownFile()}
+        onBrowse={(path) => void browseFiles(path)}
         onOpenFile={(path) => void openDocument(path)}
       />
       <DiagramViewer diagram={diagramViewer} onClose={() => setDiagramViewer(null)} />
@@ -681,12 +702,38 @@ export function App() {
   );
 }
 
-function findUserMessageBefore(messages: Message[], assistantIndex: number): Message | null {
+function findUserMessageForAssistant(messages: Message[], assistantIndex: number): Message | null {
   if (assistantIndex <= 0 || messages[assistantIndex]?.role !== "assistant") return null;
+  const parentId = messages[assistantIndex].parentId;
+  if (parentId) {
+    const parent = messages.find((message) => message.id === parentId && message.role === "user");
+    if (parent) return parent;
+  }
   for (let index = assistantIndex - 1; index >= 0; index -= 1) {
     if (messages[index].role === "user") return messages[index];
   }
   return null;
+}
+
+function countDescendantNodes(messages: Message[], rootNodeId: string): number {
+  const ids = new Set([rootNodeId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const message of messages) {
+      if (
+        message.role !== "user" ||
+        message.id !== message.nodeId ||
+        !message.nodeId ||
+        ids.has(message.nodeId) ||
+        !message.parentId ||
+        !ids.has(message.parentId)
+      ) continue;
+      ids.add(message.nodeId);
+      changed = true;
+    }
+  }
+  return ids.size - 1;
 }
 
 function remapThreadsForEditorChange(threads: Thread[], update: ViewUpdate) {

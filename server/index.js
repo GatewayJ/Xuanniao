@@ -1,20 +1,19 @@
 import { createServer } from "node:http";
-import { execFile } from "node:child_process";
 import { createReadStream, existsSync } from "node:fs";
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { AcpDocumentAgent, parseCommandLine } from "./lib/acp-client.js";
 import { buildBlockIndex } from "./lib/block-index.js";
+import { browseMarkdownDirectory } from "./lib/file-browser.js";
 import { legacyThreadStorePathFor, threadStorePathFor } from "./lib/metadata-paths.js";
 import { reconcileThreadsForContent, remapThreadsForReplacement } from "./lib/thread-anchor-remap.js";
 import { ThreadStore } from "./lib/thread-store.js";
+import { branchThreadForQuestion, conversationNode, parentQuestion, selectionComesFromNode } from "./lib/thread-tree.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const execFileAsync = promisify(execFile);
 const projectRoot = path.resolve(__dirname, "..");
 const webRoot = path.join(projectRoot, "web");
 const webDistRoot = path.join(webRoot, "dist");
@@ -54,13 +53,9 @@ const server = createServer(async (req, res) => {
       });
     }
 
-    if (url.pathname === "/api/files/pick" && req.method === "POST") {
-      const body = await readJson(req);
-      const pickedPath = await pickMarkdownFile(String(body.startPath || documentPath));
-      return sendJson(res, 200, {
-        path: pickedPath,
-        canceled: !pickedPath
-      });
+    if (url.pathname === "/api/files/browse" && req.method === "GET") {
+      const targetPath = url.searchParams.get("path") || documentPath;
+      return sendJson(res, 200, await browseMarkdownDirectory(targetPath, workspaceRoot));
     }
 
     if (url.pathname === "/api/document" && req.method === "GET") {
@@ -152,10 +147,40 @@ const server = createServer(async (req, res) => {
         return sendJson(res, 400, { error: "message content is required" });
       }
 
-      const userMessage = await threadStore.addMessage(threadId, {
+      const thread = await threadStore.get(threadId);
+      const requestedNodeId = typeof body.nodeId === "string" && body.nodeId ? body.nodeId : null;
+      const existingNode = requestedNodeId ? conversationNode(thread, requestedNodeId) : null;
+      if (requestedNodeId && !existingNode) {
+        return sendJson(res, 400, { error: `conversation node not found: ${requestedNodeId}` });
+      }
+      const parentMessageId = existingNode
+        ? existingNode.parentId || null
+        : typeof body.parentMessageId === "string" && body.parentMessageId ? body.parentMessageId : null;
+      if (!existingNode) parentQuestion(thread, parentMessageId);
+      const adoptExistingChildren = body.adoptExistingChildren === true;
+      if (adoptExistingChildren && (existingNode || !parentMessageId)) {
+        return sendJson(res, 400, { error: "continuing a branch must create a new node after an existing node" });
+      }
+
+      const branchSelection = normalizeBranchSelection(body.branchSelection);
+      if (branchSelection) {
+        const sourceNodeId = existingNode ? requestedNodeId : parentMessageId;
+        if (!sourceNodeId) return sendJson(res, 400, { error: "selected message text requires a conversation node" });
+        if (!selectionComesFromNode(thread, branchSelection, sourceNodeId)) {
+          return sendJson(res, 400, { error: "selected message text must come from the target node" });
+        }
+      }
+
+      const question = {
         role: "user",
-        content
-      });
+        content,
+        nodeId: requestedNodeId,
+        parentId: parentMessageId,
+        meta: branchSelection ? { branchSelection } : {}
+      };
+      const userMessage = adoptExistingChildren
+        ? await threadStore.insertNodeAfter(threadId, parentMessageId, question)
+        : await threadStore.addMessage(threadId, question);
 
       if (body.askAgent === false) {
         return sendJson(res, 200, {
@@ -165,7 +190,12 @@ const server = createServer(async (req, res) => {
         });
       }
 
-      const { assistantMessage, updatedDocument } = await createAssistantReply(threadId, content, (message) => threadStore.addMessage(threadId, message));
+      const { assistantMessage, updatedDocument } = await createAssistantReply(
+        threadId,
+        content,
+        userMessage.id,
+        (message) => threadStore.addMessage(threadId, { ...message, nodeId: userMessage.nodeId, parentId: userMessage.id })
+      );
 
       return sendJson(res, 200, {
         userMessage,
@@ -197,7 +227,12 @@ const server = createServer(async (req, res) => {
       let updatedDocument = null;
       if (shouldRerunAgent) {
         await threadStore.removeAssistantAfter(threadId, messageId);
-        const reply = await createAssistantReply(threadId, content, (assistant) => threadStore.addMessageAfter(threadId, messageId, assistant));
+        const reply = await createAssistantReply(
+          threadId,
+          content,
+          messageId,
+          (assistant) => threadStore.addMessageAfter(threadId, messageId, { ...assistant, nodeId: message.nodeId, parentId: messageId })
+        );
         assistantMessage = reply.assistantMessage;
         updatedDocument = reply.updatedDocument;
       }
@@ -234,6 +269,13 @@ function createAgentFor(filePath) {
   });
 }
 
+function normalizeBranchSelection(value) {
+  if (!value || typeof value !== "object") return null;
+  const sourceMessageId = typeof value.sourceMessageId === "string" ? value.sourceMessageId.trim() : "";
+  const text = typeof value.text === "string" ? value.text.replace(/\s+/g, " ").trim().slice(0, 2000) : "";
+  return sourceMessageId && text ? { sourceMessageId, text } : null;
+}
+
 async function switchDocument(nextPath) {
   const resolved = path.resolve(nextPath);
   if (resolved === documentPath) {
@@ -257,19 +299,23 @@ async function readDocumentPayload() {
   };
 }
 
-async function createAssistantReply(threadId, content, saveAssistantMessage) {
+async function createAssistantReply(threadId, content, questionMessageId, saveAssistantMessage) {
   let updatedDocument = null;
   let assistantMessage;
   try {
     const document = await readDocumentPayload();
-    const thread = await threadStore.get(threadId);
-    const editRequested = process.env.XUANNIAO_CONTROLLED_REPLACEMENT === "1" && wantsDocumentEdit(content) && canReplaceSelection(thread);
+    const storedThread = await threadStore.get(threadId);
+    const question = storedThread.messages.find((message) => message.id === questionMessageId && message.role === "user");
+    if (!question) throw new Error(`question message not found: ${questionMessageId}`);
+    const nodeId = question.nodeId || question.id;
+    const thread = branchThreadForQuestion(storedThread, questionMessageId);
+    const editRequested = process.env.XUANNIAO_CONTROLLED_REPLACEMENT === "1" && wantsDocumentEdit(content) && canReplaceSelection(storedThread);
     const answer = await agent.prompt({
       question: content,
       document,
       thread,
       mode: editRequested ? "replace-selection" : "chat",
-      onSessionId: (acpSessionId) => threadStore.updateThread(threadId, { acpSessionId })
+      onSessionId: (acpSessionId) => threadStore.updateMessageSession(threadId, nodeId, acpSessionId)
     });
 
     if (editRequested) {
@@ -278,7 +324,7 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
         throw new Error("Codex did not return a Xuanniao replacement block for the selected text.");
       }
 
-      const edit = applySelectionReplacement(document.content, thread, replacement);
+      const edit = applySelectionReplacement(document.content, storedThread, replacement);
       await writeFile(documentPath, edit.content, "utf8");
       updatedDocument = await readDocumentPayload();
       const remapped = remapThreadsForReplacement(await threadStore.list(), document.content, edit, threadId);
@@ -312,12 +358,15 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
       }
     });
   } catch (error) {
-    assistantMessage = await saveAssistantMessage({
-      role: "assistant",
-      content: [
-        "Codex request failed.",
-        "",
-        error instanceof Error ? error.message : String(error),
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const startupFailure = /Failed to start ACP command|XUANNIAO_ACP_CMD is empty/.test(errorMessage);
+    const failureContent = [
+      "Codex request failed.",
+      "",
+      errorMessage
+    ];
+    if (startupFailure) {
+      failureContent.push(
         "",
         "Install codex-acp or set XUANNIAO_ACP_CMD to an ACP-compatible Codex adapter:",
         "",
@@ -325,7 +374,13 @@ async function createAssistantReply(threadId, content, saveAssistantMessage) {
         "npm install -g @agentclientprotocol/codex-acp",
         "XUANNIAO_ACP_CMD=\"/path/to/codex-acp\" npm start -- prd.md",
         "```"
-      ].join("\n"),
+      );
+    } else {
+      failureContent.push("", "The ACP adapter is available. Retry the request or inspect the server log for details.");
+    }
+    assistantMessage = await saveAssistantMessage({
+      role: "assistant",
+      content: failureContent.join("\n"),
       error: true
     });
   }
@@ -378,161 +433,6 @@ function resolveMarkdownPath(value) {
     throw new Error("only Markdown files can be opened");
   }
   return resolved;
-}
-
-async function pickMarkdownFile(startPath) {
-  const startDir = await pickerStartDir(startPath);
-  const commands = systemPickerCommands(startDir);
-  const errors = [];
-
-  for (const command of commands) {
-    let stdout = "";
-    try {
-      ({ stdout } = await execFileAsync(command.file, command.args, { windowsHide: true }));
-    } catch (error) {
-      if (isPickerCancel(error)) {
-        return null;
-      }
-      errors.push(formatPickerError(command.file, error));
-      continue;
-    }
-
-    const pickedPath = String(stdout || "").trim();
-    if (!pickedPath) {
-      return null;
-    }
-    return resolveMarkdownPath(pickedPath);
-  }
-
-  throw new Error([
-    "System file picker is not available from this Xuanniao server.",
-    "Paste an absolute Markdown path into the path field instead.",
-    `Tried: ${errors.join("; ")}`
-  ].join(" "));
-}
-
-async function pickerStartDir(startPath) {
-  const resolved = path.isAbsolute(startPath) ? path.resolve(startPath) : path.resolve(workspaceRoot, startPath);
-  try {
-    const info = await stat(resolved);
-    return info.isDirectory() ? resolved : path.dirname(resolved);
-  } catch {
-    return workspaceRoot;
-  }
-}
-
-function systemPickerCommands(startDir) {
-  if (process.platform === "darwin") {
-    return [{
-      file: "osascript",
-      args: [
-        "-e",
-        'set pickedFile to choose file with prompt "Open Markdown File"',
-        "-e",
-        "POSIX path of pickedFile"
-      ]
-    }];
-  }
-
-  if (process.platform === "win32") {
-    const escapedDir = startDir.replace(/'/g, "''");
-    return [{
-      file: "powershell.exe",
-      args: [
-        "-NoProfile",
-        "-Command",
-        [
-          "Add-Type -AssemblyName System.Windows.Forms",
-          "$dialog = New-Object System.Windows.Forms.OpenFileDialog",
-          "$dialog.Title = 'Open Markdown File'",
-          "$dialog.Filter = 'Markdown files (*.md;*.markdown;*.mdown;*.mkdn)|*.md;*.markdown;*.mdown;*.mkdn|All files (*.*)|*.*'",
-          `$dialog.InitialDirectory = '${escapedDir}'`,
-          "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::WriteLine($dialog.FileName) }"
-        ].join("; ")
-      ]
-    }];
-  }
-
-  return [
-    {
-      file: "zenity",
-      args: [
-        "--file-selection",
-        "--title=Open Markdown File",
-        `--filename=${withTrailingSeparator(startDir)}`,
-        "--file-filter=Markdown files | *.md *.markdown *.mdown *.mkdn",
-        "--file-filter=All files | *"
-      ]
-    },
-    {
-      file: "kdialog",
-      args: [
-        "--title",
-        "Open Markdown File",
-        "--getopenfilename",
-        startDir,
-        "Markdown files (*.md *.markdown *.mdown *.mkdn)"
-      ]
-    },
-    {
-      file: "yad",
-      args: [
-        "--file",
-        "--title=Open Markdown File",
-        `--filename=${withTrailingSeparator(startDir)}`,
-        "--file-filter=Markdown files | *.md *.markdown *.mdown *.mkdn",
-        "--file-filter=All files | *"
-      ]
-    },
-    {
-      file: "qarma",
-      args: [
-        "--file-selection",
-        "--title=Open Markdown File",
-        `--filename=${withTrailingSeparator(startDir)}`,
-        "--file-filter=Markdown files | *.md *.markdown *.mdown *.mkdn",
-        "--file-filter=All files | *"
-      ]
-    },
-    {
-      file: "python3",
-      args: ["-c", tkinterPickerScript(), startDir]
-    },
-    {
-      file: "python",
-      args: ["-c", tkinterPickerScript(), startDir]
-    }
-  ];
-}
-
-function tkinterPickerScript() {
-  return [
-    "import sys",
-    "from tkinter import Tk, filedialog",
-    "root = Tk()",
-    "root.withdraw()",
-    "root.update()",
-    "picked = filedialog.askopenfilename(title='Open Markdown File', initialdir=sys.argv[1], filetypes=[('Markdown files', '*.md *.markdown *.mdown *.mkdn'), ('All files', '*.*')])",
-    "root.destroy()",
-    "print(picked)"
-  ].join("; ");
-}
-
-function withTrailingSeparator(value) {
-  return value.endsWith(path.sep) ? value : `${value}${path.sep}`;
-}
-
-function isPickerCancel(error) {
-  const code = error?.code;
-  const stderr = String(error?.stderr || "");
-  return code === 1 && (!stderr.trim() || /cancel/i.test(stderr));
-}
-
-function formatPickerError(command, error) {
-  if (error?.code === "ENOENT") {
-    return `${command} not installed`;
-  }
-  return `${command} failed`;
 }
 
 function isMarkdownPath(filePath) {

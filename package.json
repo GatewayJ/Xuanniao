@@ -6,9 +6,9 @@
   "scripts": {
     "start": "node server/index.js",
     "dev": "node server/index.js",
-    "web:dev": "vite --host 127.0.0.1 --port 5173",
+    "web:dev": "vite --host 127.0.0.1 --port 5173 --open",
     "web:build": "vite build",
-    "check": "node --check server/index.js && node --check server/lib/acp-client.js && node --check server/lib/block-index.js && node --check server/lib/metadata-paths.js && node --check server/lib/thread-anchor-remap.js && node --check server/lib/thread-store.js && tsc --noEmit && node --test server/lib/*.test.js web/src/*.test.ts"
+    "check": "node --check server/index.js && node --check server/lib/acp-client.js && node --check server/lib/block-index.js && node --check server/lib/file-browser.js && node --check server/lib/metadata-paths.js && node --check server/lib/thread-anchor-remap.js && node --check server/lib/thread-store.js && tsc --noEmit && node --test server/lib/*.test.js web/src/*.test.ts"
   },
   "dependencies": {
     "@codemirror/commands": "^6.8.0",

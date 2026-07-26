@@ -102,7 +102,71 @@ test("each thread creates or loads its own persisted ACP session", async () => {
   }]);
 });
 
-test("prompt contains the complete document and every thread message", () => {
+test("creates and persists a new session when a stored session cannot be loaded", async () => {
+  class StubAgent extends AcpDocumentAgent {
+    constructor(loadSession = true) {
+      super({
+        documentPath: "/tmp/document.md",
+        cwd: "/tmp",
+        commandLine: "codex-acp",
+        timeoutMs: 1000
+      });
+      this.calls = [];
+      this.agentCapabilities = { loadSession };
+    }
+
+    async ensureInitialized() {}
+
+    async request(method, params) {
+      this.calls.push({ method, params });
+      if (method === "session/load") throw new Error("session/load failed: Internal error");
+      return { sessionId: "replacement-session" };
+    }
+  }
+
+  for (const loadSession of [true, false]) {
+    const agent = new StubAgent(loadSession);
+    let persistedSessionId = null;
+    const thread = { id: `thread-${loadSession}`, acpSessionId: "stale-session" };
+
+    assert.equal(
+      await agent.ensureThreadSession(thread, (id) => { persistedSessionId = id; }),
+      "replacement-session"
+    );
+    assert.equal(persistedSessionId, "replacement-session");
+    assert.equal(agent.calls.at(-1).method, "session/new");
+    assert.equal(agent.calls.filter(({ method }) => method === "session/load").length, loadSession ? 1 : 0);
+  }
+});
+
+test("sibling conversation nodes use isolated ACP sessions", async () => {
+  class StubAgent extends AcpDocumentAgent {
+    constructor() {
+      super({
+        documentPath: "/tmp/document.md",
+        cwd: "/tmp",
+        commandLine: "codex-acp",
+        timeoutMs: 1000
+      });
+      this.sessionCount = 0;
+    }
+
+    async ensureInitialized() {}
+
+    async request() {
+      this.sessionCount += 1;
+      return { sessionId: `session-${this.sessionCount}` };
+    }
+  }
+
+  const agent = new StubAgent();
+  const left = await agent.ensureThreadSession({ id: "thread-1", sessionKey: "thread-1:left", acpSessionId: null });
+  const right = await agent.ensureThreadSession({ id: "thread-1", sessionKey: "thread-1:right", acpSessionId: null });
+  assert.equal(left, "session-1");
+  assert.equal(right, "session-2");
+});
+
+test("prompt contains the complete document and every supplied branch message", () => {
   const messages = Array.from({ length: 14 }, (_, index) => ({
     role: index % 2 === 0 ? "user" : "assistant",
     content: `message-${index}`
@@ -116,7 +180,24 @@ test("prompt contains the complete document and every thread message", () => {
   assert.match(prompt, /# Complete plan\n\nAll details\./);
   assert.match(prompt, /user: message-0/);
   assert.match(prompt, /assistant: message-13/);
-  assert.match(prompt, /Complete current thread message history:/);
+  assert.match(prompt, /Current conversation branch ancestor history:/);
+});
+
+test("prompt identifies the selected conversation excerpt for a focused follow-up", () => {
+  const prompt = buildPrompt({
+    question: "Why is this important?",
+    document: { path: "/tmp/plan.md", title: "plan.md", content: "# Plan" },
+    thread: {
+      selectedText: "Plan",
+      anchor: {},
+      messages: [],
+      branchSelection: { sourceMessageId: "answer-1", text: "A precise selected excerpt." }
+    }
+  });
+
+  assert.match(prompt, /<XUANNIAO_BRANCH_SELECTION>\nA precise selected excerpt\.\n<\/XUANNIAO_BRANCH_SELECTION>/);
+  assert.match(prompt, /specific subject of the current user question/);
+  assert.match(prompt, /Current user question:\nWhy is this important\?/);
 });
 
 test("startup fails when the ACP executable does not exist", async () => {

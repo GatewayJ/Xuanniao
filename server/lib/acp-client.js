@@ -131,7 +131,8 @@ export class AcpDocumentAgent extends EventEmitter {
 
   async ensureThreadSession(thread, onSessionId) {
     await this.ensureInitialized();
-    const activeSessionId = this.threadSessions.get(thread.id);
+    const sessionKey = thread.sessionKey || thread.id;
+    const activeSessionId = this.threadSessions.get(sessionKey);
     if (activeSessionId) {
       if (thread.acpSessionId !== activeSessionId && onSessionId) {
         await onSessionId(activeSessionId);
@@ -140,16 +141,21 @@ export class AcpDocumentAgent extends EventEmitter {
     }
 
     let sessionId = thread.acpSessionId || null;
-    if (sessionId) {
-      if (this.agentCapabilities.loadSession !== true) {
-        throw new Error("ACP agent does not support session/load; persisted thread sessions cannot be restored.");
+    if (sessionId && this.agentCapabilities.loadSession === true) {
+      try {
+        await this.request("session/load", {
+          sessionId,
+          cwd: this.cwd,
+          mcpServers: []
+        });
+      } catch {
+        sessionId = null;
       }
-      await this.request("session/load", {
-        sessionId,
-        cwd: this.cwd,
-        mcpServers: []
-      });
-    } else {
+    } else if (sessionId) {
+      sessionId = null;
+    }
+
+    if (!sessionId) {
       const session = await this.request("session/new", {
         cwd: this.cwd,
         mcpServers: []
@@ -160,7 +166,7 @@ export class AcpDocumentAgent extends EventEmitter {
       sessionId = session.sessionId;
     }
 
-    this.threadSessions.set(thread.id, sessionId);
+    this.threadSessions.set(sessionKey, sessionId);
     if (thread.acpSessionId !== sessionId && onSessionId) {
       await onSessionId(sessionId);
     }
@@ -512,6 +518,16 @@ export function buildPrompt({ question, document, thread, mode = "chat", accessM
   const history = (thread.messages || [])
     .map((message) => `${message.role}: ${message.content}`)
     .join("\n\n");
+  const branchSelection = thread.branchSelection?.text
+    ? [
+        "Selected excerpt from the current conversation context:",
+        "Treat this excerpt as the specific subject of the current user question.",
+        "<XUANNIAO_BRANCH_SELECTION>",
+        thread.branchSelection.text,
+        "</XUANNIAO_BRANCH_SELECTION>",
+        ""
+      ]
+    : [];
 
   const common = [
     "You are Codex collaborating with the user in Xuanniao, a local Markdown plan document workspace.",
@@ -535,10 +551,11 @@ export function buildPrompt({ question, document, thread, mode = "chat", accessM
     "Anchor:",
     JSON.stringify(thread.anchor || {}),
     "",
-    "Complete current thread message history:",
-    "Treat this explicit history as authoritative if it differs from older session context.",
+    "Current conversation branch ancestor history:",
+    "Treat this explicit branch history as authoritative. Do not infer context from sibling branches or older session context.",
     history || "(new thread)",
     "",
+    ...branchSelection,
     "Current user question:",
     question
   ];

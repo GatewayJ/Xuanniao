@@ -35,14 +35,37 @@ export type MarkdownFile = {
   active: boolean;
 };
 
+export type FileBrowserEntry = {
+  path: string;
+  name: string;
+  kind: "directory" | "file";
+  size: number | null;
+  modifiedAt: string | null;
+};
+
+export type FileBrowserPayload = {
+  directory: string;
+  parent: string | null;
+  selectedPath: string | null;
+  entries: FileBrowserEntry[];
+};
+
 export type Message = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  nodeId?: string | null;
+  parentId?: string | null;
+  acpSessionId?: string | null;
   error?: boolean;
   meta?: Record<string, unknown>;
   createdAt: string;
   updatedAt?: string;
+};
+
+export type BranchSelection = {
+  sourceMessageId: string;
+  text: string;
 };
 
 export type PermissionOption = {

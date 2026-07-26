@@ -32,7 +32,7 @@ Xuanniao is a local-first Markdown workspace for designing, discussing, and refi
 - **Codex 可修改选区**：当用户明确要求改写、翻译、替换或修改时，玄鸟要求 Codex 返回受控 replacement，并由玄鸟写入文档。
 - **可配置 Agent 权限**：默认给予 Codex 完全访问权限，也可以用 `XUANNIAO_AGENT_MODE=read-only` 启动只读会话。
 - **Mermaid 支持**：Markdown Preview 渲染 Mermaid，并支持横向滚动和全屏放大查看。
-- **系统文件选择**：可以从 workspace 外打开 Markdown 文件，也可以手动输入绝对路径。
+- **文件浏览**：可以在应用内进入目录、返回上级并打开 workspace 内外的 Markdown 文件，也可以手动输入绝对路径。
 - **Markdown 回复渲染**：thread 中的消息按 Markdown-compatible plain text 渲染，代码、XML、JSON、diff、日志建议使用 fenced code block。
 
 ### 程序架构
@@ -150,6 +150,8 @@ codex-acp --version
 ```bash
 make run
 ```
+
+前端服务就绪后会自动打开默认浏览器。
 
 默认打开：
 

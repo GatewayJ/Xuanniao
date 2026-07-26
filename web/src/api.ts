@@ -1,4 +1,4 @@
-import type { Anchor, DocumentPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
+import type { Anchor, BranchSelection, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
 
 type JsonRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
 
@@ -21,10 +21,7 @@ async function request<T>(url: string, options: JsonRequestInit = {}): Promise<T
 
 export const api = {
   files: () => request<{ root: string; currentPath: string; files: MarkdownFile[] }>("/api/files"),
-  pickMarkdownFile: (startPath: string) => request<{ path: string | null; canceled: boolean }>("/api/files/pick", {
-    method: "POST",
-    body: { startPath }
-  }),
+  browseFiles: (targetPath: string) => request<FileBrowserPayload>(`/api/files/browse?path=${encodeURIComponent(targetPath)}`),
   document: () => request<DocumentPayload>("/api/document"),
   openDocument: (path: string) => request<{ document: DocumentPayload; threads: Thread[]; files: MarkdownFile[] }>("/api/document/open", {
     method: "POST",
@@ -49,7 +46,7 @@ export const api = {
     request<{ threads: Thread[] }>(`/api/threads/${encodeURIComponent(threadId)}`, {
       method: "DELETE"
     }),
-  sendMessage: (threadId: string, body: { content: string; askAgent: boolean }) =>
+  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null; adoptExistingChildren?: boolean }) =>
     request<{ userMessage: Message; assistantMessage: Message | null; threads: Thread[]; document?: DocumentPayload }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages`,
       {

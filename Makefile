@@ -23,7 +23,7 @@ run:
 		wait $$server_pid; \
 		exit $$?; \
 	fi; \
-	XUANNIAO_API_HOST=$(SERVER_HOST) XUANNIAO_API_PORT=$(SERVER_PORT) npm exec vite -- --host $(WEB_HOST) --port $(WEB_PORT)
+	XUANNIAO_API_HOST=$(SERVER_HOST) XUANNIAO_API_PORT=$(SERVER_PORT) npm exec vite -- --host $(WEB_HOST) --port $(WEB_PORT) --open
 
 check:
 	@npm run check

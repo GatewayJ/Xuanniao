@@ -1,35 +1,46 @@
 import { useEffect, useMemo, useState } from "react";
-import type { MarkdownFile } from "../types";
+import type { FileBrowserPayload } from "../types";
 
 type FilePickerModalProps = {
   open: boolean;
-  root: string;
   currentPath: string;
-  files: MarkdownFile[];
+  browser: FileBrowserPayload;
+  loading: boolean;
+  error: string;
   onClose: () => void;
-  onRefresh: () => void;
-  onBrowse: () => void;
+  onBrowse: (path: string) => void;
   onOpenFile: (path: string) => void;
 };
 
-export function FilePickerModal({ open, root, currentPath, files, onClose, onRefresh, onBrowse, onOpenFile }: FilePickerModalProps) {
+export function FilePickerModal({ open, currentPath, browser, loading, error, onClose, onBrowse, onOpenFile }: FilePickerModalProps) {
   const [query, setQuery] = useState("");
   const [pathInput, setPathInput] = useState(currentPath);
+  const [selectedPath, setSelectedPath] = useState(currentPath);
 
   useEffect(() => {
     if (open) {
       setPathInput(currentPath);
+      setSelectedPath(currentPath);
       setQuery("");
     }
   }, [open, currentPath]);
 
-  const filteredFiles = useMemo(() => {
+  useEffect(() => {
+    if (!open || !browser.directory) return;
+    const nextPath = browser.selectedPath || browser.directory;
+    setPathInput(nextPath);
+    setSelectedPath(browser.selectedPath || "");
+  }, [open, browser.directory, browser.selectedPath]);
+
+  const filteredEntries = useMemo(() => {
     const needle = query.trim().toLowerCase();
-    if (!needle) return files;
-    return files.filter((file) => `${file.relativePath} ${file.name} ${file.directory}`.toLowerCase().includes(needle));
-  }, [files, query]);
+    if (!needle) return browser.entries;
+    return browser.entries.filter((entry) => entry.name.toLowerCase().includes(needle));
+  }, [browser.entries, query]);
 
   if (!open) return null;
+
+  const openPath = selectedPath || (pathInput.trim() !== browser.directory ? pathInput.trim() : "");
 
   return (
     <div className="modalBackdrop" role="presentation" onMouseDown={onClose}>
@@ -37,35 +48,59 @@ export function FilePickerModal({ open, root, currentPath, files, onClose, onRef
         <header className="fileModalHeader">
           <div>
             <h2 id="file-modal-title">Open Markdown File</h2>
-            <p>{root}</p>
+            <p>{browser.directory || "Loading directory..."}</p>
           </div>
           <button type="button" className="ghostButton" onClick={onClose}>Close</button>
         </header>
 
         <div className="filePathRow">
-          <input value={pathInput} onChange={(event) => setPathInput(event.target.value)} aria-label="Markdown file path" />
-          <button type="button" onClick={onBrowse}>Browse...</button>
-          <button type="button" className="primaryButton" onClick={() => onOpenFile(pathInput)}>Open</button>
+          <input
+            value={pathInput}
+            onChange={(event) => {
+              setPathInput(event.target.value);
+              setSelectedPath("");
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && pathInput.trim()) onBrowse(pathInput.trim());
+            }}
+            aria-label="File or directory path"
+          />
+          <button type="button" disabled={!pathInput.trim() || loading} onClick={() => onBrowse(pathInput.trim())}>Go</button>
+          <button type="button" className="primaryButton" disabled={!openPath || loading} onClick={() => onOpenFile(openPath)}>Open</button>
         </div>
 
         <div className="fileToolbar">
           <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search markdown files..." aria-label="Search markdown files" />
-          <button type="button" onClick={onRefresh}>Refresh</button>
+          <div className="fileToolbarActions">
+            <button type="button" disabled={!browser.parent || loading} onClick={() => browser.parent && onBrowse(browser.parent)}>Up</button>
+            <button type="button" disabled={!browser.directory || loading} onClick={() => onBrowse(browser.directory)}>Refresh</button>
+          </div>
         </div>
 
+        {error && <div className="fileBrowserError" role="alert">{error}</div>}
         <div className="fileList">
-          {filteredFiles.length === 0 && <div className="emptyState">No Markdown files found.</div>}
-          {filteredFiles.map((file) => (
+          {loading && <div className="emptyState">Loading...</div>}
+          {!loading && filteredEntries.length === 0 && <div className="emptyState">No folders or Markdown files found.</div>}
+          {!loading && filteredEntries.map((entry) => (
             <button
-              key={file.path}
+              key={entry.path}
               type="button"
-              className={file.active ? "fileRow active" : "fileRow"}
-              onClick={() => setPathInput(file.relativePath)}
-              onDoubleClick={() => onOpenFile(file.relativePath)}
+              className={entry.path === selectedPath || entry.path === currentPath ? "fileRow active" : "fileRow"}
+              onClick={() => {
+                if (entry.kind === "directory") {
+                  onBrowse(entry.path);
+                  return;
+                }
+                setSelectedPath(entry.path);
+                setPathInput(entry.path);
+              }}
+              onDoubleClick={() => entry.kind === "file" && onOpenFile(entry.path)}
             >
-              <span className="fileName">{file.name}</span>
-              <span className="fileDir">{file.directory || "workspace root"}</span>
-              <span className="fileMeta">{formatFileSize(file.size)} - {formatDate(file.modifiedAt)}</span>
+              <span className="fileName">{entry.kind === "directory" ? `▸ ${entry.name}` : entry.name}</span>
+              <span className="fileDir">{entry.kind === "directory" ? "Folder" : "Markdown file"}</span>
+              {entry.kind === "file" && entry.size !== null && entry.modifiedAt && (
+                <span className="fileMeta">{formatFileSize(entry.size)} - {formatDate(entry.modifiedAt)}</span>
+              )}
             </button>
           ))}
         </div>

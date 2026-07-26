@@ -1,5 +1,6 @@
 import { compareThreadsByAnchor, normalizeSearchText, resolveThreadAnchor } from "./thread-anchors";
-import type { Message, SelectionContext, Thread } from "./types";
+import { reparentDirectChildNodes } from "./thread-tree";
+import type { BranchSelection, Message, SelectionContext, Thread } from "./types";
 
 export function orderThreads(threads: Thread[], content?: string | null): Thread[] {
   return [...threads].sort((left, right) => compareThreadsByAnchor(left, right, content));
@@ -33,10 +34,29 @@ export function insertThreadOnce(threads: Thread[], thread: Thread): Thread[] {
   return threads.some((item) => item.id === thread.id) ? threads : [thread, ...threads];
 }
 
-export function appendPendingMessage(threads: Thread[], threadId: string, content: string, askAgent: boolean): Thread[] {
+export function appendPendingMessage(
+  threads: Thread[],
+  threadId: string,
+  content: string,
+  askAgent: boolean,
+  nodeId: string | null = null,
+  parentMessageId: string | null = null,
+  branchSelection: BranchSelection | null = null,
+  adoptExistingChildren = false
+): Thread[] {
   const now = new Date().toISOString();
+  const pendingQuestionId = `pending-${Date.now()}`;
+  const pendingNodeId = nodeId || pendingQuestionId;
   const pendingMessages: Message[] = [
-    { id: `pending-${Date.now()}`, role: "user", content, createdAt: now }
+    {
+      id: pendingQuestionId,
+      role: "user",
+      content,
+      nodeId: pendingNodeId,
+      parentId: parentMessageId,
+      meta: branchSelection ? { branchSelection } : {},
+      createdAt: now
+    }
   ];
 
   if (askAgent) {
@@ -44,14 +64,19 @@ export function appendPendingMessage(threads: Thread[], threadId: string, conten
       id: `pending-agent-${Date.now()}`,
       role: "assistant",
       content: "Working with local Codex...",
+      nodeId: pendingNodeId,
+      parentId: pendingQuestionId,
       createdAt: now
     });
   }
 
-  return threads.map((thread) => thread.id === threadId ? {
-    ...thread,
-    messages: [...thread.messages, ...pendingMessages]
-  } : thread);
+  return threads.map((thread) => {
+    if (thread.id !== threadId) return thread;
+    const messages = adoptExistingChildren && parentMessageId
+      ? reparentDirectChildNodes(thread.messages, parentMessageId, pendingNodeId)
+      : thread.messages;
+    return { ...thread, messages: [...messages, ...pendingMessages] };
+  });
 }
 
 export function hasAssistantReplyAfter(threads: Thread[], threadId: string, messageId: string): boolean {
@@ -76,6 +101,8 @@ export function updateMessageWithPendingReply(threads: Thread[], threadId: strin
         id: `pending-agent-${Date.now()}`,
         role: "assistant",
         content: "Updating Codex reply...",
+        nodeId: messages[index].nodeId || messageId,
+        parentId: messageId,
         createdAt: new Date().toISOString()
       };
       const assistantIndex = findAssistantReplyIndex(messages, index);
@@ -91,6 +118,9 @@ export function updateMessageWithPendingReply(threads: Thread[], threadId: strin
 }
 
 function findAssistantReplyIndex(messages: Message[], userMessageIndex: number): number {
+  const userMessageId = messages[userMessageIndex]?.id;
+  const linkedIndex = messages.findIndex((message) => message.role === "assistant" && message.parentId === userMessageId);
+  if (linkedIndex >= 0) return linkedIndex;
   for (let index = userMessageIndex + 1; index < messages.length; index += 1) {
     if (messages[index].role === "assistant") return index;
     if (messages[index].role === "user") return -1;
