@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildConversationTree, conversationBreadcrumb, conversationNavigation, flattenConversationTree, reparentDirectChildNodes } from "./thread-tree.ts";
+import { buildConversationTree, conversationBreadcrumb, conversationNavigation, flattenConversationTree, reparentConversationNode, reparentDirectChildNodes } from "./thread-tree.ts";
 import type { Message } from "./types.ts";
 
 const at = "2026-07-22T00:00:00.000Z";
@@ -69,6 +69,22 @@ test("leaves existing children in place when creating a sibling child branch", (
   ];
 
   assert.deepEqual(buildConversationTree(messages)[0].children[0].children.map((node) => node.id), ["c", "d"]);
+});
+
+test("inserts a node into one selected path without moving sibling branches", () => {
+  const messages: Message[] = [
+    { id: "a", role: "user", content: "A", nodeId: "a", parentId: null, createdAt: at },
+    { id: "b", role: "user", content: "B", nodeId: "b", parentId: "a", createdAt: at },
+    { id: "c", role: "user", content: "C", nodeId: "c", parentId: "b", createdAt: at },
+    { id: "sibling", role: "user", content: "Sibling", nodeId: "sibling", parentId: "b", createdAt: at },
+    { id: "d", role: "user", content: "D", nodeId: "d", parentId: "b", createdAt: at }
+  ];
+  const roots = buildConversationTree(reparentConversationNode(messages, "c", "d"));
+  const b = flattenConversationTree(roots).find((node) => node.id === "b")!;
+  const d = flattenConversationTree(roots).find((node) => node.id === "d")!;
+
+  assert.deepEqual(b.children.map((node) => node.id), ["sibling", "d"]);
+  assert.deepEqual(d.children.map((node) => node.id), ["c"]);
 });
 
 test("maps four-way navigation to parent, first child, and adjacent siblings", () => {

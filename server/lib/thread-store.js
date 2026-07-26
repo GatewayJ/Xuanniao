@@ -60,7 +60,7 @@ export class ThreadStore {
     return saved;
   }
 
-  async insertNodeAfter(threadId, parentNodeId, message) {
+  async insertNodeAfter(threadId, parentNodeId, message, insertBeforeNodeId = null) {
     const data = await this.read();
     const thread = data.threads.find((item) => item.id === threadId);
     if (!thread) {
@@ -80,6 +80,7 @@ export class ThreadStore {
         existing.role === "user"
         && existing.id === (existing.nodeId || existing.id)
         && existing.parentId === parentNodeId
+        && (!insertBeforeNodeId || existing.nodeId === insertBeforeNodeId)
       ) {
         existing.parentId = saved.nodeId;
       }

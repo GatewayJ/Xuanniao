@@ -38,5 +38,9 @@ test("lays out siblings as a multi-way tree without overlap", () => {
   assert.equal(left.y, THREAD_CANVAS_NODE_HEIGHT + THREAD_CANVAS_VERTICAL_GAP);
   assert.equal(leaf.y, 2 * (THREAD_CANVAS_NODE_HEIGHT + THREAD_CANVAS_VERTICAL_GAP));
   assert.equal(layout.connectors.length, 4);
+  assert.deepEqual(
+    layout.connectors.map(({ fromNodeId, toNodeId }) => `${fromNodeId}:${toNodeId}`),
+    ["root:left", "root:middle", "root:right", "middle:leaf"]
+  );
   assert.ok(layout.bounds.left < 0 && layout.bounds.right > 0);
 });

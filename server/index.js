@@ -158,8 +158,17 @@ const server = createServer(async (req, res) => {
         : typeof body.parentMessageId === "string" && body.parentMessageId ? body.parentMessageId : null;
       if (!existingNode) parentQuestion(thread, parentMessageId);
       const adoptExistingChildren = body.adoptExistingChildren === true;
-      if (adoptExistingChildren && (existingNode || !parentMessageId)) {
+      const insertBeforeNodeId = typeof body.insertBeforeNodeId === "string" && body.insertBeforeNodeId
+        ? body.insertBeforeNodeId
+        : null;
+      if ((adoptExistingChildren || insertBeforeNodeId) && (existingNode || !parentMessageId)) {
         return sendJson(res, 400, { error: "continuing a branch must create a new node after an existing node" });
+      }
+      if (insertBeforeNodeId) {
+        const insertBeforeNode = conversationNode(thread, insertBeforeNodeId);
+        if (!insertBeforeNode || insertBeforeNode.parentId !== parentMessageId) {
+          return sendJson(res, 400, { error: "insert target must be a direct child of the parent node" });
+        }
       }
 
       const branchSelection = normalizeBranchSelection(body.branchSelection);
@@ -178,8 +187,8 @@ const server = createServer(async (req, res) => {
         parentId: parentMessageId,
         meta: branchSelection ? { branchSelection } : {}
       };
-      const userMessage = adoptExistingChildren
-        ? await threadStore.insertNodeAfter(threadId, parentMessageId, question)
+      const userMessage = adoptExistingChildren || insertBeforeNodeId
+        ? await threadStore.insertNodeAfter(threadId, parentMessageId, question, insertBeforeNodeId)
         : await threadStore.addMessage(threadId, question);
 
       if (body.askAgent === false) {

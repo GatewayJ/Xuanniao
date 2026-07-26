@@ -14,6 +14,8 @@ export type ThreadCanvasNodeLayout = {
 
 export type ThreadCanvasConnector = {
   id: string;
+  fromNodeId: string;
+  toNodeId: string;
   fromX: number;
   fromY: number;
   toX: number;
@@ -81,6 +83,8 @@ export function layoutConversationTree(roots: ConversationNode[]): ThreadCanvasL
     const childLayout = positions.get(child.id);
     return childLayout ? {
       id: `${item.node.id}:${child.id}`,
+      fromNodeId: item.node.id,
+      toNodeId: child.id,
       fromX: item.x,
       fromY: item.y + THREAD_CANVAS_NODE_HEIGHT / 2,
       toX: childLayout.x,

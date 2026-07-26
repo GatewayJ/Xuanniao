@@ -1,5 +1,5 @@
 import { compareThreadsByAnchor, normalizeSearchText, resolveThreadAnchor } from "./thread-anchors";
-import { reparentDirectChildNodes } from "./thread-tree";
+import { reparentConversationNode, reparentDirectChildNodes } from "./thread-tree";
 import type { BranchSelection, Message, SelectionContext, Thread } from "./types";
 
 export function orderThreads(threads: Thread[], content?: string | null): Thread[] {
@@ -42,7 +42,8 @@ export function appendPendingMessage(
   nodeId: string | null = null,
   parentMessageId: string | null = null,
   branchSelection: BranchSelection | null = null,
-  adoptExistingChildren = false
+  adoptExistingChildren = false,
+  insertBeforeNodeId: string | null = null
 ): Thread[] {
   const now = new Date().toISOString();
   const pendingQuestionId = `pending-${Date.now()}`;
@@ -72,9 +73,11 @@ export function appendPendingMessage(
 
   return threads.map((thread) => {
     if (thread.id !== threadId) return thread;
-    const messages = adoptExistingChildren && parentMessageId
-      ? reparentDirectChildNodes(thread.messages, parentMessageId, pendingNodeId)
-      : thread.messages;
+    const messages = insertBeforeNodeId
+      ? reparentConversationNode(thread.messages, insertBeforeNodeId, pendingNodeId)
+      : adoptExistingChildren && parentMessageId
+        ? reparentDirectChildNodes(thread.messages, parentMessageId, pendingNodeId)
+        : thread.messages;
     return { ...thread, messages: [...messages, ...pendingMessages] };
   });
 }

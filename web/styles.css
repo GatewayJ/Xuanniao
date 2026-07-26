@@ -1601,6 +1601,21 @@ body.resizing .splitter::before {
   transition: none;
 }
 
+.threadCanvasViewport.focusMode .threadCanvasNode {
+  filter: saturate(0.72);
+  opacity: 0.32;
+}
+
+.threadCanvasViewport.focusMode .threadCanvasNode:hover,
+.threadCanvasViewport.focusMode .threadCanvasNode:focus-within {
+  filter: none;
+  opacity: 0.9;
+}
+
+.threadCanvasViewport.focusMode .threadCanvasConnectors path:not(.insertTarget):not(.ghostConnector) {
+  opacity: 0.35;
+}
+
 .threadCanvasHint {
   background: rgba(255, 255, 255, 0.84);
   border: 1px solid rgba(217, 224, 233, 0.92);
@@ -1672,7 +1687,7 @@ body.resizing .splitter::before {
   position: absolute;
   top: 0;
   transform-origin: 0 0;
-  transition: transform 140ms ease-out;
+  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
   width: 0;
 }
 
@@ -1691,6 +1706,18 @@ body.resizing .splitter::before {
   stroke: #b9c5d4;
   stroke-linecap: round;
   stroke-width: 1.7;
+  transition: opacity 180ms ease, stroke 180ms ease, stroke-width 180ms ease;
+}
+
+.threadCanvasConnectors path.insertTarget {
+  stroke: var(--accent);
+  stroke-width: 2.5;
+}
+
+.threadCanvasConnectors path.ghostConnector {
+  stroke: #6f9cea;
+  stroke-dasharray: 7 6;
+  stroke-width: 2;
 }
 
 .threadCanvasNode {
@@ -1699,7 +1726,14 @@ body.resizing .splitter::before {
   border-radius: 12px;
   box-shadow: 0 8px 20px rgba(30, 41, 59, 0.1);
   position: absolute;
-  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
+  transition:
+    border-color 150ms ease,
+    box-shadow 150ms ease,
+    filter 180ms ease,
+    left 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 180ms ease,
+    top 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    transform 150ms ease;
   z-index: 2;
 }
 
@@ -1808,6 +1842,46 @@ body.resizing .splitter::before {
   font-weight: 650;
 }
 
+.threadCanvasEdgeInsert {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #b7c4d4;
+  border-radius: 999px;
+  box-shadow: 0 3px 9px rgba(30, 41, 59, 0.14);
+  color: #58708f;
+  display: inline-flex;
+  font-size: 15px;
+  height: 24px;
+  justify-content: center;
+  min-height: 24px;
+  opacity: 0.58;
+  padding: 0 0 2px;
+  position: absolute;
+  transform: translate(-50%, -50%);
+  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease, scale 140ms ease;
+  width: 24px;
+  z-index: 4;
+}
+
+.threadCanvasEdgeInsert:hover,
+.threadCanvasEdgeInsert:focus-visible,
+.threadCanvasEdgeInsert.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+  opacity: 1;
+  scale: 1.12;
+}
+
+.threadCanvasViewport.focusMode .threadCanvasEdgeInsert:not(.active) {
+  opacity: 0.18;
+}
+
+.threadCanvasViewport.focusMode .threadCanvasEdgeInsert:hover,
+.threadCanvasViewport.focusMode .threadCanvasEdgeInsert:focus-visible {
+  opacity: 1;
+}
+
 .threadCanvasRootPlaceholder {
   align-items: center;
   background: rgba(255, 255, 255, 0.9);
@@ -1836,6 +1910,273 @@ body.resizing .splitter::before {
   height: 30px;
   justify-content: center;
   width: 30px;
+}
+
+.threadCanvasFocusNode {
+  animation: threadFocusNodeIn 240ms cubic-bezier(0.22, 1, 0.36, 1);
+  background: rgba(255, 255, 255, 0.99);
+  border: 1px solid #bdcbe0;
+  border-radius: 16px;
+  box-shadow:
+    0 0 0 1px rgba(255, 255, 255, 0.75),
+    0 26px 70px rgba(30, 41, 59, 0.24);
+  cursor: default;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  position: absolute;
+  transform-origin: center;
+  user-select: text;
+  -webkit-user-select: text;
+  z-index: 20;
+}
+
+@keyframes threadFocusNodeIn {
+  from {
+    opacity: 0.3;
+    transform: scale(0.92);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.threadCanvasFocusHeader {
+  align-items: center;
+  background: rgba(251, 252, 254, 0.96);
+  border-bottom: 1px solid #e4e9f0;
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 54px;
+  padding: 10px 14px 10px 18px;
+  position: relative;
+  z-index: 22;
+}
+
+.threadCanvasFocusNode .threadCanvasInspectorContent {
+  cursor: default;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 2px 22px 14px;
+  touch-action: pan-y;
+}
+
+.threadCanvasFocusNode .message,
+.threadCanvasFocusNode .messageBody,
+.threadCanvasFocusNode .messageContent {
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.threadCanvasFocusNode .messageContent {
+  cursor: text;
+}
+
+.threadCanvasFocusNode .messageContent::selection,
+.threadCanvasFocusNode .messageContent *::selection {
+  background: #a9c7ff;
+  color: #132a4f;
+  text-shadow: none;
+}
+
+.threadCanvasFocusNode button,
+.threadCanvasFocusNode textarea,
+.threadCanvasFocusNode input,
+.threadCanvasFocusNode select,
+.threadCanvasFocusNode label,
+.threadCanvasFocusNode .messageAvatar,
+.threadCanvasFocusNode .messageRole {
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.threadFocusComposer {
+  gap: 7px;
+  padding: 11px 18px 13px;
+}
+
+.threadFocusComposer textarea {
+  min-height: 62px;
+  resize: none;
+}
+
+.threadFocusComposerTopline {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.threadFocusComposerTopline label {
+  align-items: center;
+  display: flex;
+  min-width: 0;
+}
+
+.threadFocusComposerTopline select,
+.threadSelectionComposer select {
+  background: #f5f8fc;
+  border: 1px solid #d6deea;
+  border-radius: 6px;
+  color: #52657c;
+  font-size: 10px;
+  height: 28px;
+  max-width: 250px;
+  outline: none;
+  padding: 0 26px 0 8px;
+}
+
+.threadFocusComposerTopline select:focus,
+.threadSelectionComposer select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.1);
+}
+
+.threadFocusRoutePreview {
+  align-items: center;
+  color: #718096;
+  display: flex;
+  font-size: 9.5px;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.threadFocusRoutePreview span,
+.threadFocusRoutePreview strong {
+  border-radius: 999px;
+  display: block;
+  max-width: 30%;
+  overflow: hidden;
+  padding: 3px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threadFocusRoutePreview span {
+  background: #f0f3f7;
+  font-weight: 600;
+}
+
+.threadFocusRoutePreview strong {
+  background: #eaf2ff;
+  border: 1px dashed #8fb0e6;
+  color: #345d96;
+  font-weight: 680;
+}
+
+.threadFocusRoutePreview i {
+  color: #9aa7b8;
+  font-style: normal;
+}
+
+.threadRootComposer {
+  align-content: center;
+  border-top: 0;
+  height: 100%;
+  padding: 48px 70px;
+}
+
+.threadRootComposer textarea {
+  min-height: 180px;
+}
+
+.threadSelectionComposer {
+  background: #ffffff;
+  border: 1px solid #b9c9e0;
+  border-radius: 10px;
+  box-shadow: 0 15px 36px rgba(15, 23, 42, 0.24);
+  display: grid;
+  gap: 6px;
+  padding: 7px;
+  position: absolute;
+  transform: translateX(-50%);
+  width: 360px;
+  z-index: 28;
+}
+
+.threadSelectionComposer > div {
+  align-items: center;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.threadSelectionComposer input {
+  border: 1px solid #d6deea;
+  border-radius: 7px;
+  font-size: 12px;
+  height: 34px;
+  outline: none;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.threadSelectionComposer input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.1);
+}
+
+.threadSelectionComposer .primaryButton {
+  font-size: 11px;
+  height: 34px;
+  min-height: 34px;
+  padding: 0 13px;
+}
+
+.threadSelectionComposer select {
+  max-width: none;
+  width: 100%;
+}
+
+.threadSelectionComposer small {
+  color: #7b8798;
+  font-size: 10px;
+  line-height: 20px;
+  padding: 0 4px;
+}
+
+.threadCanvasGhostNode {
+  background: rgba(239, 246, 255, 0.9);
+  border: 2px dashed #79a3e8;
+  border-radius: 11px;
+  box-shadow: 0 8px 22px rgba(45, 91, 163, 0.1);
+  display: grid;
+  gap: 4px;
+  height: 76px;
+  padding: 11px 13px;
+  pointer-events: none;
+  position: absolute;
+  width: 210px;
+  z-index: 8;
+}
+
+.threadCanvasGhostNode small {
+  color: #5276ac;
+  font-size: 9px;
+  font-weight: 720;
+  text-transform: uppercase;
+}
+
+.threadCanvasGhostNode strong {
+  color: #294366;
+  display: -webkit-box;
+  font-size: 11px;
+  line-height: 15px;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.threadCanvasMinimapDock {
+  bottom: 16px;
+  left: 16px;
+  position: absolute;
+  z-index: 10;
 }
 
 .threadCanvasInspector {

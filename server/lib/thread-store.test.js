@@ -183,3 +183,24 @@ test("inserts a continuation node before every existing child subtree", async ()
     await rm(tempDir, { recursive: true, force: true });
   }
 });
+
+test("inserts a continuation node into one selected child path", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-path-insert-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({ title: "Path insertion", selectedText: "selection", anchor: {} });
+    const root = await store.addMessage(thread.id, { role: "user", content: "A", parentId: null });
+    const child = await store.addMessage(thread.id, { role: "user", content: "C", parentId: root.id });
+    const sibling = await store.addMessage(thread.id, { role: "user", content: "Sibling", parentId: root.id });
+
+    const inserted = await store.insertNodeAfter(thread.id, root.id, { role: "user", content: "B" }, child.id);
+    const restored = await store.get(thread.id);
+
+    assert.equal(restored.messages.find((message) => message.id === child.id).parentId, inserted.id);
+    assert.equal(restored.messages.find((message) => message.id === sibling.id).parentId, root.id);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});

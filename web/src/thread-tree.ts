@@ -71,6 +71,16 @@ export function reparentDirectChildNodes(messages: Message[], parentNodeId: stri
   ));
 }
 
+export function reparentConversationNode(messages: Message[], nodeId: string, nextParentNodeId: string): Message[] {
+  return messages.map((message) => (
+    message.role === "user"
+    && message.id === (message.nodeId || message.id)
+    && (message.nodeId || message.id) === nodeId
+      ? { ...message, parentId: nextParentNodeId }
+      : message
+  ));
+}
+
 export function conversationNavigation(roots: ConversationNode[], nodeId: string): ConversationNavigation {
   const nodes = flattenConversationTree(roots);
   const current = nodes.find((node) => node.id === nodeId) || null;

@@ -395,11 +395,12 @@ export function App() {
     nodeId: string | null = null,
     parentMessageId: string | null = null,
     branchSelection: BranchSelection | null = null,
-    adoptExistingChildren = false
+    adoptExistingChildren = false,
+    insertBeforeNodeId: string | null = null
   ) {
     const thread = threadsRef.current.find((item) => item.id === threadId) || null;
     if (!thread) return;
-    await sendThreadMessage(thread, content, askAgent, draftKey, nodeId, parentMessageId, branchSelection, adoptExistingChildren);
+    await sendThreadMessage(thread, content, askAgent, draftKey, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId);
   }
 
   async function sendThreadMessage(
@@ -410,7 +411,8 @@ export function App() {
     nodeId: string | null = null,
     parentMessageId: string | null = null,
     branchSelection: BranchSelection | null = null,
-    adoptExistingChildren = false
+    adoptExistingChildren = false,
+    insertBeforeNodeId: string | null = null
   ) {
     const trimmed = content.trim();
     if (!trimmed) {
@@ -426,10 +428,10 @@ export function App() {
       });
     }
     setStatus(askAgent ? "Asking Codex" : "Adding comment");
-    setThreads((current) => appendPendingMessage(current, thread.id, trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren));
+    setThreads((current) => appendPendingMessage(current, thread.id, trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId));
 
     try {
-      const payload = await api.sendMessage(thread.id, { content: trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren });
+      const payload = await api.sendMessage(thread.id, { content: trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId });
       setThreads(payload.threads);
       if (payload.document) {
         setDocumentData(payload.document);

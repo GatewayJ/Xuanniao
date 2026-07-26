@@ -46,7 +46,7 @@ export const api = {
     request<{ threads: Thread[] }>(`/api/threads/${encodeURIComponent(threadId)}`, {
       method: "DELETE"
     }),
-  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null; adoptExistingChildren?: boolean }) =>
+  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null; adoptExistingChildren?: boolean; insertBeforeNodeId?: string | null }) =>
     request<{ userMessage: Message; assistantMessage: Message | null; threads: Thread[]; document?: DocumentPayload }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages`,
       {
