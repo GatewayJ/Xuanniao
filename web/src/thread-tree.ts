@@ -1,4 +1,4 @@
-import type { Message } from "./types";
+import type { ConversationNodeKind, Message } from "./types";
 
 export type ConversationNode = {
   id: string;
@@ -14,6 +14,23 @@ export type ConversationNavigation = {
   up: ConversationNode | null;
   down: ConversationNode | null;
 };
+
+export type ConversationRoute = {
+  kind: "new-child" | "insert" | "choose";
+  insertBeforeNodeId: string | null;
+};
+
+export type ConversationNodeStatus = "unanswered" | "thinking" | "answered" | "failed";
+
+export const CONVERSATION_NODE_KINDS: ConversationNodeKind[] = [
+  "question",
+  "idea",
+  "assumption",
+  "evidence",
+  "risk",
+  "decision",
+  "task"
+];
 
 export function buildConversationTree(messages: Message[]): ConversationNode[] {
   const normalized = inferMessageParents(messages);
@@ -111,6 +128,30 @@ export function conversationBreadcrumb(roots: ConversationNode[], nodeId: string
   return path.reverse();
 }
 
+export function defaultConversationRoute(node: ConversationNode): ConversationRoute {
+  if (node.children.length === 0) {
+    return { kind: "new-child", insertBeforeNodeId: null };
+  }
+  if (node.children.length === 1) {
+    return { kind: "insert", insertBeforeNodeId: node.children[0].id };
+  }
+  return { kind: "choose", insertBeforeNodeId: null };
+}
+
+export function conversationNodeStatus(node: ConversationNode): ConversationNodeStatus {
+  const latestAssistant = node.messages.filter((message) => message.role === "assistant").at(-1);
+  if (!latestAssistant) return "unanswered";
+  if (latestAssistant.id.startsWith("pending-")) return "thinking";
+  if (latestAssistant.error) return "failed";
+  return "answered";
+}
+
+export function conversationNodeKind(node: ConversationNode | Message | null | undefined): ConversationNodeKind {
+  const message = "question" in (node || {}) ? (node as ConversationNode).question : node as Message | null | undefined;
+  const value = message?.meta?.nodeKind;
+  return typeof value === "string" && isConversationNodeKind(value) ? value : "question";
+}
+
 export function inferMessageParents(messages: Message[]): Message[] {
   let previousQuestionId: string | null = null;
   let previousNodeId: string | null = null;
@@ -135,4 +176,8 @@ function parentChainContains(nodes: Map<string, ConversationNode>, start: Conver
     current = current.parentId ? nodes.get(current.parentId) : undefined;
   }
   return false;
+}
+
+function isConversationNodeKind(value: string): value is ConversationNodeKind {
+  return (CONVERSATION_NODE_KINDS as string[]).includes(value);
 }

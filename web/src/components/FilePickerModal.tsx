@@ -47,10 +47,10 @@ export function FilePickerModal({ open, currentPath, browser, loading, error, on
       <section className="fileModal" role="dialog" aria-modal="true" aria-labelledby="file-modal-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="fileModalHeader">
           <div>
-            <h2 id="file-modal-title">Open Markdown File</h2>
-            <p>{browser.directory || "Loading directory..."}</p>
+            <h2 id="file-modal-title">打开 Markdown 文档</h2>
+            <p>{browser.directory || "正在加载目录…"}</p>
           </div>
-          <button type="button" className="ghostButton" onClick={onClose}>Close</button>
+          <button type="button" className="ghostButton" onClick={onClose}>关闭</button>
         </header>
 
         <div className="filePathRow">
@@ -63,24 +63,24 @@ export function FilePickerModal({ open, currentPath, browser, loading, error, on
             onKeyDown={(event) => {
               if (event.key === "Enter" && pathInput.trim()) onBrowse(pathInput.trim());
             }}
-            aria-label="File or directory path"
+            aria-label="文件或目录路径"
           />
-          <button type="button" disabled={!pathInput.trim() || loading} onClick={() => onBrowse(pathInput.trim())}>Go</button>
-          <button type="button" className="primaryButton" disabled={!openPath || loading} onClick={() => onOpenFile(openPath)}>Open</button>
+          <button type="button" disabled={!pathInput.trim() || loading} onClick={() => onBrowse(pathInput.trim())}>前往</button>
+          <button type="button" className="primaryButton" disabled={!openPath || loading} onClick={() => onOpenFile(openPath)}>打开</button>
         </div>
 
         <div className="fileToolbar">
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search markdown files..." aria-label="Search markdown files" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索 Markdown 文档…" aria-label="搜索 Markdown 文档" />
           <div className="fileToolbarActions">
-            <button type="button" disabled={!browser.parent || loading} onClick={() => browser.parent && onBrowse(browser.parent)}>Up</button>
-            <button type="button" disabled={!browser.directory || loading} onClick={() => onBrowse(browser.directory)}>Refresh</button>
+            <button type="button" disabled={!browser.parent || loading} onClick={() => browser.parent && onBrowse(browser.parent)}>上一级</button>
+            <button type="button" disabled={!browser.directory || loading} onClick={() => onBrowse(browser.directory)}>刷新</button>
           </div>
         </div>
 
         {error && <div className="fileBrowserError" role="alert">{error}</div>}
         <div className="fileList">
-          {loading && <div className="emptyState">Loading...</div>}
-          {!loading && filteredEntries.length === 0 && <div className="emptyState">No folders or Markdown files found.</div>}
+          {loading && <div className="emptyState">正在加载…</div>}
+          {!loading && filteredEntries.length === 0 && <div className="emptyState">没有找到目录或 Markdown 文档。</div>}
           {!loading && filteredEntries.map((entry) => (
             <button
               key={entry.path}
@@ -97,7 +97,7 @@ export function FilePickerModal({ open, currentPath, browser, loading, error, on
               onDoubleClick={() => entry.kind === "file" && onOpenFile(entry.path)}
             >
               <span className="fileName">{entry.kind === "directory" ? `▸ ${entry.name}` : entry.name}</span>
-              <span className="fileDir">{entry.kind === "directory" ? "Folder" : "Markdown file"}</span>
+              <span className="fileDir">{entry.kind === "directory" ? "目录" : "Markdown 文档"}</span>
               {entry.kind === "file" && entry.size !== null && entry.modifiedAt && (
                 <span className="fileMeta">{formatFileSize(entry.size)} - {formatDate(entry.modifiedAt)}</span>
               )}

@@ -5,6 +5,7 @@ import { api } from "./api";
 import { DiagramViewer } from "./components/DiagramViewer";
 import { DocumentPane, type Mode } from "./components/DocumentPane";
 import { FilePickerModal } from "./components/FilePickerModal";
+import { SelectionAskPopover } from "./components/SelectionAskPopover";
 import { ThreadRail } from "./components/ThreadRail";
 import { TopBar } from "./components/TopBar";
 import { useRenderedPreview } from "./hooks/useRenderedPreview";
@@ -22,7 +23,7 @@ import {
   titleForSelection,
   updateMessageWithPendingReply
 } from "./thread-utils";
-import type { BranchSelection, DocumentPayload, FileBrowserPayload, Message, PermissionRequest, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
+import type { BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, Message, PermissionRequest, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 const EXPLICIT_THREAD_ACTIVATION_HOLD_MS = 2500;
 
@@ -31,7 +32,7 @@ export function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("edit");
-  const [status, setStatus] = useState("Loading");
+  const [status, setStatus] = useState("正在加载");
   const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
   const [editingMessage, setEditingMessage] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
@@ -44,6 +45,12 @@ export function App() {
   const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
   const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(() => new Set());
   const [threadSpatialLayout, setThreadSpatialLayout] = useState<ThreadSpatialLayout | null>(null);
+  const [selectionAsk, setSelectionAsk] = useState<{
+    selection: SelectionContext;
+    anchorRect: { left: number; top: number; right: number; bottom: number; width: number; height: number } | null;
+  } | null>(null);
+  const [selectionQuestion, setSelectionQuestion] = useState("");
+  const [creatingSelectionThread, setCreatingSelectionThread] = useState(false);
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MarkdownThreadEditor | null>(null);
   const previewRef = useRef<HTMLElement | null>(null);
@@ -142,7 +149,7 @@ export function App() {
     setThreads(threadPayload.threads);
     setActiveThreadId(threadPayload.threads[0]?.id || null);
     setWorkspaceRoot(filePayload.root);
-    setStatus("Ready");
+    setStatus("就绪");
   }
 
   function handleEditorChange(update: ViewUpdate) {
@@ -161,7 +168,7 @@ export function App() {
       for (const threadId of remapped.deletedThreadIds) deletedThreadIdsRef.current.add(threadId);
     }
     setDocumentData((current) => current ? { ...current, content } : current);
-    setStatus("Editing");
+    setStatus("正在编辑");
     scheduleThreadSpatialSync();
     hasPendingDocumentSaveRef.current = true;
     if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
@@ -255,7 +262,7 @@ export function App() {
         threadsRef.current = payload.threads;
         setThreads(payload.threads);
         setDocumentData(payload.document);
-        setStatus("Saved");
+        setStatus("已保存");
       }
       return true;
     } catch (error) {
@@ -293,7 +300,7 @@ export function App() {
   }
 
   async function openDocument(path: string) {
-    setStatus("Opening document");
+    setStatus("正在打开文档");
     try {
       if (saveTimerRef.current) {
         window.clearTimeout(saveTimerRef.current);
@@ -312,7 +319,7 @@ export function App() {
       setEditText("");
       setFilePickerOpen(false);
       setFileBrowserError("");
-      setStatus("Document opened");
+      setStatus("文档已打开");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       setFileBrowserError(message);
@@ -329,6 +336,24 @@ export function App() {
     }
     const selection = editorRef.current?.getSelection() || null;
     return selection?.selectedText.trim() ? selection : null;
+  }
+
+  function currentSelectionRect() {
+    if (mode === "edit") {
+      return editorRef.current?.getSelectionRect() || null;
+    }
+    if (mode !== "preview") return null;
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return null;
+    const rect = selection.getRangeAt(0).getBoundingClientRect();
+    return {
+      left: rect.left,
+      top: rect.top,
+      right: rect.right,
+      bottom: rect.bottom,
+      width: rect.width,
+      height: rect.height
+    };
   }
 
   function currentPreviewSelection(): SelectionContext | null {
@@ -367,7 +392,7 @@ export function App() {
 
   async function openOrCreateThread(selection = currentSelection()) {
     if (!selection) {
-      setStatus("Select text first");
+      setStatus("请先选择一段文字");
       return null;
     }
 
@@ -416,7 +441,7 @@ export function App() {
   ) {
     const trimmed = content.trim();
     if (!trimmed) {
-      setStatus("Type a message first");
+      setStatus("请先输入内容");
       return;
     }
     if (!await flushDocumentSave()) return;
@@ -427,7 +452,7 @@ export function App() {
         return next;
       });
     }
-    setStatus(askAgent ? "Asking Codex" : "Adding comment");
+    setStatus(askAgent ? "正在询问 Codex" : "正在添加评论");
     setThreads((current) => appendPendingMessage(current, thread.id, trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId));
 
     try {
@@ -438,7 +463,7 @@ export function App() {
         editorRef.current?.setContent(payload.document.content);
       }
       setActiveThreadId(thread.id);
-      setStatus(askAgent ? "Codex replied" : "Comment saved");
+      setStatus(askAgent ? "Codex 已回答" : "评论已保存");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
       const fresh = await api.threads();
@@ -446,19 +471,32 @@ export function App() {
     }
   }
 
-  async function askSelection() {
+  function askSelection() {
     const selection = currentSelection();
     if (!selection) {
-      setStatus("Select text first");
+      setStatus("请先选择一段文字");
       return;
     }
 
-    const question = window.prompt("Ask Codex about the selected text:", "What should be clarified here?");
-    if (!question?.trim()) return;
+    setSelectionAsk({ selection, anchorRect: currentSelectionRect() });
+    setSelectionQuestion("");
+  }
 
-    const thread = await openOrCreateThread(selection);
-    if (!thread) return;
-    await sendThreadMessage(thread, question, true);
+  async function submitSelectionQuestion() {
+    if (!selectionAsk || !selectionQuestion.trim() || creatingSelectionThread) return;
+    setCreatingSelectionThread(true);
+    try {
+      const thread = await openOrCreateThread(selectionAsk.selection);
+      if (!thread) return;
+      const question = selectionQuestion;
+      setSelectionAsk(null);
+      setSelectionQuestion("");
+      void sendThreadMessage(thread, question, true);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      setCreatingSelectionThread(false);
+    }
   }
 
   async function saveEditedMessage(threadId: string, messageId: string) {
@@ -468,7 +506,7 @@ export function App() {
     setThreads((current) => updateMessageWithPendingReply(current, threadId, messageId, content, rerunAgent));
     setEditingMessage(null);
     setEditText("");
-    setStatus(rerunAgent ? "Updating Codex" : "Comment updated");
+    setStatus(rerunAgent ? "正在更新 Codex 回答" : "评论已更新");
     try {
       const payload = await api.updateMessage(threadId, messageId, { content, rerunAgent });
       setThreads(payload.threads);
@@ -476,7 +514,30 @@ export function App() {
         setDocumentData(payload.document);
         editorRef.current?.setContent(payload.document.content);
       }
-      setStatus(payload.assistantMessage ? "Codex replied" : "Comment updated");
+      setStatus(payload.assistantMessage ? "Codex 已回答" : "评论已更新");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+      const fresh = await api.threads();
+      setThreads(fresh.threads);
+    }
+  }
+
+  async function updateMessageMeta(threadId: string, messageId: string, nodeKind: ConversationNodeKind) {
+    setThreads((current) => current.map((thread) => (
+      thread.id !== threadId ? thread : {
+        ...thread,
+        messages: thread.messages.map((message) => (
+          message.id === messageId
+            ? { ...message, meta: { ...(message.meta || {}), nodeKind } }
+            : message
+        ))
+      }
+    )));
+    setStatus("节点类型已更新");
+    try {
+      const payload = await api.updateMessageMeta(threadId, messageId, { nodeKind });
+      setThreads(payload.threads);
+      setStatus("节点类型已保存");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
       const fresh = await api.threads();
@@ -489,11 +550,11 @@ export function App() {
     const assistantIndex = thread?.messages.findIndex((msg) => msg.id === assistantMessageId) ?? -1;
     const userMessage = thread ? findUserMessageForAssistant(thread.messages, assistantIndex) : null;
     if (!userMessage) {
-      setStatus("No user message found for this Codex reply");
+      setStatus("没有找到这条 Codex 回答对应的问题");
       return;
     }
 
-    setStatus("Retrying Codex");
+    setStatus("正在重试 Codex");
     setThreads((current) => updateMessageWithPendingReply(current, threadId, userMessage.id, userMessage.content, true));
     try {
       const payload = await api.updateMessage(threadId, userMessage.id, { content: userMessage.content, rerunAgent: true });
@@ -503,7 +564,7 @@ export function App() {
         editorRef.current?.setContent(payload.document.content);
       }
       setActiveThreadId(threadId);
-      setStatus(payload.assistantMessage ? "Codex replied" : "Retry completed");
+      setStatus(payload.assistantMessage ? "Codex 已回答" : "重试完成");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
       const fresh = await api.threads();
@@ -513,11 +574,11 @@ export function App() {
 
   async function resolvePermissionRequest(requestId: string, optionId: string | null) {
     setResolvingPermissionIds((current) => new Set(current).add(requestId));
-    setStatus(optionId ? "Sending permission decision" : "Cancelling permission request");
+    setStatus(optionId ? "正在发送权限决定" : "正在取消权限请求");
     try {
       const payload = await api.resolvePermission(requestId, optionId ? { optionId } : { cancelled: true });
       setPermissionRequests(payload.requests);
-      setStatus("Permission decision sent");
+      setStatus("权限决定已发送");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
       try {
@@ -544,14 +605,14 @@ export function App() {
       : 0;
     const confirmed = window.confirm(
       descendantCount > 0
-        ? `Delete this question, its answer, and ${descendantCount} child question${descendantCount === 1 ? "" : "s"}?`
+        ? `确定删除这个问题、对应回答以及 ${descendantCount} 个子问题吗？`
         : deletesReply
-          ? "Delete this question and its Codex answer?"
-          : target?.role === "user" ? "Delete this question?" : "Delete this Codex answer?"
+          ? "确定删除这个问题及其 Codex 回答吗？"
+          : target?.role === "user" ? "确定删除这个问题吗？" : "确定删除这条 Codex 回答吗？"
     );
     if (!confirmed) return;
 
-    setStatus("Deleting message");
+    setStatus("正在删除消息");
     try {
       const payload = await api.deleteMessage(threadId, messageId);
       setThreads(payload.threads);
@@ -559,7 +620,7 @@ export function App() {
         setEditingMessage(null);
         setEditText("");
       }
-      setStatus("Message deleted");
+      setStatus("消息已删除");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
       const fresh = await api.threads();
@@ -569,10 +630,10 @@ export function App() {
 
   async function deleteThread(thread: Thread) {
     const messageCount = thread.messages?.length || 0;
-    const confirmed = window.confirm(`Delete this thread${messageCount ? ` and ${messageCount} message${messageCount === 1 ? "" : "s"}` : ""}?`);
+    const confirmed = window.confirm(`确定删除这个讨论${messageCount ? `及其中的 ${messageCount} 条消息` : ""}吗？`);
     if (!confirmed) return;
 
-    setStatus("Deleting thread");
+    setStatus("正在删除讨论");
     try {
       const payload = await api.deleteThread(thread.id);
       const fallbackId = payload.threads[0]?.id || null;
@@ -581,7 +642,7 @@ export function App() {
       setActiveThreadId(nextActiveId && payload.threads.some((item) => item.id === nextActiveId) ? nextActiveId : fallbackId);
       setEditingMessage(null);
       setEditText("");
-      setStatus("Thread deleted");
+      setStatus("讨论已删除");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
       const fresh = await api.threads();
@@ -645,7 +706,7 @@ export function App() {
   return (
     <div className="appShell" style={shellStyle}>
       <TopBar
-        documentPath={documentData?.path || "Loading..."}
+        documentPath={documentData?.path || "正在加载…"}
         status={status}
         onOpenFileManager={() => void openFileManager()}
         onSave={() => void saveDocument()}
@@ -663,6 +724,7 @@ export function App() {
         />
         <div className="splitter" role="separator" onPointerDown={startResize} />
         <ThreadRail
+          documentData={documentData}
           threads={orderedThreads}
           activeThreadId={activeThreadId}
           spatialLayout={threadSpatialLayout}
@@ -673,13 +735,14 @@ export function App() {
           messageDrafts={messageDrafts}
           onActivate={activateThread}
           onDelete={(thread) => void deleteThread(thread)}
-          onAskSelection={() => void askSelection()}
+          onAskSelection={askSelection}
           onEdit={(msg: Message) => {
             setEditingMessage(msg.id);
             setEditText(msg.content);
           }}
           onCancelEdit={() => setEditingMessage(null)}
           onSaveEdit={saveEditedMessage}
+          onUpdateMessageMeta={(threadId, messageId, nodeKind) => void updateMessageMeta(threadId, messageId, nodeKind)}
           onRetryAssistant={retryAssistantReply}
           onDeleteMessage={deleteMessage}
           onResolvePermission={resolvePermissionRequest}
@@ -699,6 +762,21 @@ export function App() {
         onBrowse={(path) => void browseFiles(path)}
         onOpenFile={(path) => void openDocument(path)}
       />
+      {selectionAsk && (
+        <SelectionAskPopover
+          selectedText={selectionAsk.selection.selectedText}
+          anchorRect={selectionAsk.anchorRect}
+          question={selectionQuestion}
+          creating={creatingSelectionThread}
+          onQuestionChange={setSelectionQuestion}
+          onCancel={() => {
+            if (creatingSelectionThread) return;
+            setSelectionAsk(null);
+            setSelectionQuestion("");
+          }}
+          onSubmit={() => void submitSelectionQuestion()}
+        />
+      )}
       <DiagramViewer diagram={diagramViewer} onClose={() => setDiagramViewer(null)} />
     </div>
   );

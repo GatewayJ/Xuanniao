@@ -36,7 +36,7 @@ export function DiagramViewer({ diagram, onClose }: DiagramViewerProps) {
             <button type="button" onClick={() => setZoom((current) => Math.max(0.35, current - 0.15))}>-</button>
             <button type="button" onClick={() => setZoom(1)}>{Math.round(zoom * 100)}%</button>
             <button type="button" onClick={() => setZoom((current) => Math.min(3, current + 0.15))}>+</button>
-            <button type="button" className="primaryButton" onClick={onClose}>Close</button>
+            <button type="button" className="primaryButton" onClick={onClose}>关闭</button>
           </div>
         </header>
         <div className="diagramModalCanvas">

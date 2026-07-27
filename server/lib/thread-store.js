@@ -132,6 +132,29 @@ export class ThreadStore {
     return message;
   }
 
+  async updateMessageMeta(threadId, messageId, metaPatch) {
+    const data = await this.read();
+    const thread = data.threads.find((item) => item.id === threadId);
+    if (!thread) {
+      throw new Error(`thread not found: ${threadId}`);
+    }
+
+    const message = thread.messages.find((item) => item.id === messageId);
+    if (!message) {
+      throw new Error(`message not found: ${messageId}`);
+    }
+    if (message.role !== "user") {
+      throw new Error("only user questions can store planning metadata");
+    }
+
+    const now = new Date().toISOString();
+    message.meta = { ...(message.meta || {}), ...metaPatch };
+    message.updatedAt = now;
+    thread.updatedAt = now;
+    await this.write(data);
+    return message;
+  }
+
   async updateMessageSession(threadId, messageId, acpSessionId) {
     const data = await this.read();
     const thread = data.threads.find((item) => item.id === threadId);

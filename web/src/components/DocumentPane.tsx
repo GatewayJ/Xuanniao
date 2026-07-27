@@ -31,23 +31,23 @@ export function DocumentPane({
     <section className="documentPane">
       <div className="paneHeader">
         <div className="tabs">
-          <button type="button" className={mode === "edit" ? "tab active" : "tab"} onClick={() => onModeChange("edit")}>Edit</button>
-          <button type="button" className={mode === "preview" ? "tab active" : "tab"} onClick={() => onModeChange("preview")}>Preview</button>
-          <button type="button" className={mode === "outline" ? "tab active" : "tab"} onClick={() => onModeChange("outline")}>Outline</button>
+          <button type="button" className={mode === "edit" ? "tab active" : "tab"} onClick={() => onModeChange("edit")}>编辑</button>
+          <button type="button" className={mode === "preview" ? "tab active" : "tab"} onClick={() => onModeChange("preview")}>预览</button>
+          <button type="button" className={mode === "outline" ? "tab active" : "tab"} onClick={() => onModeChange("outline")}>大纲</button>
         </div>
-        <div className="selectionInfo">{activeThread ? `Thread line ${activeThread.anchor.lineStart || "-"}` : "No active thread"}</div>
+        <div className="selectionInfo">{activeThread ? `讨论位于第 ${activeThread.anchor.lineStart || "-"} 行` : "当前没有活动讨论"}</div>
       </div>
       <div className={mode === "edit" ? "editorHost" : "editorHost hidden"} ref={editorHostRef} />
       <article className={mode === "preview" ? "preview" : "preview hidden"} ref={previewRef} onScroll={onPreviewScroll} />
       <aside className={mode === "outline" ? "outline" : "outline hidden"}>
         <div className="outlineHeader">
           <div>
-            <h2>Document Outline</h2>
-            <p>{headings.length} headings · click to jump</p>
+            <h2>文档大纲</h2>
+            <p>{headings.length} 个标题 · 点击跳转</p>
           </div>
         </div>
-        {headings.length === 0 && <div className="emptyState">No headings found.</div>}
-        <nav className="outlineTree" aria-label="Document outline">
+        {headings.length === 0 && <div className="emptyState">文档中没有标题。</div>}
+        <nav className="outlineTree" aria-label="文档大纲">
         {headings.map((block) => (
           <button
             key={block.id}
@@ -58,7 +58,7 @@ export function DocumentPane({
           >
             <span className="outlineMarker" aria-hidden="true" />
             <span className="outlineTitle">{block.content.replace(/^#{1,6}\s+/, "")}</span>
-            <span className="outlineLine">Line {block.lineStart}</span>
+            <span className="outlineLine">第 {block.lineStart} 行</span>
           </button>
         ))}
         </nav>

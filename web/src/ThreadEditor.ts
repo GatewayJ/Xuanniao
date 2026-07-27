@@ -109,6 +109,19 @@ export class MarkdownThreadEditor {
     };
   }
 
+  getSelectionRect(): { left: number; top: number; right: number; bottom: number; width: number; height: number } | null {
+    const range = this.view.state.selection.main;
+    if (range.empty) return null;
+    const start = this.view.coordsAtPos(range.from);
+    const end = this.view.coordsAtPos(range.to);
+    if (!start || !end) return null;
+    const left = Math.min(start.left, end.left);
+    const right = Math.max(start.right, end.right);
+    const top = Math.min(start.top, end.top);
+    const bottom = Math.max(start.bottom, end.bottom);
+    return { left, top, right, bottom, width: right - left, height: bottom - top };
+  }
+
   focusThread(thread: Thread) {
     const location = resolveThreadAnchor(this.view.state.doc.toString(), thread);
     const start = location?.start ?? this.positionForLine(thread.anchor.lineStart) ?? 0;

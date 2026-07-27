@@ -1,4 +1,4 @@
-import type { Anchor, BranchSelection, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
+import type { Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
 
 type JsonRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
 
@@ -59,6 +59,14 @@ export const api = {
       `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,
       {
         method: "PUT",
+        body
+      }
+    ),
+  updateMessageMeta: (threadId: string, messageId: string, body: { nodeKind: ConversationNodeKind }) =>
+    request<{ message: Message; threads: Thread[] }>(
+      `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/meta`,
+      {
+        method: "PATCH",
         body
       }
     ),

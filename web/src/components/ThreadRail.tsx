@@ -8,20 +8,50 @@ import {
   type WheelEvent
 } from "react";
 import { createPortal } from "react-dom";
-import { renderMessageMarkdown } from "../markdown";
+import { renderMarkdown, renderMermaidBlocks, renderMessageMarkdown } from "../markdown";
 import {
   THREAD_CANVAS_NODE_HEIGHT,
   THREAD_CANVAS_NODE_WIDTH,
   layoutConversationTree
 } from "../thread-canvas";
 import { threadNodeDraftKey } from "../thread-drafts";
-import { buildConversationTree, conversationBreadcrumb, conversationNavigation, flattenConversationTree } from "../thread-tree";
-import type { BranchSelection, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
+import {
+  buildConversationTree,
+  CONVERSATION_NODE_KINDS,
+  conversationBreadcrumb,
+  conversationNavigation,
+  conversationNodeKind,
+  conversationNodeStatus,
+  defaultConversationRoute,
+  flattenConversationTree
+} from "../thread-tree";
+import type { BranchSelection, ConversationNodeKind, DocumentPayload, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
 
-const THREAD_FOCUS_NODE_WIDTH = 760;
-const THREAD_FOCUS_NODE_HEIGHT = 560;
+const THREAD_FOCUS_NODE_WIDTH = 920;
+const THREAD_FOCUS_NODE_HEIGHT = 720;
+const ROUTE_CHOICE_REQUIRED = "__route_choice_required__";
+
+const NODE_KIND_META: Record<ConversationNodeKind, { label: string; shortLabel: string }> = {
+  question: { label: "问题", shortLabel: "问" },
+  idea: { label: "想法", shortLabel: "想" },
+  assumption: { label: "假设", shortLabel: "假" },
+  evidence: { label: "证据", shortLabel: "证" },
+  risk: { label: "风险", shortLabel: "险" },
+  decision: { label: "决策", shortLabel: "决" },
+  task: { label: "任务", shortLabel: "任" }
+};
+
+const NODE_QUICK_ACTIONS = [
+  { id: "expand", label: "发散", forceNewBranch: true },
+  { id: "critique", label: "审查", forceNewBranch: false },
+  { id: "decide", label: "收敛", forceNewBranch: false },
+  { id: "task", label: "转任务", forceNewBranch: true }
+] as const;
+
+type NodeQuickActionId = typeof NODE_QUICK_ACTIONS[number]["id"];
 
 type ThreadRailProps = {
+  documentData: DocumentPayload | null;
   threads: Thread[];
   activeThreadId: string | null;
   spatialLayout: ThreadSpatialLayout | null;
@@ -36,6 +66,7 @@ type ThreadRailProps = {
   onEdit: (message: Message) => void;
   onCancelEdit: () => void;
   onSaveEdit: (threadId: string, messageId: string) => void;
+  onUpdateMessageMeta: (threadId: string, messageId: string, nodeKind: ConversationNodeKind) => void;
   onRetryAssistant: (threadId: string, messageId: string) => void;
   onDeleteMessage: (threadId: string, messageId: string) => void;
   onResolvePermission: (requestId: string, optionId: string | null) => void;
@@ -189,13 +220,13 @@ export function ThreadRail(props: ThreadRailProps) {
       <aside className="threadPane">
         <div className="threadPaneHeader">
           <div>
-            <h2>Comments</h2>
-            <p>{props.threads.length} anchored thread{props.threads.length === 1 ? "" : "s"}</p>
+            <h2>讨论</h2>
+            <p>{props.threads.length} 个文档锚点</p>
           </div>
-          <button type="button" className="primaryButton" onClick={props.onAskSelection}>Ask Selection</button>
+          <button type="button" className="primaryButton" onClick={props.onAskSelection}>选中文字提问</button>
         </div>
         <div className="threadList threadListSpatial" ref={listRef} onScroll={handleListScroll} onWheel={handleListWheel}>
-          {props.threads.length === 0 && <div className="emptyState">No comments yet.</div>}
+          {props.threads.length === 0 && <div className="emptyState">暂无讨论。请先在文档中选择文字。</div>}
           {props.threads.length > 0 && (
             <div className="threadSpatialCanvas" style={{ height: spatialHeight }}>
         {placedThreads.map(({ thread, top }) => {
@@ -221,7 +252,7 @@ export function ThreadRail(props: ThreadRailProps) {
                     role="button"
                     tabIndex={0}
                     aria-haspopup="dialog"
-                    title="Open thread details"
+                    title="打开讨论树"
                     onClick={() => openThread(thread)}
                     onKeyDown={(event) => {
                       if (event.key === "Enter" || event.key === " ") {
@@ -231,18 +262,19 @@ export function ThreadRail(props: ThreadRailProps) {
                     }}
                   >
                     <div className="threadAnchorHeader">
-                      <span className="threadCount">{(thread.messages || []).length} msg</span>
-                      {threadPermissionRequests.length > 0 && <span className="permissionBadge">Permission</span>}
+                      <span className="threadCount">{(thread.messages || []).length} 条消息</span>
+                      {threadPermissionRequests.length > 0 && <span className="permissionBadge">等待授权</span>}
                     </div>
-                    <div className="threadAnchorText">{thread.selectedText || thread.title || "Untitled thread"}</div>
+                    <div className="threadAnchorText">{threadDisplayTitle(thread)}</div>
+                    <div className="threadSourceExcerpt">{thread.selectedText || "未保存文档引用"}</div>
                   </div>
                   <div className="threadCardActions">
-                    <span className="threadNavControls" aria-label="Thread navigation">
+                    <span className="threadNavControls" aria-label="讨论导航">
                       <button
                         type="button"
                         className="threadNavButton"
-                        aria-label="Previous thread"
-                        title="Previous thread"
+                        aria-label="上一个讨论"
+                        title="上一个讨论"
                         disabled={!previousThread}
                         onClick={() => {
                           if (previousThread) activateThread(previousThread);
@@ -259,8 +291,8 @@ export function ThreadRail(props: ThreadRailProps) {
                       <button
                         type="button"
                         className="threadNavButton"
-                        aria-label="Next thread"
-                        title="Next thread"
+                        aria-label="下一个讨论"
+                        title="下一个讨论"
                         disabled={!nextThread}
                         onClick={() => {
                           if (nextThread) activateThread(nextThread);
@@ -278,15 +310,15 @@ export function ThreadRail(props: ThreadRailProps) {
                     <button
                       type="button"
                       className="threadDeleteButton"
-                      aria-label="Delete thread"
-                      title="Delete thread"
+                      aria-label="删除讨论"
+                      title="删除讨论"
                       onClick={(event) => {
                         event.stopPropagation();
                         props.onDelete(thread);
                       }}
                       onDoubleClick={(event) => event.stopPropagation()}
                     >
-                      Delete
+                      删除
                     </button>
                   </div>
                 </div>
@@ -300,6 +332,7 @@ export function ThreadRail(props: ThreadRailProps) {
       </aside>
       {openThreadDetail && createPortal(
         <ThreadDetailModal
+          documentData={props.documentData}
           thread={openThreadDetail}
           permissionRequests={props.permissionRequests.filter((request) => (
             request.threadId === openThreadDetail.id || (!request.threadId && openThreadDetail.id === props.activeThreadId)
@@ -309,9 +342,14 @@ export function ThreadRail(props: ThreadRailProps) {
           editText={props.editText}
           messageDrafts={props.messageDrafts}
           onClose={() => setOpenThreadId(null)}
+          onRevealSource={() => {
+            props.onActivate(openThreadDetail);
+            setOpenThreadId(null);
+          }}
           onEdit={props.onEdit}
           onCancelEdit={props.onCancelEdit}
           onSaveEdit={props.onSaveEdit}
+          onUpdateMessageMeta={props.onUpdateMessageMeta}
           onRetryAssistant={props.onRetryAssistant}
           onDeleteMessage={props.onDeleteMessage}
           onResolvePermission={props.onResolvePermission}
@@ -326,6 +364,7 @@ export function ThreadRail(props: ThreadRailProps) {
 }
 
 function ThreadDetailModal(props: {
+  documentData: DocumentPayload | null;
   thread: Thread;
   permissionRequests: PermissionRequest[];
   resolvingPermissionIds: Set<string>;
@@ -333,9 +372,11 @@ function ThreadDetailModal(props: {
   editText: string;
   messageDrafts: Record<string, string>;
   onClose: () => void;
+  onRevealSource: () => void;
   onEdit: (message: Message) => void;
   onCancelEdit: () => void;
   onSaveEdit: (threadId: string, messageId: string) => void;
+  onUpdateMessageMeta: (threadId: string, messageId: string, nodeKind: ConversationNodeKind) => void;
   onRetryAssistant: (threadId: string, messageId: string) => void;
   onDeleteMessage: (threadId: string, messageId: string) => void;
   onResolvePermission: (requestId: string, optionId: string | null) => void;
@@ -343,10 +384,12 @@ function ThreadDetailModal(props: {
   setMessageDraft: (draftKey: string, value: string) => void;
   onSend: (content: string, draftKey: string, nodeId: string | null, parentMessageId: string | null, branchSelection?: BranchSelection | null, adoptExistingChildren?: boolean, insertBeforeNodeId?: string | null) => void;
 }) {
+  const modalRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const selectionComposerRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const documentContextRef = useRef<HTMLElement | null>(null);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const messageSelectionSurfaceRef = useRef<HTMLDivElement | null>(null);
   const selectingMessageRef = useRef<HTMLElement | null>(null);
@@ -375,10 +418,18 @@ function ThreadDetailModal(props: {
     prompt: string;
     insertBeforeNodeId: string | null;
   }) | null>(null);
-  const [minimapCollapsed, setMinimapCollapsed] = useState(false);
+  const [minimapCollapsed, setMinimapCollapsed] = useState(true);
+  const [documentContextOpen, setDocumentContextOpen] = useState(true);
   const [isPanning, setIsPanning] = useState(false);
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const compactFocusLayout = canvasSize.width > 0 && canvasSize.width <= 700;
+  const focusNodeWidth = compactFocusLayout
+    ? Math.max(320, canvasSize.width - 28)
+    : THREAD_FOCUS_NODE_WIDTH;
+  const focusNodeHeight = compactFocusLayout
+    ? Math.max(520, canvasSize.height - 28)
+    : THREAD_FOCUS_NODE_HEIGHT;
   const canvasTransformRef = useRef(canvasTransform);
   inspectorOpenRef.current = inspectorOpen;
   selectionPopoverOpenRef.current = Boolean(selectionPopover);
@@ -386,14 +437,61 @@ function ThreadDetailModal(props: {
   const knownNodeIdsRef = useRef(new Set(nodes.map((node) => node.id)));
   const centeredThreadRef = useRef<string | null>(null);
   const overviewTransformRef = useRef<{ x: number; y: number; scale: number } | null>(null);
+  const documentAnchorOutdated = useMemo(() => {
+    const source = props.thread.selectedText.replace(/\s+/g, " ").trim();
+    const content = props.documentData?.content.replace(/\s+/g, " ").trim() || "";
+    return Boolean(source && content && !content.includes(source));
+  }, [props.documentData?.content, props.thread.selectedText]);
+  const documentHtml = useMemo(
+    () => props.documentData
+      ? renderDocumentContextMarkdown(
+        props.documentData.content,
+        documentAnchorOutdated ? null : props.thread.anchor.lineStart,
+        props.thread.anchor.lineEnd
+      )
+      : "",
+    [documentAnchorOutdated, props.documentData?.content, props.thread.anchor.lineEnd, props.thread.anchor.lineStart]
+  );
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const root = documentContextRef.current;
+      if (!root || !documentHtml) return;
+
+      const sourceBlocks = [...root.querySelectorAll<HTMLElement>("[data-source-line]")];
+      const start = props.thread.anchor.lineStart;
+      if (!start) return;
+
+      const target = root.querySelector<HTMLElement>(".threadContextAnchorBlock")
+        || sourceBlocks.find((element) => Number(element.dataset.sourceLine) >= start);
+      if (target) {
+        const rootRect = root.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        root.scrollTop = Math.max(
+          0,
+          root.scrollTop + targetRect.top - rootRect.top - root.clientHeight * 0.18
+        );
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, [documentHtml, documentContextOpen, props.thread.anchor.lineEnd, props.thread.anchor.lineStart]);
+
+  useEffect(() => {
+    const root = documentContextRef.current;
+    if (!root || !documentHtml) return;
+    void renderMermaidBlocks(root);
+  }, [documentHtml, documentContextOpen]);
 
   useEffect(() => {
     const knownIds = knownNodeIdsRef.current;
     const addedNodes = nodes.filter((node) => !knownIds.has(node.id));
     knownNodeIdsRef.current = new Set(nodes.map((node) => node.id));
     if (addedNodes.length > 0) {
-      setSelectedNodeId(addedNodes.at(-1)?.id || null);
-      setInsertBeforeNodeId(null);
+      const addedNode = addedNodes.at(-1) || null;
+      const route = addedNode ? defaultConversationRoute(addedNode) : null;
+      setSelectedNodeId(addedNode?.id || null);
+      setInsertBeforeNodeId(route?.kind === "choose" ? ROUTE_CHOICE_REQUIRED : route?.insertBeforeNodeId || null);
       setSelectionPopover(null);
       setInspectorOpen(true);
       return;
@@ -424,9 +522,14 @@ function ThreadDetailModal(props: {
 
   useEffect(() => {
     if (props.permissionRequests.length === 0 || inspectorOpen) return;
-    setSelectedNodeId((current) => current || nodes.at(-1)?.id || null);
+    if (!selectedNodeId) {
+      const node = nodes.at(-1) || null;
+      const route = node ? defaultConversationRoute(node) : null;
+      setInsertBeforeNodeId(route?.kind === "choose" ? ROUTE_CHOICE_REQUIRED : route?.insertBeforeNodeId || null);
+      setSelectedNodeId(node?.id || null);
+    }
     setInspectorOpen(true);
-  }, [inspectorOpen, nodes, props.permissionRequests.length]);
+  }, [inspectorOpen, nodes, props.permissionRequests.length, selectedNodeId]);
 
   useEffect(() => {
     if (!inspectorOpen || !canvasSize.width || !canvasSize.height) return;
@@ -436,16 +539,16 @@ function ThreadDetailModal(props: {
     const focusX = selectedLayout?.x || 0;
     const focusY = selectedLayout?.y || 0;
     const scale = clamp(Math.min(
-      (canvasSize.width - 56) / THREAD_FOCUS_NODE_WIDTH,
-      (canvasSize.height - 48) / THREAD_FOCUS_NODE_HEIGHT,
+      (canvasSize.width - (compactFocusLayout ? 24 : 56)) / focusNodeWidth,
+      (canvasSize.height - (compactFocusLayout ? 32 : 48)) / focusNodeHeight,
       1
-    ), 0.62, 1);
+    ), 0.35, 1);
     setCanvasTransform({
       x: canvasSize.width / 2 - focusX * scale,
       y: canvasSize.height / 2 - focusY * scale,
       scale
     });
-  }, [canvasLayout.nodes, canvasSize, inspectorOpen, selectedNodeId]);
+  }, [canvasLayout.nodes, canvasSize, compactFocusLayout, focusNodeHeight, focusNodeWidth, inspectorOpen, selectedNodeId]);
 
   useEffect(() => {
     function keepSelectionInsideMessage(event: MouseEvent) {
@@ -516,6 +619,23 @@ function ThreadDetailModal(props: {
         props.onClose();
         return;
       }
+      if (event.key === "Tab" && modalRef.current) {
+        const focusable = [...modalRef.current.querySelectorAll<HTMLElement>(
+          "button:not(:disabled), textarea:not(:disabled), input:not(:disabled), select:not(:disabled), [tabindex]:not([tabindex='-1'])"
+        )].filter((element) => element.offsetParent !== null);
+        if (focusable.length > 0) {
+          const first = focusable[0];
+          const last = focusable.at(-1)!;
+          if (event.shiftKey && document.activeElement === first) {
+            event.preventDefault();
+            last.focus();
+          } else if (!event.shiftKey && document.activeElement === last) {
+            event.preventDefault();
+            first.focus();
+          }
+        }
+        return;
+      }
       if (
         !inspectorOpenRef.current
         || event.metaKey
@@ -560,17 +680,37 @@ function ThreadDetailModal(props: {
   const draftKey = threadNodeDraftKey(props.thread.id, selectedNodeId);
   const messageDraft = props.messageDrafts[draftKey] || "";
   const selectedNodeOrigin = selectedNode ? messageBranchSelection(selectedNode.question) : null;
+  const selectedNodeKind = selectedNode ? conversationNodeKind(selectedNode) : "question";
+  const semanticStats = useMemo(() => conversationSemanticStats(nodes), [nodes]);
   const selectedInsertTarget = selectedNode?.children.find((node) => node.id === insertBeforeNodeId) || null;
+  const routeChoiceRequired = insertBeforeNodeId === ROUTE_CHOICE_REQUIRED;
   const lineStart = props.thread.anchor.lineStart;
   const lineEnd = props.thread.anchor.lineEnd;
   const lineLabel = lineStart
     ? `第 ${lineStart}${lineEnd && lineEnd !== lineStart ? `–${lineEnd}` : ""} 行`
     : "未锚定";
 
-  function openNode(nodeId: string, startComposer = false) {
+  function defaultRouteChoice(nodeId: string, forceNewBranch = false): string | null {
+    if (forceNewBranch) return null;
+    const node = nodes.find((item) => item.id === nodeId);
+    if (!node) return null;
+    const route = defaultConversationRoute(node);
+    return route.kind === "choose" ? ROUTE_CHOICE_REQUIRED : route.insertBeforeNodeId;
+  }
+
+  function applyNodeQuickAction(actionId: NodeQuickActionId, forceNewBranch: boolean) {
+    if (!selectedNode) return;
+    setSelectionPopover(null);
+    setInsertBeforeNodeId(defaultRouteChoice(selectedNode.id, forceNewBranch));
+    props.setMessageDraft(draftKey, promptForNodeQuickAction(actionId, selectedNode));
+    window.getSelection()?.removeAllRanges();
+    window.requestAnimationFrame(() => composerRef.current?.focus());
+  }
+
+  function openNode(nodeId: string, startComposer = false, forceNewBranch = false) {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(nodeId);
-    setInsertBeforeNodeId(null);
+    setInsertBeforeNodeId(defaultRouteChoice(nodeId, forceNewBranch));
     setSelectionPopover(null);
     setInspectorOpen(true);
     window.getSelection()?.removeAllRanges();
@@ -590,7 +730,7 @@ function ThreadDetailModal(props: {
   function navigateToNode(nodeId: string | null | undefined) {
     if (!nodeId) return;
     setSelectedNodeId(nodeId);
-    setInsertBeforeNodeId(null);
+    setInsertBeforeNodeId(defaultRouteChoice(nodeId));
     setSelectionPopover(null);
     window.getSelection()?.removeAllRanges();
     window.requestAnimationFrame(() => {
@@ -713,7 +853,7 @@ function ThreadDetailModal(props: {
     window.requestAnimationFrame(() => {
       const selection = window.getSelection();
       const inspector = inspectorRef.current;
-      if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !inspector) {
+      if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !inspector || !selectedNode) {
         setSelectionPopover(null);
         return;
       }
@@ -757,13 +897,18 @@ function ThreadDetailModal(props: {
         top: clamp(preferredTop, 58, inspectorHeight - 112),
         highlightRects,
         prompt: "",
-        insertBeforeNodeId: null
+        insertBeforeNodeId: defaultRouteChoice(selectedNode.id)
       });
     });
   }
 
   function submitSelectionQuestion() {
-    if (!selectionPopover || !selectedNode || !selectionPopover.prompt.trim()) return;
+    if (
+      !selectionPopover
+      || !selectedNode
+      || !selectionPopover.prompt.trim()
+      || selectionPopover.insertBeforeNodeId === ROUTE_CHOICE_REQUIRED
+    ) return;
     props.onSend(
       selectionPopover.prompt,
       "",
@@ -791,10 +936,10 @@ function ThreadDetailModal(props: {
     ? canvasLayout.nodes.find((item) => item.node.id === selectedNodeId) || null
     : null;
   const ghostNode = (() => {
-    if (!inspectorOpen || !messageDraft.trim()) return null;
+    if (!inspectorOpen || !messageDraft.trim() || routeChoiceRequired) return null;
     if (!selectedCanvasItem) return { x: 0, y: 0 };
     return {
-      x: selectedCanvasItem.x + THREAD_FOCUS_NODE_WIDTH / 2 + 132,
+      x: selectedCanvasItem.x + focusNodeWidth / 2 + 132,
       y: selectedCanvasItem.y
     };
   })();
@@ -802,6 +947,7 @@ function ThreadDetailModal(props: {
   return (
     <div className="modalBackdrop threadModalBackdrop" role="presentation" onMouseDown={props.onClose}>
       <section
+        ref={modalRef}
         className="threadModal"
         role="dialog"
         aria-modal="true"
@@ -816,25 +962,70 @@ function ThreadDetailModal(props: {
               <span>{messageCount} 条消息</span>
               <span>{lineLabel}</span>
             </div>
-            <h2 id="thread-modal-title">{props.thread.selectedText || props.thread.title || "Untitled thread"}</h2>
+            <h2 id="thread-modal-title">{threadDisplayTitle(props.thread)}</h2>
           </div>
-          <button ref={closeButtonRef} type="button" className="threadModalClose" aria-label="Close thread details" onClick={props.onClose}>
-            <span aria-hidden="true">×</span>
-          </button>
+          <div className="threadModalHeaderActions">
+            <button
+              type="button"
+              className={`threadContextToggle ${documentContextOpen ? "active" : ""}`}
+              aria-pressed={documentContextOpen}
+              onClick={() => setDocumentContextOpen((current) => !current)}
+            >
+              <span aria-hidden="true">◫</span>
+              {documentContextOpen ? "隐藏文章" : "显示文章"}
+            </button>
+            <button ref={closeButtonRef} type="button" className="threadModalClose" aria-label="关闭讨论树" onClick={props.onClose}>
+              <span aria-hidden="true">×</span>
+            </button>
+          </div>
         </header>
 
-        <div
-          ref={canvasRef}
-          className={`threadModalWorkspace threadCanvasViewport ${isPanning ? "panning" : ""} ${inspectorOpen ? "focusMode" : ""}`}
-          aria-label="Conversation tree canvas"
-          onWheel={handleCanvasWheel}
-          onPointerDown={handleCanvasPointerDown}
-          onPointerMove={handleCanvasPointerMove}
-          onPointerUp={finishCanvasPan}
-          onPointerCancel={finishCanvasPan}
-        >
+        <div className={`threadModalBody ${documentContextOpen ? "" : "contextCollapsed"}`}>
+          {documentContextOpen && (
+            <aside className="threadDocumentContext" aria-label="文章上下文">
+              <header className="threadDocumentContextHeader">
+                <div>
+                  <span>文章上下文</span>
+                  <strong>{props.documentData?.title || "当前文档"}</strong>
+                </div>
+                <button type="button" onClick={props.onRevealSource}>在编辑器中定位</button>
+              </header>
+              <div className={`threadContextQuote ${documentAnchorOutdated ? "stale" : ""}`}>
+                <div>
+                  <span>讨论锚点</span>
+                  <small>{documentAnchorOutdated ? `原文已变化 · 上次${lineLabel}` : lineLabel}</small>
+                </div>
+                <blockquote>{props.thread.selectedText || "未保存引用内容"}</blockquote>
+              </div>
+              {documentHtml ? (
+                <article
+                  ref={documentContextRef}
+                  className="threadContextDocument preview"
+                  dangerouslySetInnerHTML={{ __html: documentHtml }}
+                />
+              ) : (
+                <div className="threadContextEmpty">文章内容暂不可用。</div>
+              )}
+            </aside>
+          )}
+          <div
+            ref={canvasRef}
+            className={`threadModalWorkspace threadCanvasViewport ${isPanning ? "panning" : ""} ${inspectorOpen ? "focusMode" : ""}`}
+            aria-label="讨论树画布"
+            onWheel={handleCanvasWheel}
+            onPointerDown={handleCanvasPointerDown}
+            onPointerMove={handleCanvasPointerMove}
+            onPointerUp={finishCanvasPan}
+            onPointerCancel={finishCanvasPan}
+          >
           <div className="threadCanvasHint">拖动画布 · 滚轮移动 · ⌘/Ctrl + 滚轮缩放</div>
-          <div className="threadCanvasControls" aria-label="Canvas controls">
+          <div className="threadCanvasInsightStrip" aria-label="讨论计划摘要">
+            <span>任务 {semanticStats.task}</span>
+            <span>风险 {semanticStats.risk}</span>
+            <span>决策 {semanticStats.decision}</span>
+            <span>未答 {semanticStats.unanswered}</span>
+          </div>
+          <div className="threadCanvasControls" aria-label="画布控制">
             <button type="button" aria-label="缩小" title="缩小" onClick={() => zoomCanvasAt(0.85)}>−</button>
             <span>{Math.round(canvasTransform.scale * 100)}%</span>
             <button type="button" aria-label="放大" title="放大" onClick={() => zoomCanvasAt(1.18)}>+</button>
@@ -860,7 +1051,7 @@ function ThreadDetailModal(props: {
               {ghostNode && selectedCanvasItem && (
                 <path
                   className="ghostConnector"
-                  d={`M ${selectedCanvasItem.x + THREAD_FOCUS_NODE_WIDTH / 2} ${selectedCanvasItem.y} C ${selectedCanvasItem.x + THREAD_FOCUS_NODE_WIDTH / 2 + 48} ${selectedCanvasItem.y}, ${ghostNode.x - 150} ${ghostNode.y}, ${ghostNode.x - 105} ${ghostNode.y}`}
+                  d={`M ${selectedCanvasItem.x + focusNodeWidth / 2} ${selectedCanvasItem.y} C ${selectedCanvasItem.x + focusNodeWidth / 2 + 48} ${selectedCanvasItem.y}, ${ghostNode.x - 150} ${ghostNode.y}, ${ghostNode.x - 105} ${ghostNode.y}`}
                 />
               )}
             </svg>
@@ -890,10 +1081,10 @@ function ThreadDetailModal(props: {
                   className="threadCanvasFocusNode"
                   aria-label="当前节点详情"
                   style={{
-                    left: item.x - THREAD_FOCUS_NODE_WIDTH / 2,
-                    top: item.y - THREAD_FOCUS_NODE_HEIGHT / 2,
-                    width: THREAD_FOCUS_NODE_WIDTH,
-                    height: THREAD_FOCUS_NODE_HEIGHT
+                    left: item.x - focusNodeWidth / 2,
+                    top: item.y - focusNodeHeight / 2,
+                    width: focusNodeWidth,
+                    height: focusNodeHeight
                   }}
                 >
                   <header className="threadCanvasFocusHeader">
@@ -916,6 +1107,36 @@ function ThreadDetailModal(props: {
                           );
                         })}
                       </nav>
+                      {selectedNode && (
+                        <div className="threadNodeMetaBar">
+                          <label>
+                            <span>类型</span>
+                            <select
+                              value={selectedNodeKind}
+                              onChange={(event) => props.onUpdateMessageMeta(
+                                props.thread.id,
+                                selectedNode.question.id,
+                                event.target.value as ConversationNodeKind
+                              )}
+                            >
+                              {CONVERSATION_NODE_KINDS.map((kind) => (
+                                <option key={kind} value={kind}>{NODE_KIND_META[kind].label}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <div className="threadNodeQuickActions" aria-label="AI 快捷操作">
+                            {NODE_QUICK_ACTIONS.map((action) => (
+                              <button
+                                key={action.id}
+                                type="button"
+                                onClick={() => applyNodeQuickAction(action.id, action.forceNewBranch)}
+                              >
+                                {action.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </div>
                     <button type="button" className="threadCanvasInspectorClose" aria-label="返回树总览" title="返回树总览 (Esc)" onClick={closeFocusedNode}>×</button>
                   </header>
@@ -954,7 +1175,13 @@ function ThreadDetailModal(props: {
                             placeholder="基于选中内容继续追问…"
                             aria-label="基于选中内容继续追问"
                           />
-                          <button type="submit" className="primaryButton" disabled={!selectionPopover.prompt.trim()}>发送</button>
+                          <button
+                            type="submit"
+                            className="primaryButton"
+                            disabled={!selectionPopover.prompt.trim() || selectionPopover.insertBeforeNodeId === ROUTE_CHOICE_REQUIRED}
+                          >
+                            发送
+                          </button>
                         </div>
                         {selectedNode && selectedNode.children.length > 0 ? (
                           <select
@@ -965,13 +1192,18 @@ function ThreadDetailModal(props: {
                               insertBeforeNodeId: event.target.value || null
                             } : null)}
                           >
-                            <option value="">从当前节点新建分支</option>
+                            {selectedNode.children.length > 1 && (
+                              <option value={ROUTE_CHOICE_REQUIRED} disabled>请选择新节点位置…</option>
+                            )}
                             {selectedNode.children.map((child) => (
-                              <option key={child.id} value={child.id}>插入路径 → {questionSummary(child.question.content)}</option>
+                              <option key={child.id} value={child.id}>
+                                {selectedNode.children.length === 1 ? "继续当前路径" : "插入路径"} → {questionSummary(child.question.content)}
+                              </option>
                             ))}
+                            <option value="">另建分支</option>
                           </select>
                         ) : (
-                          <small>继续当前路径</small>
+                          <small>创建子节点</small>
                         )}
                       </form>
                     </>
@@ -1008,7 +1240,7 @@ function ThreadDetailModal(props: {
                       />
                     ))}
                     {selectedNode && !selectedNode.messages.some((message) => message.role === "assistant") && (
-                      <div className="threadNodeAnswerEmpty">当前节点还没有 Codex 回答。</div>
+                      <div className="threadNodeAnswerEmpty">此节点尚未获得 Codex 回答。</div>
                     )}
                     {props.permissionRequests.map((request) => (
                       <PermissionRequestPanel
@@ -1024,6 +1256,7 @@ function ThreadDetailModal(props: {
                     className="threadModalComposer threadFocusComposer"
                     onSubmit={(event) => {
                       event.preventDefault();
+                      if (routeChoiceRequired) return;
                       if (!selectedNode) props.onSend(messageDraft, draftKey, null, null);
                       else props.onSend(messageDraft, draftKey, null, selectedNode.id, null, false, insertBeforeNodeId);
                       setSelectionPopover(null);
@@ -1031,11 +1264,13 @@ function ThreadDetailModal(props: {
                   >
                     <div className="threadFocusComposerTopline">
                       <label htmlFor="thread-canvas-question">
-                        {selectedInsertTarget
-                          ? <>插入路径 <strong>→ {questionSummary(selectedInsertTarget.question.content)}</strong></>
-                          : selectedNode?.children.length
-                            ? "从当前节点新建分支"
-                            : "继续追问"}
+                        {routeChoiceRequired
+                          ? "请选择新节点位置"
+                          : selectedInsertTarget
+                            ? <>{selectedNode?.children.length === 1 ? "继续当前路径" : "插入路径"} <strong>→ {questionSummary(selectedInsertTarget.question.content)}</strong></>
+                            : selectedNode?.children.length
+                              ? "从当前节点新建分支"
+                              : "创建子节点"}
                       </label>
                       {selectedNode && selectedNode.children.length > 0 && (
                         <select
@@ -1043,10 +1278,15 @@ function ThreadDetailModal(props: {
                           value={insertBeforeNodeId || ""}
                           onChange={(event) => setInsertBeforeNodeId(event.target.value || null)}
                         >
-                          <option value="">新建分支</option>
+                          {selectedNode.children.length > 1 && (
+                            <option value={ROUTE_CHOICE_REQUIRED} disabled>请选择新节点位置…</option>
+                          )}
                           {selectedNode.children.map((child) => (
-                            <option key={child.id} value={child.id}>插入到 → {questionSummary(child.question.content)}</option>
+                            <option key={child.id} value={child.id}>
+                              {selectedNode.children.length === 1 ? "继续当前路径" : "插入路径"} → {questionSummary(child.question.content)}
+                            </option>
                           ))}
+                          <option value="">另建分支</option>
                         </select>
                       )}
                     </div>
@@ -1068,17 +1308,33 @@ function ThreadDetailModal(props: {
                       ref={composerRef}
                       value={messageDraft}
                       onChange={(event) => props.setMessageDraft(draftKey, event.target.value)}
-                      placeholder="输入下一步想追问的内容…"
+                      onKeyDown={(event) => {
+                        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                          event.preventDefault();
+                          event.currentTarget.form?.requestSubmit();
+                        }
+                      }}
+                      placeholder="写下你的追问、判断或下一步任务…"
                       aria-label="继续追问"
                     />
                     <div className="threadModalComposerActions">
-                      <span>支持 Markdown · 自动继承祖先上下文</span>
+                      <span>支持 Markdown · ⌘/Ctrl + Enter 发送 · 自动继承祖先上下文</span>
                       <button
                         type="submit"
                         className="primaryButton"
-                        disabled={!messageDraft.trim() || Boolean(selectedNode?.messages.some((message) => message.id.startsWith("pending-")))}
+                        disabled={
+                          !messageDraft.trim()
+                          || routeChoiceRequired
+                          || Boolean(selectedNode?.messages.some((message) => message.id.startsWith("pending-")))
+                        }
                       >
-                        {selectedInsertTarget ? "插入追问" : selectedNode?.children.length ? "创建分支" : "继续追问"}
+                        {routeChoiceRequired
+                          ? "选择位置"
+                          : selectedInsertTarget
+                            ? "继续当前路径"
+                            : selectedNode?.children.length
+                              ? "创建分支"
+                              : "创建子节点"}
                       </button>
                     </div>
                   </form>
@@ -1092,7 +1348,7 @@ function ThreadDetailModal(props: {
                   x={item.x}
                   y={item.y}
                   onOpen={() => openNode(item.node.id)}
-                  onAskChild={() => openNode(item.node.id, true)}
+                  onAskChild={() => openNode(item.node.id, true, true)}
                 />
               )
             ))}
@@ -1104,10 +1360,10 @@ function ThreadDetailModal(props: {
                   className="threadCanvasFocusNode rootComposer"
                   aria-label="创建根问题"
                   style={{
-                    left: -THREAD_FOCUS_NODE_WIDTH / 2,
-                    top: -THREAD_FOCUS_NODE_HEIGHT / 2,
-                    width: THREAD_FOCUS_NODE_WIDTH,
-                    height: THREAD_FOCUS_NODE_HEIGHT
+                    left: -focusNodeWidth / 2,
+                    top: -focusNodeHeight / 2,
+                    width: focusNodeWidth,
+                    height: focusNodeHeight
                   }}
                 >
                   <header className="threadCanvasFocusHeader">
@@ -1129,7 +1385,13 @@ function ThreadDetailModal(props: {
                       ref={composerRef}
                       value={messageDraft}
                       onChange={(event) => props.setMessageDraft(draftKey, event.target.value)}
-                      placeholder="输入第一个问题…"
+                      onKeyDown={(event) => {
+                        if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                          event.preventDefault();
+                          event.currentTarget.form?.requestSubmit();
+                        }
+                      }}
+                      placeholder="写下第一个问题，建立这棵讨论树…"
                       aria-label="根节点问题"
                     />
                     <div className="threadModalComposerActions">
@@ -1170,6 +1432,7 @@ function ThreadDetailModal(props: {
               />
             </div>
           )}
+          </div>
         </div>
       </section>
     </div>
@@ -1211,6 +1474,7 @@ function ConversationTreeMinimap(props: {
         type="button"
         className="threadNodeMinimapToggle"
         aria-expanded={!props.collapsed}
+        aria-label={props.collapsed ? "展开树形位置" : "收起树形位置"}
         onClick={props.onToggle}
       >
         <span>树形位置</span>
@@ -1272,12 +1536,18 @@ function ConversationCanvasNode(props: {
   onAskChild: () => void;
 }) {
   const userTurns = props.node.messages.filter((message) => message.role === "user").length;
-  const pending = props.node.messages.some((message) => message.id.startsWith("pending-"));
-  const answered = props.node.messages.at(-1)?.role === "assistant";
+  const status = conversationNodeStatus(props.node);
+  const kind = conversationNodeKind(props.node);
   const hasSelectedOrigin = Boolean(messageBranchSelection(props.node.question));
+  const statusLabel = {
+    unanswered: "未回答",
+    thinking: "思考中…",
+    answered: "已回答",
+    failed: "回答失败"
+  }[status];
   return (
     <article
-      className={`threadCanvasNode ${props.root ? "root" : ""} ${props.active ? "active" : ""}`}
+      className={`threadCanvasNode ${props.root ? "root" : ""} ${props.active ? "active" : ""} kind-${kind}`}
       style={{
         left: props.x - THREAD_CANVAS_NODE_WIDTH / 2,
         top: props.y - THREAD_CANVAS_NODE_HEIGHT / 2,
@@ -1287,12 +1557,13 @@ function ConversationCanvasNode(props: {
     >
       <button type="button" className="threadCanvasNodeMain" onClick={props.onOpen}>
         <span className="threadCanvasNodeTopline">
-          <span>{props.root ? "根节点" : "节点"}</span>
-          <small>{pending ? "思考中…" : answered ? "已回答" : "等待回答"}</small>
+          <span className={`threadNodeKindPill kind-${kind}`}>{props.root ? "根" : NODE_KIND_META[kind].shortLabel}</span>
+          <small className={status === "failed" ? "error" : ""}>{statusLabel}</small>
         </span>
         <strong>{questionSummary(props.node.question.content)}</strong>
         <span className="threadCanvasNodeMeta">
           {userTurns} 轮
+          {` · ${NODE_KIND_META[kind].label}`}
           {props.node.children.length > 0 ? ` · ${props.node.children.length} 个子节点` : ""}
           {hasSelectedOrigin ? " · 包含引用" : ""}
         </span>
@@ -1333,6 +1604,48 @@ function messageBranchSelection(message: Message): BranchSelection | null {
   const sourceMessageId = "sourceMessageId" in value && typeof value.sourceMessageId === "string" ? value.sourceMessageId : "";
   const text = "text" in value && typeof value.text === "string" ? value.text : "";
   return sourceMessageId && text ? { sourceMessageId, text } : null;
+}
+
+function conversationSemanticStats(nodes: ReturnType<typeof flattenConversationTree>) {
+  const stats: Record<ConversationNodeKind, number> & { unanswered: number } = {
+    question: 0,
+    idea: 0,
+    assumption: 0,
+    evidence: 0,
+    risk: 0,
+    decision: 0,
+    task: 0,
+    unanswered: 0
+  };
+  for (const node of nodes) {
+    stats[conversationNodeKind(node)] += 1;
+    if (conversationNodeStatus(node) === "unanswered") stats.unanswered += 1;
+  }
+  return stats;
+}
+
+function promptForNodeQuickAction(actionId: NodeQuickActionId, node: ReturnType<typeof flattenConversationTree>[number]): string {
+  const kindLabel = NODE_KIND_META[conversationNodeKind(node)].label;
+  const latestAnswer = node.messages.filter((message) => message.role === "assistant" && !message.error).at(-1)?.content || "";
+  const context = [
+    `当前节点类型：${kindLabel}`,
+    `当前问题：${node.question.content.trim()}`,
+    latestAnswer ? `当前回答摘要：${truncatePlainText(latestAnswer, 260)}` : ""
+  ].filter(Boolean).join("\n");
+
+  const actionPrompts: Record<NodeQuickActionId, string> = {
+    expand: "请基于当前节点发散 3 个值得继续探索的子方向。每个方向说明为什么重要、适合验证什么，以及建议优先级。",
+    critique: "请审查当前节点：列出关键假设、主要风险、可能反例、缺失证据，并给出最应该先追问的一个问题。",
+    decide: "请把当前节点收敛成一个决策建议：给出推荐选择、理由、取舍、仍不确定的点和下一步动作。",
+    task: "请把当前节点转成可执行任务：拆成步骤、验收标准、依赖项、风险和建议负责人角色。"
+  };
+
+  return `${actionPrompts[actionId]}\n\n${context}`;
+}
+
+function truncatePlainText(content: string, maxLength: number): string {
+  const normalized = content.replace(/```[\s\S]*?```/g, " ").replace(/\s+/g, " ").trim();
+  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}…` : normalized;
 }
 
 function ThreadMessageDetail(props: {
@@ -1385,10 +1698,32 @@ function ThreadMessageDetail(props: {
   );
 }
 
+function threadDisplayTitle(thread: Thread): string {
+  const rootQuestion = buildConversationTree(thread.messages)[0]?.question.content;
+  return questionSummary(rootQuestion || thread.title || thread.selectedText);
+}
+
 function questionSummary(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
-  if (!normalized) return "Untitled question";
+  if (!normalized) return "未命名问题";
   return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized;
+}
+
+function renderDocumentContextMarkdown(content: string, lineStart: number | null, lineEnd: number | null): string {
+  const html = renderMarkdown(content);
+  if (!lineStart || typeof DOMParser === "undefined") return html;
+
+  const parsed = new DOMParser().parseFromString(html, "text/html");
+  const end = lineEnd ?? lineStart;
+  const candidates = [...parsed.body.querySelectorAll<HTMLElement>("[data-source-line]")].filter((element) => {
+    const line = Number(element.dataset.sourceLine);
+    return Number.isInteger(line) && line >= lineStart && line <= end;
+  });
+  const candidateSet = new Set(candidates);
+  candidates
+    .filter((element) => ![...element.querySelectorAll<HTMLElement>("[data-source-line]")].some((child) => candidateSet.has(child)))
+    .forEach((element) => element.classList.add("threadContextAnchorBlock"));
+  return parsed.body.innerHTML;
 }
 
 function PermissionRequestPanel(props: {
@@ -1407,7 +1742,7 @@ function PermissionRequestPanel(props: {
   return (
     <section className="permissionRequest">
       <div className="permissionRequestHeader">
-        <span>Permission request</span>
+        <span>权限请求</span>
         <time>{formatMessageTime(props.request.createdAt)}</time>
       </div>
       <div className="permissionRequestTitle">{props.request.title}</div>
@@ -1415,22 +1750,22 @@ function PermissionRequestPanel(props: {
       <div className="permissionRequestActions">
         {allowOnce && (
           <button type="button" className="primaryButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, allowOnce.optionId)}>
-            Allow
+            允许一次
           </button>
         )}
         {allowAlways && (
           <button type="button" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, allowAlways.optionId)}>
-            Allow & remember
+            始终允许
           </button>
         )}
         {rejectOnce && (
           <button type="button" className="dangerButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, rejectOnce.optionId)}>
-            Deny
+            拒绝一次
           </button>
         )}
         {rejectAlways && (
           <button type="button" className="dangerButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, rejectAlways.optionId)}>
-            Always deny
+            始终拒绝
           </button>
         )}
         {fallbackOptions.map((option) => (
@@ -1439,7 +1774,7 @@ function PermissionRequestPanel(props: {
           </button>
         ))}
         <button type="button" className="ghostButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, null)}>
-          Cancel
+          取消
         </button>
       </div>
     </section>
@@ -1533,6 +1868,14 @@ function optionByKind(options: PermissionOption[], kind: string): PermissionOpti
 }
 
 function labelForPermissionOption(option: PermissionOption): string {
+  const knownLabels: Record<string, string> = {
+    allow_once: "允许一次",
+    allow_always: "始终允许",
+    reject_once: "拒绝一次",
+    reject_always: "始终拒绝"
+  };
+  const knownLabel = knownLabels[option.kind];
+  if (knownLabel) return knownLabel;
   const label = option.name.trim();
   if (label) return label;
   return option.kind.replace(/_/g, " ");
@@ -1542,10 +1885,10 @@ function formatMessageTime(value: string): string {
   const timestamp = new Date(value).getTime();
   if (!Number.isFinite(timestamp)) return "";
   const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return "now";
+  if (seconds < 60) return "刚刚";
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
+  if (minutes < 60) return `${minutes} 分钟`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  return `${Math.floor(hours / 24)}d`;
+  if (hours < 24) return `${hours} 小时`;
+  return `${Math.floor(hours / 24)} 天`;
 }

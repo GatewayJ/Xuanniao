@@ -24,6 +24,7 @@ const host = args.host ?? process.env.HOST ?? "127.0.0.1";
 const port = Number(args.port ?? process.env.PORT ?? 4173);
 const maxBodyBytes = 8 * 1024 * 1024;
 const ignoredFileManagerDirs = new Set([".git", "node_modules", "dist", ".xuanniao"]);
+const conversationNodeKinds = new Set(["question", "idea", "assumption", "evidence", "risk", "decision", "task"]);
 
 let documentPath = path.resolve(workspaceRoot, args.file ?? "prd.md");
 await ensureDocument(documentPath);
@@ -215,6 +216,27 @@ const server = createServer(async (req, res) => {
     }
 
     const messageUpdateMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)$/);
+    const messageMetaMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/meta$/);
+    if (messageMetaMatch && req.method === "PATCH") {
+      const threadId = decodeURIComponent(messageMetaMatch[1]);
+      const messageId = decodeURIComponent(messageMetaMatch[2]);
+      const body = await readJson(req);
+      let metaPatch;
+      try {
+        metaPatch = normalizeMessageMetaPatch(body.meta ?? body);
+      } catch (error) {
+        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+      }
+      if (Object.keys(metaPatch).length === 0) {
+        return sendJson(res, 400, { error: "metadata patch is required" });
+      }
+      const message = await threadStore.updateMessageMeta(threadId, messageId, metaPatch);
+      return sendJson(res, 200, {
+        message,
+        threads: await threadStore.list()
+      });
+    }
+
     if (messageUpdateMatch && req.method === "DELETE") {
       const threadId = decodeURIComponent(messageUpdateMatch[1]);
       const messageId = decodeURIComponent(messageUpdateMatch[2]);
@@ -283,6 +305,18 @@ function normalizeBranchSelection(value) {
   const sourceMessageId = typeof value.sourceMessageId === "string" ? value.sourceMessageId.trim() : "";
   const text = typeof value.text === "string" ? value.text.replace(/\s+/g, " ").trim().slice(0, 2000) : "";
   return sourceMessageId && text ? { sourceMessageId, text } : null;
+}
+
+function normalizeMessageMetaPatch(value) {
+  const patch = value && typeof value === "object" ? value : {};
+  const meta = {};
+  if (Object.prototype.hasOwnProperty.call(patch, "nodeKind")) {
+    if (!conversationNodeKinds.has(patch.nodeKind)) {
+      throw new Error("unsupported node kind");
+    }
+    meta.nodeKind = patch.nodeKind;
+  }
+  return meta;
 }
 
 async function switchDocument(nextPath) {

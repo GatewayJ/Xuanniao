@@ -1,7 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { buildConversationTree, conversationBreadcrumb, conversationNavigation, flattenConversationTree, reparentConversationNode, reparentDirectChildNodes } from "./thread-tree.ts";
+import {
+  buildConversationTree,
+  conversationBreadcrumb,
+  conversationNavigation,
+  conversationNodeKind,
+  conversationNodeStatus,
+  defaultConversationRoute,
+  flattenConversationTree,
+  reparentConversationNode,
+  reparentDirectChildNodes
+} from "./thread-tree.ts";
 import type { Message } from "./types.ts";
 
 const at = "2026-07-22T00:00:00.000Z";
@@ -118,4 +128,50 @@ test("builds a root-to-current breadcrumb without sibling nodes", () => {
   ];
 
   assert.deepEqual(conversationBreadcrumb(buildConversationTree(messages), "c").map((node) => node.id), ["a", "b", "c"]);
+});
+
+test("continues a single existing path by default and requires a choice for branches", () => {
+  const singlePath = buildConversationTree([
+    { id: "a", role: "user", content: "A", nodeId: "a", parentId: null, createdAt: at },
+    { id: "b", role: "user", content: "B", nodeId: "b", parentId: "a", createdAt: at }
+  ])[0];
+  assert.deepEqual(defaultConversationRoute(singlePath), { kind: "insert", insertBeforeNodeId: "b" });
+
+  const branched = buildConversationTree([
+    { id: "a", role: "user", content: "A", nodeId: "a", parentId: null, createdAt: at },
+    { id: "b", role: "user", content: "B", nodeId: "b", parentId: "a", createdAt: at },
+    { id: "c", role: "user", content: "C", nodeId: "c", parentId: "a", createdAt: at }
+  ])[0];
+  assert.deepEqual(defaultConversationRoute(branched), { kind: "choose", insertBeforeNodeId: null });
+});
+
+test("reports honest node answer states", () => {
+  const unanswered = buildConversationTree([
+    { id: "q", role: "user", content: "Question", nodeId: "q", parentId: null, createdAt: at }
+  ])[0];
+  assert.equal(conversationNodeStatus(unanswered), "unanswered");
+
+  const thinking = buildConversationTree([
+    unanswered.question,
+    { id: "pending-agent-1", role: "assistant", content: "Thinking", nodeId: "q", parentId: "q", createdAt: at }
+  ])[0];
+  assert.equal(conversationNodeStatus(thinking), "thinking");
+
+  const failed = buildConversationTree([
+    unanswered.question,
+    { id: "a", role: "assistant", content: "Failed", nodeId: "q", parentId: "q", error: true, createdAt: at }
+  ])[0];
+  assert.equal(conversationNodeStatus(failed), "failed");
+});
+
+test("reads semantic node kind from message metadata", () => {
+  const risk = buildConversationTree([
+    { id: "q", role: "user", content: "Risk", nodeId: "q", parentId: null, meta: { nodeKind: "risk" }, createdAt: at }
+  ])[0];
+  const fallback = buildConversationTree([
+    { id: "plain", role: "user", content: "Plain", nodeId: "plain", parentId: null, meta: { nodeKind: "unknown" }, createdAt: at }
+  ])[0];
+
+  assert.equal(conversationNodeKind(risk), "risk");
+  assert.equal(conversationNodeKind(fallback), "question");
 });

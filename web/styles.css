@@ -761,6 +761,15 @@ body.resizing .splitter::before {
   -webkit-line-clamp: 2;
 }
 
+.threadSourceExcerpt {
+  color: #8a96a7;
+  font-size: 10px;
+  line-height: 14px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .threadDeleteButton {
   background: transparent;
   border: 0;
@@ -1099,6 +1108,108 @@ body.resizing .splitter::before {
   z-index: 20;
 }
 
+.selectionAskLayer {
+  inset: 0;
+  position: fixed;
+  z-index: 24;
+}
+
+.selectionAskPopover {
+  background: rgba(255, 255, 255, 0.99);
+  border: 1px solid #cbd5e1;
+  border-radius: 12px;
+  box-shadow: 0 22px 56px rgba(15, 23, 42, 0.24);
+  display: grid;
+  gap: 10px;
+  max-width: calc(100vw - 32px);
+  padding: 14px;
+  position: fixed;
+  transform: translateX(-50%);
+  width: 430px;
+}
+
+.selectionAskPopover header {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.selectionAskPopover header > div {
+  display: grid;
+  gap: 1px;
+}
+
+.selectionAskPopover header span {
+  color: #6f7d90;
+  font-size: 9px;
+  font-weight: 720;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.selectionAskPopover header strong {
+  color: #263244;
+  font-size: 14px;
+  line-height: 20px;
+}
+
+.selectionAskPopover header button {
+  border-radius: 999px;
+  font-size: 20px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 0 2px;
+  width: 30px;
+}
+
+.selectionAskPopover blockquote {
+  background: #f1f6ff;
+  border: 1px solid #c9daf8;
+  border-left: 3px solid #6f9cea;
+  border-radius: 7px;
+  color: #344054;
+  display: -webkit-box;
+  font-size: 11.5px;
+  line-height: 17px;
+  margin: 0;
+  overflow: hidden;
+  padding: 8px 10px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.selectionAskPopover textarea {
+  border: 1px solid #b8c3d3;
+  border-radius: 8px;
+  line-height: 1.5;
+  min-height: 78px;
+  outline: none;
+  padding: 9px 10px;
+  resize: vertical;
+}
+
+.selectionAskPopover textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.13);
+}
+
+.selectionAskPopover footer {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.selectionAskPopover footer > span {
+  color: #8a96a7;
+  font-size: 10px;
+}
+
+.selectionAskPopover footer > div {
+  display: flex;
+  gap: 7px;
+}
+
 .threadModalBackdrop {
   background: rgba(15, 23, 42, 0.58);
   padding: 0;
@@ -1122,15 +1233,18 @@ body.resizing .splitter::before {
 }
 
 .threadModalHeader {
-  align-items: flex-start;
+  align-items: center;
   border-bottom: 1px solid var(--line);
   display: flex;
   gap: 24px;
   justify-content: space-between;
-  padding: 22px 24px 20px 28px;
+  min-height: 72px;
+  padding: 12px 18px 12px 22px;
 }
 
 .threadModalHeading {
+  display: grid;
+  gap: 3px;
   min-width: 0;
 }
 
@@ -1143,7 +1257,7 @@ body.resizing .splitter::before {
   font-weight: 650;
   gap: 0;
   line-height: 16px;
-  margin-bottom: 7px;
+  margin-bottom: 0;
   text-transform: uppercase;
 }
 
@@ -1159,7 +1273,259 @@ body.resizing .splitter::before {
   font-weight: 680;
   line-height: 1.4;
   margin: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threadModalHeaderActions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.threadContextToggle {
+  align-items: center;
+  background: #ffffff;
+  border-color: #d8e0ea;
+  border-radius: 9px;
+  color: #52657c;
+  display: inline-flex;
+  font-size: 11px;
+  font-weight: 650;
+  gap: 7px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.threadContextToggle span {
+  color: #7990af;
+  font-size: 15px;
+}
+
+.threadContextToggle:hover,
+.threadContextToggle.active {
+  background: #eef4ff;
+  border-color: #b9ceff;
+  color: var(--accent-strong);
+}
+
+.threadModalBody {
+  display: grid;
+  grid-template-columns: clamp(340px, 30vw, 500px) minmax(0, 1fr);
+  min-height: 0;
+  overflow: hidden;
+}
+
+.threadModalBody.contextCollapsed {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.threadDocumentContext {
+  background: #ffffff;
+  border-right: 1px solid #dfe5ed;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+  z-index: 11;
+}
+
+.threadDocumentContextHeader {
+  align-items: center;
+  background: #fbfcfe;
+  border-bottom: 1px solid #e9edf3;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-height: 58px;
+  padding: 10px 14px 10px 18px;
+}
+
+.threadDocumentContextHeader > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.threadDocumentContextHeader span {
+  color: #758196;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  line-height: 12px;
+  text-transform: uppercase;
+}
+
+.threadDocumentContextHeader strong {
+  color: #293548;
+  font-size: 13px;
+  line-height: 18px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threadDocumentContextHeader button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--accent-strong);
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-weight: 650;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 8px;
+}
+
+.threadDocumentContextHeader button:hover {
+  background: #eef4ff;
+  border-color: #c7d8ff;
+}
+
+.threadContextQuote {
+  background: #fffaf0;
+  border-bottom: 1px solid #eee5d3;
+  display: grid;
+  gap: 7px;
+  padding: 12px 18px 13px;
+}
+
+.threadContextQuote > div {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.threadContextQuote span {
+  color: #8a6a17;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.threadContextQuote small {
+  color: #9b7a24;
+  font-size: 9px;
+}
+
+.threadContextQuote.stale {
+  background: #fff8f7;
+  border-bottom-color: #f1dcda;
+}
+
+.threadContextQuote.stale span,
+.threadContextQuote.stale small {
+  color: #a14a43;
+}
+
+.threadContextQuote blockquote {
+  color: #544822;
+  display: -webkit-box;
+  font-size: 12px;
+  line-height: 18px;
+  margin: 0;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.threadContextDocument.preview {
+  background: #ffffff;
+  color: #344054;
+  font-size: 13px;
+  line-height: 1.72;
+  min-height: 0;
+  padding: 24px 26px 96px;
+  scroll-behavior: smooth;
+}
+
+.threadContextDocument.preview > * {
+  max-width: none;
+}
+
+.threadContextDocument.preview h1 {
+  font-size: 24px;
+}
+
+.threadContextDocument.preview h2 {
+  font-size: 18px;
+  margin-top: 28px;
+}
+
+.threadContextDocument.preview h3 {
+  font-size: 15px;
+  margin-top: 22px;
+}
+
+.threadContextDocument.preview .threadContextAnchorBlock {
+  background: linear-gradient(90deg, rgba(255, 244, 191, 0.82), rgba(255, 250, 232, 0.5));
+  border-radius: 0 6px 6px 0;
+  box-shadow: -4px 0 0 #e8b51c;
+  margin-left: -12px;
+  padding-left: 12px;
+  scroll-margin-top: 84px;
+}
+
+.threadContextDocument .diagramToolbar button {
+  display: none;
+}
+
+.threadContextEmpty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 32px 20px;
+  text-align: center;
+}
+
+.threadModalSource {
+  align-items: center;
+  background: #f8fafc;
+  border: 1px solid #e0e6ee;
+  border-radius: 7px;
+  color: #52657c;
+  display: flex;
+  gap: 8px;
+  height: 27px;
+  margin-top: 8px;
+  max-width: min(760px, calc(100vw - 120px));
+  min-height: 27px;
+  padding: 0 8px;
+  text-align: left;
+}
+
+.threadModalSource:hover {
+  background: #eef4ff;
+  border-color: #b9ceff;
+}
+
+.threadModalSource span {
+  color: #6f7d90;
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-weight: 700;
+}
+
+.threadModalSource strong {
+  flex: 1 1 auto;
+  font-size: 10.5px;
+  font-weight: 520;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.threadModalSource i {
+  color: var(--accent-strong);
+  flex: 0 0 auto;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 650;
 }
 
 .threadModalClose {
@@ -1550,7 +1916,7 @@ body.resizing .splitter::before {
   border-radius: 9px;
   color: var(--text);
   line-height: 1.5;
-  min-height: 84px;
+  min-height: 112px;
   outline: 0;
   padding: 11px 12px;
   resize: vertical;
@@ -1616,6 +1982,13 @@ body.resizing .splitter::before {
   opacity: 0.35;
 }
 
+.threadCanvasViewport.focusMode .threadCanvasHint,
+.threadCanvasViewport.focusMode .threadCanvasInsightStrip,
+.threadCanvasViewport.focusMode .threadCanvasControls {
+  opacity: 0;
+  pointer-events: none;
+}
+
 .threadCanvasHint {
   background: rgba(255, 255, 255, 0.84);
   border: 1px solid rgba(217, 224, 233, 0.92);
@@ -1629,6 +2002,30 @@ body.resizing .splitter::before {
   position: absolute;
   top: 14px;
   z-index: 8;
+  transition: opacity 160ms ease;
+}
+
+.threadCanvasInsightStrip {
+  align-items: center;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(217, 224, 233, 0.92);
+  border-radius: 999px;
+  color: #64748b;
+  display: flex;
+  font-size: 10px;
+  gap: 8px;
+  left: 16px;
+  line-height: 22px;
+  padding: 0 10px;
+  position: absolute;
+  top: 44px;
+  z-index: 8;
+  transition: opacity 160ms ease;
+}
+
+.threadCanvasInsightStrip span + span {
+  border-left: 1px solid #e1e7ef;
+  padding-left: 8px;
 }
 
 .threadCanvasControls {
@@ -1644,6 +2041,7 @@ body.resizing .splitter::before {
   right: 16px;
   top: 14px;
   z-index: 9;
+  transition: opacity 160ms ease;
 }
 
 .threadCanvasControls button {
@@ -1781,11 +2179,65 @@ body.resizing .splitter::before {
   text-transform: uppercase;
 }
 
+.threadNodeKindPill {
+  align-items: center;
+  background: #eef4ff;
+  border: 1px solid #c7d8ff;
+  border-radius: 999px;
+  color: #275da8;
+  display: inline-flex;
+  font-size: 9px;
+  height: 18px;
+  justify-content: center;
+  min-width: 22px;
+  padding: 0 6px;
+}
+
+.threadNodeKindPill.kind-idea {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+  color: #166534;
+}
+
+.threadNodeKindPill.kind-assumption {
+  background: #fff7ed;
+  border-color: #fed7aa;
+  color: #9a3412;
+}
+
+.threadNodeKindPill.kind-evidence {
+  background: #f0f9ff;
+  border-color: #bae6fd;
+  color: #075985;
+}
+
+.threadNodeKindPill.kind-risk {
+  background: #fff1f2;
+  border-color: #fecdd3;
+  color: #be123c;
+}
+
+.threadNodeKindPill.kind-decision {
+  background: #f5f3ff;
+  border-color: #ddd6fe;
+  color: #5b21b6;
+}
+
+.threadNodeKindPill.kind-task {
+  background: #f8fafc;
+  border-color: #cbd5e1;
+  color: #334155;
+}
+
 .threadCanvasNodeTopline small {
   color: #7b8798;
   font-size: 9px;
   font-weight: 560;
   text-transform: none;
+}
+
+.threadCanvasNodeTopline small.error {
+  color: var(--danger);
 }
 
 .threadCanvasNodeMain strong {
@@ -1916,7 +2368,7 @@ body.resizing .splitter::before {
   animation: threadFocusNodeIn 240ms cubic-bezier(0.22, 1, 0.36, 1);
   background: rgba(255, 255, 255, 0.99);
   border: 1px solid #bdcbe0;
-  border-radius: 16px;
+  border-radius: 18px;
   box-shadow:
     0 0 0 1px rgba(255, 255, 255, 0.75),
     0 26px 70px rgba(30, 41, 59, 0.24);
@@ -1943,7 +2395,7 @@ body.resizing .splitter::before {
 }
 
 .threadCanvasFocusHeader {
-  align-items: center;
+  align-items: start;
   background: rgba(251, 252, 254, 0.96);
   border-bottom: 1px solid #e4e9f0;
   display: grid;
@@ -1953,6 +2405,67 @@ body.resizing .splitter::before {
   padding: 10px 14px 10px 18px;
   position: relative;
   z-index: 22;
+}
+
+.threadNodeMetaBar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  margin-top: 8px;
+  min-width: 0;
+}
+
+.threadNodeMetaBar label {
+  align-items: center;
+  color: #6f7d90;
+  display: inline-flex;
+  font-size: 9px;
+  font-weight: 700;
+  gap: 6px;
+  line-height: 24px;
+  text-transform: uppercase;
+}
+
+.threadNodeMetaBar select {
+  background: #ffffff;
+  border: 1px solid #d6deea;
+  border-radius: 999px;
+  color: #40516a;
+  font-size: 11px;
+  height: 26px;
+  outline: none;
+  padding: 0 24px 0 10px;
+}
+
+.threadNodeMetaBar select:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.1);
+}
+
+.threadNodeQuickActions {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.threadNodeQuickActions button {
+  background: #f7f9fc;
+  border-color: #dce3ec;
+  border-radius: 999px;
+  color: #40516a;
+  font-size: 11px;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 10px;
+}
+
+.threadNodeQuickActions button:hover,
+.threadNodeQuickActions button:focus-visible {
+  background: #eaf2ff;
+  border-color: #b9ceff;
+  color: var(--accent-strong);
 }
 
 .threadCanvasFocusNode .threadCanvasInspectorContent {
@@ -1994,13 +2507,17 @@ body.resizing .splitter::before {
 }
 
 .threadFocusComposer {
-  gap: 7px;
-  padding: 11px 18px 13px;
+  gap: 9px;
+  padding: 14px 22px 16px;
 }
 
 .threadFocusComposer textarea {
-  min-height: 62px;
-  resize: none;
+  font-size: 14px;
+  line-height: 1.6;
+  max-height: 220px;
+  min-height: 132px;
+  padding: 13px 14px;
+  resize: vertical;
 }
 
 .threadFocusComposerTopline {
@@ -2082,7 +2599,7 @@ body.resizing .splitter::before {
 }
 
 .threadRootComposer textarea {
-  min-height: 180px;
+  min-height: 240px;
 }
 
 .threadSelectionComposer {
@@ -2317,7 +2834,24 @@ body.resizing .splitter::before {
 }
 
 .threadNodeMinimap.collapsed {
-  width: 124px;
+  width: 44px;
+}
+
+.threadNodeMinimap.collapsed .threadNodeMinimapToggle {
+  grid-template-columns: 1fr;
+  height: 32px;
+  min-height: 32px;
+  padding: 0;
+  text-align: center;
+}
+
+.threadNodeMinimap.collapsed .threadNodeMinimapToggle span,
+.threadNodeMinimap.collapsed .threadNodeMinimapToggle small {
+  display: none;
+}
+
+.threadNodeMinimap.collapsed .threadNodeMinimapToggle i {
+  font-size: 15px;
 }
 
 .threadNodeMinimapToggle {
@@ -2923,8 +3457,30 @@ body.resizing .splitter::before {
   }
 
   .threadModalWorkspace {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(160px, 26vh) minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .threadModalBody {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(170px, 30vh) minmax(0, 1fr);
+  }
+
+  .threadModalBody.contextCollapsed {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .threadDocumentContext {
+    border-bottom: 1px solid #dfe5ed;
+    border-right: 0;
+  }
+
+  .threadContextQuote {
+    display: none;
+  }
+
+  .threadContextDocument.preview {
+    font-size: 12px;
+    padding: 18px 20px 64px;
   }
 
   .threadTreePane {
@@ -2941,11 +3497,16 @@ body.resizing .splitter::before {
   }
 
   .threadModalHeader {
-    padding: 18px 16px 16px;
+    min-height: 64px;
+    padding: 10px 12px 10px 16px;
   }
 
   .threadModalHeader h2 {
     font-size: 16px;
+  }
+
+  .threadContextToggle {
+    padding: 0 9px;
   }
 
   .threadModalContent {
@@ -3012,5 +3573,47 @@ body.resizing .splitter::before {
     grid-column: 1;
     grid-row: auto;
     margin-left: 0;
+  }
+}
+
+@media (max-width: 620px) {
+  .threadModalEyebrow span:nth-child(3),
+  .threadModalEyebrow span:nth-child(4),
+  .threadContextToggle span {
+    display: none;
+  }
+
+  .threadModalHeader {
+    gap: 10px;
+  }
+
+  .threadCanvasHint,
+  .threadCanvasInsightStrip {
+    display: none;
+  }
+
+  .threadModalHeaderActions {
+    gap: 2px;
+  }
+
+  .threadContextToggle {
+    font-size: 10px;
+    padding: 0 7px;
+  }
+
+  .threadDocumentContextHeader {
+    padding-left: 14px;
+  }
+
+  .threadFocusComposer {
+    padding: 11px 16px 13px;
+  }
+
+  .threadFocusComposer textarea {
+    min-height: 118px;
+  }
+
+  .threadModalComposerActions > span {
+    max-width: 58%;
   }
 }

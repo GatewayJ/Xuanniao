@@ -63,6 +63,15 @@ export type Message = {
   updatedAt?: string;
 };
 
+export type ConversationNodeKind =
+  | "question"
+  | "idea"
+  | "assumption"
+  | "evidence"
+  | "risk"
+  | "decision"
+  | "task";
+
 export type BranchSelection = {
   sourceMessageId: string;
   text: string;

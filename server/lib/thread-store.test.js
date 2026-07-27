@@ -159,6 +159,30 @@ test("keeps continued questions in one node and deletes only that turn", async (
   }
 });
 
+test("persists planning metadata on user questions", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-meta-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({ title: "Planning meta", selectedText: "selection", anchor: {} });
+    const question = await store.addMessage(thread.id, {
+      role: "user",
+      content: "What is risky?",
+      meta: { branchSelection: { sourceMessageId: "a1", text: "selected text" } }
+    });
+
+    await store.updateMessageMeta(thread.id, question.id, { nodeKind: "risk" });
+    const restored = await new ThreadStore(storePath).get(thread.id);
+    assert.deepEqual(restored.messages[0].meta, {
+      branchSelection: { sourceMessageId: "a1", text: "selected text" },
+      nodeKind: "risk"
+    });
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("inserts a continuation node before every existing child subtree", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-insert-test-"));
   const storePath = path.join(tempDir, "threads.json");

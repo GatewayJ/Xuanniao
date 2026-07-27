@@ -1,141 +1,79 @@
 # 玄鸟 Xuanniao
 
-Xuanniao is a local-first Markdown workspace for designing, discussing, and refining documents with Codex through ACP.
+在本地 Markdown 文档上建立可分支、可追溯的 Codex 讨论树。
 
-玄鸟是一个本地优先的 Markdown 文档协作工具，用于在浏览器中围绕文档与 Codex 讨论、设计和迭代内容。
+Xuanniao is a local-first Markdown workspace for branching, traceable document discussions with Codex through ACP.
 
----
+玄鸟以文档而不是聊天窗口为中心：打开本地 Markdown 文件，围绕具体文本创建讨论，再把问题、回答和后续追问组织成一棵多叉树。它适合 PRD、RFC、ADR、技术方案、接口设计和测试规划等需要持续推演的文档工作。
 
-## 中文
+## 核心体验
 
-### 产品定位
+- **Local-first**：Markdown 原文件和讨论元数据保存在本地。
+- **Markdown-native**：使用 CodeMirror 编辑源文本，以 markdown-it 和 Mermaid 渲染预览。
+- **文本锚定**：Thread 绑定文档选区，并随编辑自动更新位置。
+- **树形讨论**：每个问题都是节点，可以继续分支，也可以在既有路径中插入追问。
+- **局部上下文**：每个节点继承祖先上下文，不会混入无关兄弟分支。
+- **选区追问**：可以在节点的问题或回答中划选文字，直接创建带引用的追问。
+- **空间化导航**：支持无限画布、平移、缩放、节点焦点、面包屑和树形缩略图。
+- **受控文档修改**：Codex 可以返回限定范围的 replacement，由玄鸟应用并同步 Thread anchor。
 
-玄鸟的核心不是聊天窗口，而是文档本身。用户在浏览器中打开本地 Markdown 文件，选中文档片段创建 thread，再让 Codex 围绕该片段解释、补充、重写或修改文档。
+## 界面
 
-它适合需要“边写文档、边和 AI 讨论”的场景：
+### 文档工作区
 
-- 技术方案设计
-- PRD / RFC / ADR 编写
-- 架构说明和 Mermaid 图维护
-- 接口设计、边界条件梳理
-- 测试用例生成
-- 本地 Markdown 知识整理
+左侧编辑或预览 Markdown，右侧 Thread 与文档位置保持对应。只有从文档选区发起“选中文字提问”才会创建新的根 Thread。
 
-### 特色
+### 讨论树总览
 
-- **玄鸟品牌**：顶栏使用抽象玄鸟矢量 logo，深色底代表夜空，青色与金色翼形代表传信、批注与文档流转。
-- **Local-first**：文档、thread、历史记录默认保存在本地。
-- **Markdown-native**：CodeMirror 直接编辑 Markdown 源文本，Preview 用 markdown-it 渲染。
-- **段落级协作**：选中文本创建 thread，评论与 Codex 回复绑定到文档 anchor。
-- **Preview 也能创建 thread**：在预览页选择文本后可以创建 thread 或直接提问。
-- **Thread anchor 跟随编辑**：编辑文档时，thread 的 `start/end/lineStart/lineEnd` 会随 CodeMirror change map 更新；关联范围被完整删除时，thread 也会删除。
-- **Codex 可修改选区**：当用户明确要求改写、翻译、替换或修改时，玄鸟要求 Codex 返回受控 replacement，并由玄鸟写入文档。
-- **可配置 Agent 权限**：默认给予 Codex 完全访问权限，也可以用 `XUANNIAO_AGENT_MODE=read-only` 启动只读会话。
-- **Mermaid 支持**：Markdown Preview 渲染 Mermaid，并支持横向滚动和全屏放大查看。
-- **文件浏览**：可以在应用内进入目录、返回上级并打开 workspace 内外的 Markdown 文件，也可以手动输入绝对路径。
-- **Markdown 回复渲染**：thread 中的消息按 Markdown-compatible plain text 渲染，代码、XML、JSON、diff、日志建议使用 fenced code block。
+点击 Thread 进入全屏画布。节点底部的 `＋ 分支` 创建新的子分支，连线上的 `＋` 在指定路径中插入节点。
 
-### 程序架构
+[![多叉讨论树](docs/images/xuanniao-thread-tree.png)](docs/images/xuanniao-thread-tree.png)
 
-```text
-┌──────────────────────────── Browser / React ────────────────────────────┐
-│ TopBar / DocumentPane / ThreadRail / FilePickerModal / DiagramViewer     │
-│ App.tsx: state orchestration, document switching, thread flow            │
-│ ThreadEditor.ts: CodeMirror adapter, selection, decorations, anchor map  │
-│ markdown.ts: markdown-it preview, message rendering, Mermaid rendering   │
-└─────────────────────────────── fetch /api ───────────────────────────────┘
-                                      │
-┌──────────────────────────── Node HTTP server ────────────────────────────┐
-│ server/index.js: REST API, static serving, document switching            │
-│ thread-store.js: home-directory thread metadata store                    │
-│ block-index.js: lightweight Markdown block index                         │
-│ acp-client.js: ACP JSON-RPC client + per-thread session lifecycle        │
-└──────────────────────────────── ACP ──────────────────────────────────────┘
-                                      │
-                    local Markdown file + ~/xuanniao metadata
-```
+### 节点焦点与路径预览
 
-### 代码分层
+点击节点后，节点在同一画布中进入焦点模式。输入问题时会同时显示路线预览和幽灵节点；可以选择新建分支，或插入某条既有路径。
 
-| 层 | 文件 | 说明 |
-| --- | --- | --- |
-| Web entry | `web/src/main.tsx` | React 入口 |
-| App orchestration | `web/src/App.tsx` | 全局状态、文档切换、thread 创建、自动保存、agent 调用结果处理 |
-| UI components | `web/src/components/*` | 顶栏、文档面板、评论栏、文件选择、图表全屏查看 |
-| Editor adapter | `web/src/ThreadEditor.ts` | CodeMirror 6 初始化、选区读取、thread decoration、anchor remap |
-| Preview/rendering | `web/src/markdown.ts` | Markdown preview、message Markdown、Mermaid 渲染 |
-| Hooks | `web/src/hooks/*` | Preview 渲染副作用、评论栏宽度拖拽 |
-| API client | `web/src/api.ts` | 浏览器侧 REST API 封装 |
-| Shared types | `web/src/types.ts` | 文档、thread、message、anchor 类型 |
-| Server entry | `server/index.js` | HTTP API、静态文件、文档读写、文件选择 |
-| Thread store | `server/lib/thread-store.js` | `~/xuanniao/<document-path-sha256>/threads.json` 持久化 |
-| ACP client | `server/lib/acp-client.js` | ACP 进程、thread session、prompt、权限与恢复 |
-| Block index | `server/lib/block-index.js` | Markdown 块和 outline 索引 |
+[![节点焦点、缩略图与路径插入预览](docs/images/xuanniao-node-focus.png)](docs/images/xuanniao-node-focus.png)
 
-> `Cargo.toml` 和 `src/main.rs` 目前只是早期 CLI 壳工程，当前可运行产品路径是 Node + Vite。
+## 交互语义
 
-### 数据与状态
-
-- 当前打开的 Markdown 文件直接读写原文件。
-- Thread 数据保存在用户家目录下的 Xuanniao 元数据目录，按 Markdown 文件绝对路径的 SHA-256 寻址：
+玄鸟明确区分节点操作和路径操作：
 
 ```text
-~/xuanniao/<document-path-sha256>/threads.json
+从节点创建分支
+
+    B
+   / \
+  C   D
 ```
-
-- 首次打开已有旧 sidecar 的文档时，会从同目录 `.xuanniao/<markdown-file-name>.threads.json` 复制到新的 home 目录位置。
-- 每个 thread 保存：
-  - `selectedText`
-  - `anchor.start`
-  - `anchor.end`
-  - `anchor.lineStart`
-  - `anchor.lineEnd`
-  - `acpSessionId`
-  - 多轮 message 历史
-
-- 编辑文档时，前端用 CodeMirror transaction 的 change map 更新 anchor，并 debounce 写回 thread store。选区前的增删会平移位置；选区内的编辑会更新 `selectedText` 与范围；完整替换只保留发起替换的 thread，覆盖到的其它选区会删除；完整纯删除也会同步删除 thread。AI 或其它 agent 写入文档后，服务端会同步全部 thread。旧锚点失效时，才用 `selectedText + lineStart` 恢复定位。
-
-### Agent 与 ACP session
-
-当前实现是 **thread-level ACP session**：
-
-- 一个活动文档对应一个 `AcpDocumentAgent`。
-- 一个 `AcpDocumentAgent` 只启动一个 `codex-acp` 进程。
-- 每个 thread 第一次向 Codex 提问时创建自己的 ACP session。
-- `acpSessionId` 保存在 thread store 中；服务重启后通过 `session/load` 恢复。
-- 请求通过 `promptLock` 串行化。
-- 切换文档时销毁旧 ACP 进程，并为新文档启动新的 ACP 进程。
-
-调用 Codex 前没有使用 ACP 的独立 `system` 字段，而是由 `server/lib/acp-client.js` 的 `buildPrompt()` 拼出完整 prompt。prompt 中包含：
-
-- 玄鸟的协作规则
-- Markdown-compatible 回复约定
-- 当前文档路径、标题和完整内容
-- 选中文本
-- anchor
-- 当前 thread 的完整消息历史
-- 当前用户问题
-
-编辑模式下会额外要求 Codex 只返回：
 
 ```text
-<XUANNIAO_REPLACEMENT>
-replacement markdown here
-</XUANNIAO_REPLACEMENT>
+在路径中插入追问
+
+A → B → C
+      ↓
+A → B → D → C
 ```
 
-玄鸟解析该 replacement 后由服务端写入文档。默认的完全访问模式也允许 Codex 直接完成用户要求的仓库级操作。
+- 点击节点：进入该节点的阅读与追问焦点。
+- 点击节点底部 `＋ 分支`：创建新的子分支，不移动既有子节点。
+- 点击连线 `＋`：在父子节点之间插入新节点。
+- 节点没有子节点时直接创建子节点；只有一个子节点时默认继续当前路径；存在多个子节点时必须选择插入路径或另建分支。
+- 划选问题或回答中的文字：出现带引用的内联提问框。
+- `Esc`：从节点焦点返回树总览，再次按下关闭 Thread 工作区。
+- 拖动背景：平移画布。
+- 普通滚轮：移动画布。
+- `Command/Ctrl + 滚轮`：缩放画布。
+- 方向键：在父节点、第一子节点和相邻兄弟节点之间移动。
 
-玄鸟只支持 ACP，不再 fallback 到 `codex exec`。服务启动时会初始化 ACP；找不到或无法启动 `codex-acp` 时立即报错退出。
+## 快速开始
 
-### 运行方式
+### 要求
 
-要求：
-
-- Node.js >= 20
+- Node.js 20 或更高版本
 - npm
-- 必需：ACP adapter `codex-acp`
-- 必需：Codex CLI `codex`，由 `codex-acp` 作为后端使用
+- Codex CLI
+- ACP adapter：`codex-acp`
 
 安装依赖：
 
@@ -145,13 +83,11 @@ npm install -g @agentclientprotocol/codex-acp
 codex-acp --version
 ```
 
-推荐开发运行：
+启动：
 
 ```bash
 make run
 ```
-
-前端服务就绪后会自动打开默认浏览器。
 
 默认打开：
 
@@ -159,60 +95,108 @@ make run
 http://127.0.0.1:5173
 ```
 
-默认文档是 `prd.md`。打开其他文档：
+默认文档为 `prd.md`。打开其他 Markdown 文件：
 
 ```bash
 make run FILE=docs/example.md
 ```
 
-自定义端口：
+如果端口已被占用：
 
 ```bash
 make run SERVER_PORT=4174 WEB_PORT=5174
 ```
 
-手动运行 API server：
+## 使用流程
 
-```bash
-npm start -- prd.md
+1. 打开本地 Markdown 文件。
+2. 在 Edit 或 Preview 中选择一段文字。
+3. 点击“选中文字提问”，在选区旁的提问框中创建根 Thread 并向 Codex 提问。
+4. 从评论栏打开 Thread，进入讨论树画布。
+5. 点击节点查看问题和回答，或在节点与连线上创建新的讨论路径。
+6. 在问题或回答中划选文字，基于精确引用继续追问。
+7. 明确使用“修改、改写、翻译、替换”等意图时，Codex 可以更新锚定的文档范围。
+
+## 架构
+
+```text
+┌──────────────────────────── Browser / React ────────────────────────────┐
+│ DocumentPane · ThreadRail · Thread Canvas · FilePicker · Diagram Viewer │
+│ CodeMirror · markdown-it · Mermaid · anchor remapping                   │
+└─────────────────────────────── fetch /api ───────────────────────────────┘
+                                      │
+┌──────────────────────────── Node HTTP Server ───────────────────────────┐
+│ document I/O · thread tree · path insertion · metadata persistence      │
+│ ACP lifecycle · permissions · prompt construction · replacement apply   │
+└────────────────────────────────── ACP ───────────────────────────────────┘
+                                      │
+                         codex-acp → Codex CLI
 ```
 
-手动运行 Vite web：
+| 层 | 主要文件 | 职责 |
+| --- | --- | --- |
+| 应用编排 | `web/src/App.tsx` | 文档、Thread、保存、Agent 调用与全局状态 |
+| 文档编辑 | `web/src/ThreadEditor.ts` | CodeMirror、选区、装饰和 anchor remap |
+| 树形交互 | `web/src/components/ThreadRail.tsx` | 评论栏、无限画布、节点焦点和内联追问 |
+| 树布局 | `web/src/thread-tree.ts`, `web/src/thread-canvas.ts` | 会话树构建、导航、路径和空间布局 |
+| 渲染 | `web/src/markdown.ts` | Markdown、代码块与 Mermaid |
+| API | `web/src/api.ts`, `server/index.js` | 浏览器与本地服务通信 |
+| 持久化 | `server/lib/thread-store.js` | Thread、节点关系、消息和 session |
+| ACP | `server/lib/acp-client.js` | adapter、节点 session、prompt、权限与恢复 |
 
-```bash
-XUANNIAO_API_HOST=127.0.0.1 XUANNIAO_API_PORT=4173 npm run web:dev
+> `Cargo.toml` 和 `src/main.rs` 是早期 CLI 壳工程。当前可运行产品使用 Node.js、React 和 Vite。
+
+## 数据与上下文
+
+当前 Markdown 文件直接读写原文件。Thread 数据按文档绝对路径的 SHA-256 保存在：
+
+```text
+~/xuanniao/<document-path-sha256>/threads.json
 ```
 
-生产构建：
+每个讨论节点保存：
 
-```bash
-npm run web:build
+- 节点 ID 与父节点 ID
+- 用户问题和 Codex 回答
+- 可选的引用文本与来源消息
+- ACP session ID
+- 创建时间、错误状态和其它消息元数据
+
+当前实现采用 **conversation-node-level ACP session**：
+
+- 一个活动文档对应一个 `AcpDocumentAgent` 和一个 `codex-acp` 进程。
+- 每个讨论节点拥有独立的 ACP session。
+- 同一节点内的连续轮次复用该节点 session。
+- 新节点的 prompt 由根节点到当前节点的祖先消息构成，不包含兄弟分支。
+- session ID 持久化到 Thread store，服务重启后使用 `session/load` 恢复。
+- 切换文档时销毁旧 ACP 进程，并为新文档启动新的进程。
+
+Local-first 表示文档和玄鸟元数据保存在本机；Codex 是否使用远端模型或访问网络，取决于 Codex CLI 与 ACP adapter 的配置。
+
+## 文档修改
+
+当用户明确要求修改文档时，玄鸟要求 Codex 返回：
+
+```text
+<XUANNIAO_REPLACEMENT>
+replacement markdown here
+</XUANNIAO_REPLACEMENT>
 ```
 
-检查：
+服务端解析 replacement、更新原 Markdown 文件，并重新同步所有受影响的 Thread anchor。完整删除锚定范围时，对应 Thread 也会删除。
 
-```bash
-npm run check
-```
+## 配置
 
-### ACP / Codex 配置
-
-Agent 默认拥有完全访问权限，ACP 会自动处理权限请求：
+Agent 默认使用完全访问模式：
 
 ```bash
 make run
 ```
 
-需要只读会话时：
+只读模式：
 
 ```bash
 XUANNIAO_AGENT_MODE=read-only make run
-```
-
-默认 ACP 命令：
-
-```text
-codex-acp
 ```
 
 指定 ACP adapter：
@@ -221,311 +205,89 @@ codex-acp
 XUANNIAO_ACP_CMD="/path/to/codex-acp" npm start -- prd.md
 ```
 
-如果 `codex login status` 已经显示登录，但 ACP 仍提示需要认证，可以允许 ACP adapter 使用现有凭据：
+复用已有 Codex 登录凭据：
 
 ```bash
 XUANNIAO_ACP_SKIP_AUTH=1 npm start -- prd.md
 ```
 
-指定供 `codex-acp` 使用的 Codex 可执行文件：
+指定 Codex 可执行文件：
 
 ```bash
 CODEX_PATH="/path/to/codex" npm start -- prd.md
 ```
 
-调整超时时间：
+调整 ACP 超时：
 
 ```bash
 XUANNIAO_ACP_TIMEOUT_MS=300000 npm start -- prd.md
 ```
 
-### 文件选择
+## 开发
 
-玄鸟会列出 workspace 内的 Markdown 文件，也支持：
-
-- 输入绝对路径打开 workspace 外文件
-- 点击 `Browse...` 打开系统文件选择器
-
-Linux 下系统选择器会依次尝试 `zenity`、`kdialog`、`yad`、`qarma`、Python tkinter。macOS 使用 `osascript`，Windows 使用 PowerShell OpenFileDialog。
-
-### 使用流程
-
-1. 打开一个 Markdown 文件。
-2. 在 Edit 或 Preview 中选择一段文本。
-3. 点击 `New Thread` 创建 thread，或点击 `Ask Codex About Selection` 直接提问。
-4. 在右侧评论栏中继续添加本地评论或向 Codex 提问。
-5. 如果想让 Codex 改文档，明确使用“修改、改写、翻译、替换、edit、rewrite、replace”等意图。
-6. 玄鸟会在可定位选区时应用 replacement，并更新 thread anchor。
-
-### 典型场景
-
-- **技术方案设计**：围绕架构、模块边界、存储模型、安全模型反复讨论。
-- **PRD/RFC 打磨**：选择某个需求段落，让 Codex 补充边界条件、异常路径、验收标准。
-- **接口设计**：选择 API 描述，让 Codex 生成请求/响应示例、错误码、兼容性说明。
-- **测试设计**：针对选中功能生成正常路径、异常路径、并发、权限和恢复测试。
-- **图表审阅**：在 Mermaid 架构图旁创建 thread，并用全屏模式查看长链路图。
-- **本地文档问答**：不把文档上传到云端，在本机围绕 Markdown 做讨论和迭代。
-
-### 当前限制
-
-- Thread 持久化使用 home 目录下的 JSON 文件，适合 MVP，后续可以迁移到 SQLite。
-- 文档修改目前使用选区 replacement，不是完整 patch review flow。
-- 完全访问是默认模式；需要禁止修改时使用 `XUANNIAO_AGENT_MODE=read-only`。
-
----
-
-## English
-
-### Product Positioning
-
-Xuanniao is a document-centered workspace, not a chat-centered app. You open a local Markdown file in the browser, select a document range, create a thread, and collaborate with Codex around that exact piece of text.
-
-It is designed for workflows where writing and AI discussion happen together:
-
-- technical design documents
-- PRDs, RFCs, and ADRs
-- architecture notes and Mermaid diagrams
-- API design and edge-case analysis
-- test-case generation
-- local Markdown knowledge work
-
-### Highlights
-
-- **Xuanniao brand**: the top bar uses an abstract vector Xuanniao mark; the dark base suggests night sky, while teal and gold wings suggest message-carrying, annotation, and document flow.
-- **Local-first**: documents, threads, and history stay on your machine by default.
-- **Markdown-native**: CodeMirror edits Markdown source; markdown-it renders Preview.
-- **Range-based collaboration**: selected text becomes an anchored thread.
-- **Preview thread creation**: create threads from selected text in Preview as well as Edit.
-- **Anchor remapping while editing**: thread `start/end/lineStart/lineEnd` move with CodeMirror change maps.
-- **Controlled document edits**: when the user explicitly asks for edits, Codex returns a bounded replacement and Xuanniao applies it.
-- **Configurable agent access**: Codex has full access by default; start with `XUANNIAO_AGENT_MODE=read-only` for a read-only session.
-- **Mermaid support**: diagrams render locally, support horizontal scrolling, and can be opened in a fullscreen zoom viewer.
-- **System file picker**: open Markdown files outside the workspace through a native picker or absolute path.
-- **Markdown-rendered replies**: thread messages are rendered as Markdown-compatible plain text.
-
-### Architecture
-
-```text
-┌──────────────────────────── Browser / React ────────────────────────────┐
-│ TopBar / DocumentPane / ThreadRail / FilePickerModal / DiagramViewer     │
-│ App.tsx: state orchestration, document switching, thread flow            │
-│ ThreadEditor.ts: CodeMirror adapter, selection, decorations, anchor map  │
-│ markdown.ts: markdown-it preview, message rendering, Mermaid rendering   │
-└─────────────────────────────── fetch /api ───────────────────────────────┘
-                                      │
-┌──────────────────────────── Node HTTP server ────────────────────────────┐
-│ server/index.js: REST API, static serving, document switching            │
-│ thread-store.js: home-directory thread metadata store                    │
-│ block-index.js: lightweight Markdown block index                         │
-│ acp-client.js: ACP JSON-RPC client + per-thread session lifecycle        │
-└──────────────────────────────── ACP ──────────────────────────────────────┘
-                                      │
-                    local Markdown file + ~/xuanniao metadata
-```
-
-### Code Boundaries
-
-| Layer | Files | Responsibility |
-| --- | --- | --- |
-| Web entry | `web/src/main.tsx` | React entrypoint |
-| App orchestration | `web/src/App.tsx` | Global state, document switching, thread flow, autosave, agent result handling |
-| UI components | `web/src/components/*` | Top bar, document pane, comment rail, file picker, diagram viewer |
-| Editor adapter | `web/src/ThreadEditor.ts` | CodeMirror setup, selection, thread decorations, anchor remapping |
-| Preview/rendering | `web/src/markdown.ts` | Markdown preview, message Markdown, Mermaid rendering |
-| Hooks | `web/src/hooks/*` | Preview rendering side effects and resizable rail width |
-| API client | `web/src/api.ts` | Browser REST API wrapper |
-| Shared types | `web/src/types.ts` | Document, thread, message, and anchor types |
-| Server entry | `server/index.js` | HTTP API, static serving, document I/O, native file picker |
-| Thread store | `server/lib/thread-store.js` | `~/xuanniao/<document-path-sha256>/threads.json` persistence |
-| ACP client | `server/lib/acp-client.js` | ACP process, thread sessions, prompts, permissions, and recovery |
-| Block index | `server/lib/block-index.js` | Markdown block and outline indexing |
-
-> `Cargo.toml` and `src/main.rs` are currently an early CLI shell. The working app path today is Node + Vite.
-
-### Data Model
-
-- The active Markdown file is read from and written to disk directly.
-- Thread data is stored in the Xuanniao metadata directory under the user's home directory, addressed by the SHA-256 hash of the Markdown file's absolute path:
-
-```text
-~/xuanniao/<document-path-sha256>/threads.json
-```
-
-- When opening a document that already has an old sidecar, Xuanniao copies `.xuanniao/<markdown-file-name>.threads.json` into the new home-directory location.
-- Each thread stores selected text, anchor positions, line numbers, `acpSessionId`, and message history.
-- During editing, the frontend remaps anchors with CodeMirror transaction changes and saves them back to the thread store with debounce.
-
-### Agent and ACP Session Model
-
-Xuanniao uses **thread-level ACP sessions**:
-
-- One active document owns one `AcpDocumentAgent`.
-- One `AcpDocumentAgent` owns one `codex-acp` process.
-- Each thread creates its own ACP session on its first prompt.
-- The thread store persists `acpSessionId`; after a server restart Xuanniao restores it with `session/load`.
-- Prompts are serialized with `promptLock`.
-- Switching documents replaces the ACP process for the active document.
-
-Xuanniao does not currently send a separate ACP `system` field. Instead, `server/lib/acp-client.js` builds a full text prompt before each `session/prompt`. That prompt includes:
-
-- Xuanniao collaboration rules
-- Markdown-compatible reply instructions
-- current document path, title, and complete content
-- selected text
-- anchor JSON
-- complete current-thread message history
-- the current user question
-
-In edit mode, Xuanniao asks Codex to return only:
-
-```text
-<XUANNIAO_REPLACEMENT>
-replacement markdown here
-</XUANNIAO_REPLACEMENT>
-```
-
-Xuanniao parses and applies that replacement itself. In the default full-access mode, Codex may also perform repository-level operations requested by the user.
-
-Xuanniao requires ACP and never falls back to `codex exec`. Startup initializes the adapter and exits immediately if `codex-acp` is missing or cannot start.
-
-### Running
-
-Requirements:
-
-- Node.js >= 20
-- npm
-- required: an ACP adapter named `codex-acp`
-- required: Codex CLI, used by the adapter as its backend
-
-Install dependencies:
-
-```bash
-npm ci
-npm install -g @agentclientprotocol/codex-acp
-codex-acp --version
-```
-
-Recommended development run:
-
-```bash
-make run
-```
-
-Open:
-
-```text
-http://127.0.0.1:5173
-```
-
-Open a different document:
-
-```bash
-make run FILE=docs/example.md
-```
-
-Custom ports:
-
-```bash
-make run SERVER_PORT=4174 WEB_PORT=5174
-```
-
-Run the API server manually:
+手动启动 API：
 
 ```bash
 npm start -- prd.md
 ```
 
-Run Vite manually:
+手动启动 Vite：
 
 ```bash
 XUANNIAO_API_HOST=127.0.0.1 XUANNIAO_API_PORT=4173 npm run web:dev
 ```
 
-Build:
-
-```bash
-npm run web:build
-```
-
-Check:
+检查：
 
 ```bash
 npm run check
 ```
 
-### ACP / Codex Configuration
-
-The agent has full access by default, with ACP permission requests handled automatically:
+生产构建：
 
 ```bash
+npm run web:build
+```
+
+## 适用场景
+
+- PRD、RFC 和 ADR 的需求澄清与持续推演
+- 架构、模块边界、存储和安全模型设计
+- API 请求响应、错误码和兼容性讨论
+- 正常路径、异常路径、并发、权限和恢复测试规划
+- Mermaid 架构图与技术路线审阅
+- 本地 Markdown 知识整理和 AI 问答
+
+## 当前限制
+
+- Thread 使用本地 JSON 持久化，适合当前单用户工作流，后续可以迁移到 SQLite。
+- 文档修改采用锚定范围 replacement，还不是完整的 patch review 工作流。
+- 当前是单用户、单 Server 实例、单活动文档。
+- 完全访问是默认模式；不允许修改时应显式使用只读模式。
+
+---
+
+## English
+
+Xuanniao is a document-centered, local-first Markdown workspace. Select a range in a local document, ask Codex, and organize follow-up questions as a navigable conversation tree.
+
+Key capabilities:
+
+- local Markdown editing and metadata persistence
+- anchored discussions that follow document edits
+- multi-way conversation trees
+- branch creation and targeted path insertion
+- inline follow-ups from selected question or answer text
+- per-node ACP sessions with ancestor-only context
+- Markdown, code block, and Mermaid rendering
+- controlled selected-range document replacement
+
+Quick start:
+
+```bash
+npm ci
+npm install -g @agentclientprotocol/codex-acp
 make run
 ```
 
-Start a read-only session when needed:
-
-```bash
-XUANNIAO_AGENT_MODE=read-only make run
-```
-
-Default ACP command:
-
-```text
-codex-acp
-```
-
-Use a specific ACP adapter:
-
-```bash
-XUANNIAO_ACP_CMD="/path/to/codex-acp" npm start -- prd.md
-```
-
-If `codex login status` already reports a logged-in account but ACP still asks for authentication, allow the adapter to use existing credentials:
-
-```bash
-XUANNIAO_ACP_SKIP_AUTH=1 npm start -- prd.md
-```
-
-Select the Codex executable used by `codex-acp`:
-
-```bash
-CODEX_PATH="/path/to/codex" npm start -- prd.md
-```
-
-Adjust timeout:
-
-```bash
-XUANNIAO_ACP_TIMEOUT_MS=300000 npm start -- prd.md
-```
-
-### File Picker
-
-Xuanniao lists Markdown files inside the workspace and also supports opening external files by:
-
-- entering an absolute Markdown path
-- clicking `Browse...` to open the system file picker
-
-On Linux, Xuanniao tries `zenity`, `kdialog`, `yad`, `qarma`, and Python tkinter. On macOS it uses `osascript`; on Windows it uses PowerShell OpenFileDialog.
-
-### Workflow
-
-1. Open a Markdown file.
-2. Select text in Edit or Preview.
-3. Click `New Thread`, or click `Ask Codex About Selection`.
-4. Add local comments or ask Codex from the right rail.
-5. To let Codex edit the document, use an explicit edit intent such as rewrite, replace, translate, modify, or edit.
-6. Xuanniao applies a bounded replacement when the selection can be located and updates the thread anchor.
-
-### Use Cases
-
-- **Technical design**: discuss architecture, module boundaries, storage models, and security models.
-- **PRD/RFC refinement**: add edge cases, failure paths, and acceptance criteria.
-- **API design**: generate request/response examples, error codes, and compatibility notes.
-- **Testing**: derive happy-path, failure-path, concurrency, permission, and recovery tests.
-- **Diagram review**: attach threads to Mermaid diagrams and inspect long diagrams in fullscreen.
-- **Local document Q&A**: iterate on Markdown documents without moving them into a cloud workspace.
-
-### Current Limits
-
-- Thread persistence uses JSON files under the home metadata directory; SQLite is a natural next step.
-- Document edits use selected-range replacement, not a full patch review flow yet.
-- Full access is the default; use `XUANNIAO_AGENT_MODE=read-only` when mutation must be disabled.
+Then open `http://127.0.0.1:5173`.
