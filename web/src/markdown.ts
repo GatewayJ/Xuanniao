@@ -1,10 +1,8 @@
 import MarkdownIt from "markdown-it";
-import mermaid from "mermaid";
 
 const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 const messageMd = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: true });
-
-mermaid.initialize({ startOnLoad: false, securityLevel: "strict", theme: "default" });
+let mermaidPromise: Promise<typeof import("mermaid").default> | null = null;
 
 const defaultFence = md.renderer.rules.fence;
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
@@ -34,6 +32,8 @@ export function renderMessageMarkdown(content: string): string {
 
 export async function renderMermaidBlocks(root: HTMLElement): Promise<void> {
   const blocks = [...root.querySelectorAll<HTMLElement>("[data-mermaid]")];
+  if (blocks.length === 0) return;
+  const mermaid = await loadMermaid();
   await Promise.all(blocks.map(async (block, index) => {
     const source = decodeURIComponent(block.dataset.mermaid || "");
     try {
@@ -54,6 +54,20 @@ export async function renderMermaidBlocks(root: HTMLElement): Promise<void> {
       block.textContent = error instanceof Error ? error.message : String(error);
     }
   }));
+}
+
+async function loadMermaid() {
+  if (!mermaidPromise) {
+    mermaidPromise = import("mermaid").then(({ default: mermaid }) => {
+      mermaid.initialize({
+        startOnLoad: false,
+        securityLevel: "strict",
+        theme: "default"
+      });
+      return mermaid;
+    });
+  }
+  return mermaidPromise;
 }
 
 function sizeMermaidSvg(block: HTMLElement) {

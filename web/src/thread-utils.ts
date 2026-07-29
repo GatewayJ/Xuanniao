@@ -1,6 +1,8 @@
-import { compareThreadsByAnchor, normalizeSearchText, resolveThreadAnchor } from "./thread-anchors";
-import { reparentConversationNode, reparentDirectChildNodes } from "./thread-tree";
-import type { BranchSelection, Message, SelectionContext, Thread } from "./types";
+import { compareThreadsByAnchor, normalizeSearchText, resolveThreadAnchor } from "./thread-anchors.ts";
+import { reparentConversationNode, reparentDirectChildNodes } from "./thread-tree.ts";
+import type { ConversationMessageCommand, Message, SelectionContext, Thread } from "./types";
+
+let pendingMessageSequence = 0;
 
 export function orderThreads(threads: Thread[], content?: string | null): Thread[] {
   return [...threads].sort((left, right) => compareThreadsByAnchor(left, right, content));
@@ -36,33 +38,26 @@ export function insertThreadOnce(threads: Thread[], thread: Thread): Thread[] {
 
 export function appendPendingMessage(
   threads: Thread[],
-  threadId: string,
-  content: string,
-  askAgent: boolean,
-  nodeId: string | null = null,
-  parentMessageId: string | null = null,
-  branchSelection: BranchSelection | null = null,
-  adoptExistingChildren = false,
-  insertBeforeNodeId: string | null = null
+  command: ConversationMessageCommand
 ): Thread[] {
   const now = new Date().toISOString();
-  const pendingQuestionId = `pending-${Date.now()}`;
-  const pendingNodeId = nodeId || pendingQuestionId;
+  const pendingQuestionId = nextPendingMessageId("pending");
+  const pendingNodeId = command.nodeId || pendingQuestionId;
   const pendingMessages: Message[] = [
     {
       id: pendingQuestionId,
       role: "user",
-      content,
+      content: command.content,
       nodeId: pendingNodeId,
-      parentId: parentMessageId,
-      meta: branchSelection ? { branchSelection } : {},
+      parentId: command.parentMessageId || null,
+      meta: command.branchSelection ? { branchSelection: command.branchSelection } : {},
       createdAt: now
     }
   ];
 
-  if (askAgent) {
+  if (command.askAgent) {
     pendingMessages.push({
-      id: `pending-agent-${Date.now()}`,
+      id: nextPendingMessageId("pending-agent"),
       role: "assistant",
       content: "Working with local Codex...",
       nodeId: pendingNodeId,
@@ -72,11 +67,11 @@ export function appendPendingMessage(
   }
 
   return threads.map((thread) => {
-    if (thread.id !== threadId) return thread;
-    const messages = insertBeforeNodeId
-      ? reparentConversationNode(thread.messages, insertBeforeNodeId, pendingNodeId)
-      : adoptExistingChildren && parentMessageId
-        ? reparentDirectChildNodes(thread.messages, parentMessageId, pendingNodeId)
+    if (thread.id !== command.threadId) return thread;
+    const messages = command.insertBeforeNodeId
+      ? reparentConversationNode(thread.messages, command.insertBeforeNodeId, pendingNodeId)
+      : command.adoptExistingChildren && command.parentMessageId
+        ? reparentDirectChildNodes(thread.messages, command.parentMessageId, pendingNodeId)
         : thread.messages;
     return { ...thread, messages: [...messages, ...pendingMessages] };
   });
@@ -101,7 +96,7 @@ export function updateMessageWithPendingReply(threads: Thread[], threadId: strin
 
     if (rerunAgent) {
       const pendingAssistant: Message = {
-        id: `pending-agent-${Date.now()}`,
+        id: nextPendingMessageId("pending-agent"),
         role: "assistant",
         content: "Updating Codex reply...",
         nodeId: messages[index].nodeId || messageId,
@@ -133,4 +128,9 @@ function findAssistantReplyIndex(messages: Message[], userMessageIndex: number):
 
 function normalizeText(value: string): string {
   return normalizeSearchText(value);
+}
+
+function nextPendingMessageId(prefix: string): string {
+  pendingMessageSequence += 1;
+  return `${prefix}-${Date.now()}-${pendingMessageSequence}`;
 }

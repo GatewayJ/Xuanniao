@@ -10,7 +10,6 @@ function makeThread(content: string, selectedText: string, id = "thread-1"): Thr
   const end = start + selectedText.length;
   return {
     id,
-    acpSessionId: null,
     title: selectedText,
     selectedText,
     anchor: {
@@ -55,7 +54,14 @@ test("expands a thread when text is inserted inside its selected range", () => {
 test("keeps a thread on a non-empty replacement of its entire selection", () => {
   const previous = "before selected after";
   const thread = makeThread(previous, "selected");
-  const changes = ChangeSet.of({ from: thread.anchor.start!, to: thread.anchor.end!, insert: "replacement" }, previous.length);
+  const changes = ChangeSet.of(
+    {
+      from: thread.anchor.start!,
+      to: thread.anchor.end!,
+      insert: "replacement"
+    },
+    previous.length
+  );
   const content = "before replacement after";
 
   const result = remapThreadsForChange([thread], previous, content, changes, thread.id);
@@ -80,12 +86,22 @@ test("deletes another thread whose range is covered by a wider replacement", () 
   const previous = "before first second after";
   const first = makeThread(previous, "first", "first");
   const second = makeThread(previous, "second", "second");
-  const changes = ChangeSet.of({ from: first.anchor.start!, to: previous.indexOf(" after"), insert: "replacement" }, previous.length);
+  const changes = ChangeSet.of(
+    {
+      from: first.anchor.start!,
+      to: previous.indexOf(" after"),
+      insert: "replacement"
+    },
+    previous.length
+  );
   const content = "before replacement after";
 
   const result = remapThreadsForChange([first, second], previous, content, changes, first.id);
 
-  assert.deepEqual(result.threads.map((thread) => thread.id), [first.id]);
+  assert.deepEqual(
+    result.threads.map((thread) => thread.id),
+    [first.id]
+  );
   assert.deepEqual(result.deletedThreadIds, [second.id]);
 });
 

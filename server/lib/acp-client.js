@@ -1,72 +1,119 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { EventEmitter } from "node:events";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-export class AcpDocumentAgent extends EventEmitter {
-  constructor({ documentPath, cwd, commandLine, accessMode = "full-access", timeoutMs }) {
-    super();
+import { normalizeAgentMode, parseCommandLine } from "./agent-config.js";
+import {
+  AGENT_DEVELOPER_INSTRUCTIONS,
+  DocumentSnapshotCache,
+  buildAgentPrompt,
+  documentHash
+} from "./agent-context.js";
+import { JsonLineRpcProcess } from "./json-line-rpc-process.js";
+
+export { normalizeAgentMode, parseCommandLine } from "./agent-config.js";
+
+export class AcpDocumentAgent {
+  constructor({
+    documentPath,
+    cwd,
+    commandLine,
+    accessMode = "full-access",
+    timeoutMs,
+    contextMaxChars,
+    snapshotCacheEntries = 32,
+    env = process.env
+  }) {
     this.documentPath = path.resolve(documentPath);
     this.cwd = cwd;
     this.commandLine = commandLine;
     this.accessMode = normalizeAgentMode(accessMode);
     this.timeoutMs = timeoutMs;
-    this.protocolId = 0;
-    this.pending = new Map();
+    this.contextMaxChars = contextMaxChars;
+    this.env = env;
     this.initialized = false;
     this.agentCapabilities = {};
     this.threadSessions = new Map();
-    this.process = null;
-    this.stdoutBuffer = "";
-    this.stderrTail = "";
     this.activeTurn = null;
     this.promptLock = Promise.resolve();
     this.pendingPermissions = new Map();
+    this.documentSnapshots = new DocumentSnapshotCache(snapshotCacheEntries);
+    this.rpc = new JsonLineRpcProcess({
+      label: "ACP",
+      commandLine,
+      cwd,
+      env: {
+        ...env,
+        CODEX_PATH: env.CODEX_PATH ?? "codex",
+        INITIAL_AGENT_MODE: acpAgentMode(this.accessMode)
+      },
+      timeoutMs,
+      emptyCommandMessage: "XUANNIAO_ACP_CMD is empty",
+      formatRequest: ({ id, method, params }) => ({
+        jsonrpc: "2.0",
+        id,
+        method,
+        params
+      }),
+      onMessage: (message) => this.handleRpcMessage(message),
+      onExit: () => this.handleProcessExit()
+    });
   }
 
   status() {
     return {
+      transport: "acp",
       command: parseCommandLine(this.commandLine),
       accessMode: this.accessMode,
       initialized: this.initialized,
       sessionCount: this.threadSessions.size,
-      running: Boolean(this.process && !this.process.killed),
-      stderrTail: this.stderrTail,
-      pendingPermissions: this.listPermissionRequests().length
+      running: this.rpc.running,
+      stderrTail: this.rpc.stderrTail,
+      pendingPermissions: this.listPermissionRequests().length,
+      capabilities: {
+        resume: this.agentCapabilities.loadSession === true,
+        fork: false,
+        concurrentSessions: false,
+        approvalBroker: true,
+        incrementalDocumentContext: true,
+        eventStream: true,
+        structuredUserInput: false,
+        mcpElicitation: false,
+        dynamicClientTools: false
+      }
     };
   }
 
   dispose() {
     this.cancelPendingPermissions();
-    this.failAll(new Error("ACP document session closed."));
-    this.pending.clear();
     this.initialized = false;
     this.agentCapabilities = {};
     this.threadSessions.clear();
-    if (this.process && !this.process.killed) {
-      this.process.kill();
-    }
-    this.process = null;
+    this.documentSnapshots.clear();
+    this.rpc.dispose(new Error("ACP document session closed."));
   }
 
   async start() {
     await this.ensureInitialized();
   }
 
-  async prompt({ question, document, thread, mode = "chat", onSessionId }) {
-    const task = () => this.promptViaAcp({ question, document, thread, mode, onSessionId });
+  async runTurn({ question, document, thread, mode = "chat" }) {
+    const task = () => this.promptViaAcp({ question, document, thread, mode });
 
     const run = this.promptLock.then(task, task);
     this.promptLock = run.catch(() => {});
     return run;
   }
 
-  async promptViaAcp({ question, document, thread, mode, onSessionId }) {
-    const sessionId = await this.ensureThreadSession(thread, onSessionId);
+  async promptViaAcp({ question, document, thread, mode }) {
+    const session = await this.ensureThreadSession(thread);
+    const hash = documentHash(document.content);
+    const previousDocument = this.documentSnapshots.get(session.sessionId);
+    const includeDocument = session.documentHash !== hash;
+    const unsyncedMessages = thread.unsyncedCurrentNodeMessages || [];
     const turn = {
       id: randomUUID(),
-      sessionId,
+      sessionId: session.sessionId,
       threadId: thread.id,
       chunks: [],
       updates: []
@@ -75,21 +122,40 @@ export class AcpDocumentAgent extends EventEmitter {
 
     try {
       const result = await this.request("session/prompt", {
-        sessionId,
+        sessionId: session.sessionId,
         prompt: [
           {
             type: "text",
-            text: buildPrompt({ question, document, thread, mode, accessMode: this.accessMode })
+            text: buildPrompt({
+              question,
+              document,
+              thread,
+              mode,
+              accessMode: this.accessMode,
+              includeDocument,
+              includeHistory: session.historyMode === "fresh" || unsyncedMessages.length > 0,
+              history: session.historyMode === "fresh" ? thread.messages || [] : unsyncedMessages,
+              previousDocument: includeDocument ? (previousDocument ?? null) : null,
+              maxChars: this.contextMaxChars
+            })
           }
         ]
       });
 
       const content = turn.chunks.join("").trim();
+      const agentSession = {
+        adapter: "acp",
+        sessionId: session.sessionId,
+        turnId: null,
+        documentHash: hash
+      };
+      this.documentSnapshots.set(session.sessionId, document.content);
       return {
         content: content || "Codex completed without returning text.",
         stopReason: result?.stopReason ?? null,
         transport: "acp",
-        updates: turn.updates.slice(-30)
+        updates: turn.updates.slice(-30),
+        session: agentSession
       };
     } finally {
       if (this.activeTurn?.id === turn.id) {
@@ -100,7 +166,7 @@ export class AcpDocumentAgent extends EventEmitter {
   }
 
   async ensureInitialized() {
-    if (this.initialized && this.process && !this.process.killed) {
+    if (this.initialized && this.rpc.running) {
       return;
     }
     await this.startProcess();
@@ -121,26 +187,27 @@ export class AcpDocumentAgent extends EventEmitter {
     });
 
     const authMethods = Array.isArray(init?.authMethods) ? init.authMethods : [];
-    if (authMethods.length > 0 && process.env.XUANNIAO_ACP_SKIP_AUTH !== "1") {
+    if (authMethods.length > 0 && this.env.XUANNIAO_ACP_SKIP_AUTH !== "1") {
       const ids = authMethods.map((method) => method.id || method.name || "unknown").join(", ");
-      throw new Error(`ACP agent requires authentication (${ids}). Authenticate the adapter first or set XUANNIAO_ACP_SKIP_AUTH=1 if it can use existing credentials.`);
+      throw new Error(
+        `ACP agent requires authentication (${ids}). Authenticate the adapter first or set XUANNIAO_ACP_SKIP_AUTH=1 if it can use existing credentials.`
+      );
     }
     this.agentCapabilities = init?.agentCapabilities || {};
     this.initialized = true;
   }
 
-  async ensureThreadSession(thread, onSessionId) {
+  async ensureThreadSession(thread) {
     await this.ensureInitialized();
     const sessionKey = thread.sessionKey || thread.id;
-    const activeSessionId = this.threadSessions.get(sessionKey);
-    if (activeSessionId) {
-      if (thread.acpSessionId !== activeSessionId && onSessionId) {
-        await onSessionId(activeSessionId);
-      }
-      return activeSessionId;
+    const activeSession = this.threadSessions.get(sessionKey);
+    if (activeSession) {
+      return { ...activeSession, historyMode: "inherited" };
     }
 
-    let sessionId = thread.acpSessionId || null;
+    const stored = thread.agentSession?.adapter === "acp" ? thread.agentSession : null;
+    let sessionId = stored?.sessionId || null;
+    let historyMode = "inherited";
     if (sessionId && this.agentCapabilities.loadSession === true) {
       try {
         await this.request("session/load", {
@@ -156,6 +223,7 @@ export class AcpDocumentAgent extends EventEmitter {
     }
 
     if (!sessionId) {
+      historyMode = "fresh";
       const session = await this.request("session/new", {
         cwd: this.cwd,
         mcpServers: []
@@ -166,133 +234,28 @@ export class AcpDocumentAgent extends EventEmitter {
       sessionId = session.sessionId;
     }
 
-    this.threadSessions.set(sessionKey, sessionId);
-    if (thread.acpSessionId !== sessionId && onSessionId) {
-      await onSessionId(sessionId);
-    }
-    return sessionId;
+    const active = {
+      sessionId,
+      documentHash: historyMode === "inherited" ? stored?.documentHash || null : null
+    };
+    this.threadSessions.set(sessionKey, active);
+    return { ...active, historyMode };
   }
 
   async startProcess() {
-    if (this.process && !this.process.killed) {
-      return;
-    }
-
-    const [command, ...args] = parseCommandLine(this.commandLine);
-    if (!command) {
-      throw new Error("XUANNIAO_ACP_CMD is empty");
-    }
-
-    const child = spawn(command, args, {
-      cwd: this.cwd,
-      stdio: ["pipe", "pipe", "pipe"],
-      env: {
-        ...process.env,
-        CODEX_PATH: process.env.CODEX_PATH ?? "codex",
-        INITIAL_AGENT_MODE: acpAgentMode(this.accessMode)
-      }
-    });
-    this.process = child;
-
-    await new Promise((resolve, reject) => {
-      child.once("spawn", resolve);
-      child.once("error", (error) => {
-        if (this.process === child) this.process = null;
-        reject(new Error(`Failed to start ACP command '${command}': ${error.message}`));
-      });
-    });
-
-    child.stdout.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => this.handleStdout(chunk));
-    child.stderr.setEncoding("utf8");
-    child.stderr.on("data", (chunk) => {
-      this.stderrTail = `${this.stderrTail}${chunk}`.slice(-4000);
-    });
-    child.on("error", (error) => this.failAll(error));
-    child.on("close", (code) => {
-      const detail = this.stderrTail ? `\n\nstderr:\n${this.stderrTail}` : "";
-      this.failAll(new Error(`ACP process exited with code ${code}.${detail}`));
-      if (this.process === child) this.process = null;
-      this.initialized = false;
-      this.agentCapabilities = {};
-      this.threadSessions.clear();
-    });
+    this.rpc.commandLine = this.commandLine;
+    await this.rpc.start();
   }
 
   request(method, params) {
-    const id = ++this.protocolId;
-    const payload = {
-      jsonrpc: "2.0",
-      id,
-      method,
-      params
-    };
-
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`ACP request timed out: ${method}`));
-      }, this.timeoutMs);
-
-      this.pending.set(id, {
-        method,
-        resolve: (value) => {
-          clearTimeout(timer);
-          resolve(value);
-        },
-        reject: (error) => {
-          clearTimeout(timer);
-          reject(error);
-        }
-      });
-
-      this.writeMessage(payload);
-    });
+    return this.rpc.request(method, params);
   }
 
   writeMessage(payload) {
-    if (!this.process?.stdin?.writable) {
-      throw new Error("ACP process is not writable");
-    }
-    this.process.stdin.write(`${JSON.stringify(payload)}\n`);
+    this.rpc.write(payload);
   }
 
-  handleStdout(chunk) {
-    this.stdoutBuffer += chunk;
-    let newlineIndex = this.stdoutBuffer.indexOf("\n");
-    while (newlineIndex >= 0) {
-      const line = this.stdoutBuffer.slice(0, newlineIndex).trim();
-      this.stdoutBuffer = this.stdoutBuffer.slice(newlineIndex + 1);
-      if (line) {
-        this.handleMessageLine(line);
-      }
-      newlineIndex = this.stdoutBuffer.indexOf("\n");
-    }
-  }
-
-  handleMessageLine(line) {
-    let message;
-    try {
-      message = JSON.parse(line);
-    } catch (error) {
-      this.stderrTail = `${this.stderrTail}\nInvalid ACP JSON: ${line}`.slice(-4000);
-      return;
-    }
-
-    if (Object.hasOwn(message, "id") && !message.method) {
-      const pending = this.pending.get(message.id);
-      if (!pending) {
-        return;
-      }
-      this.pending.delete(message.id);
-      if (message.error) {
-        pending.reject(new Error(`${pending.method} failed: ${message.error.message || JSON.stringify(message.error)}`));
-      } else {
-        pending.resolve(message.result);
-      }
-      return;
-    }
-
+  handleRpcMessage(message) {
     if (message.method) {
       if (Object.hasOwn(message, "id")) {
         this.handleClientRequest(message);
@@ -300,6 +263,12 @@ export class AcpDocumentAgent extends EventEmitter {
         this.handleNotification(message);
       }
     }
+  }
+
+  handleProcessExit() {
+    this.initialized = false;
+    this.agentCapabilities = {};
+    this.threadSessions.clear();
   }
 
   async handleClientRequest(message) {
@@ -369,19 +338,33 @@ export class AcpDocumentAgent extends EventEmitter {
 
   requestUserPermission(params) {
     const options = normalizePermissionOptions(params.options);
-    const automaticOption = this.accessMode === "full-access"
-      ? optionByPreferredKinds(options, ["allow_always", "allow_once"])
-      : optionByPreferredKinds(options, ["reject_always", "reject_once"]);
-    if (automaticOption) {
-      return Promise.resolve({
-        outcome: {
-          outcome: "selected",
-          optionId: automaticOption.optionId
+    if (options.length === 0) {
+      return Promise.resolve({ outcome: { outcome: "cancelled" } });
+    }
+    const id = randomUUID();
+    const turn = this.activeTurn;
+    return new Promise((resolve) => {
+      const finish = (result) => {
+        this.pendingPermissions.delete(id);
+        resolve(result);
+      };
+      this.pendingPermissions.set(id, {
+        turnId: turn?.id || null,
+        resolve: finish,
+        snapshot: {
+          id,
+          sessionId: params.sessionId || turn?.sessionId || "",
+          threadId: turn?.threadId || "",
+          toolCallId: params.toolCall?.toolCallId || params.toolCallId || "",
+          title: params.toolCall?.title || params.title || "Allow agent operation",
+          kind: params.toolCall?.kind || "permission",
+          status: "pending",
+          rawInput: permissionInput(params),
+          options,
+          createdAt: new Date().toISOString()
         }
       });
-    }
-    return Promise.resolve({ outcome: { outcome: "cancelled" } });
-
+    });
   }
 
   cancelPendingPermissionsForTurn(turnId) {
@@ -436,150 +419,55 @@ export class AcpDocumentAgent extends EventEmitter {
     if (this.accessMode !== "full-access") {
       throw new Error(`write denied in read-only mode: ${requestedPath}`);
     }
+    if (requestedPath === this.documentPath) {
+      throw new Error(`write denied for Xuanniao's protected active document: ${requestedPath}`);
+    }
 
     await writeFile(requestedPath, String(params.content ?? ""), "utf8");
     return {};
   }
 
-  failAll(error) {
-    for (const [id, pending] of this.pending) {
-      this.pending.delete(id);
-      pending.reject(error);
-    }
+  get process() {
+    return this.rpc.process;
+  }
+
+  set process(value) {
+    this.rpc.process = value;
   }
 }
 
 function normalizePermissionOptions(options) {
   if (!Array.isArray(options)) return [];
-  return options.map((option) => ({
-    optionId: String(option.optionId || ""),
-    name: String(option.name || option.optionId || "Permission option"),
-    kind: String(option.kind || "other")
-  })).filter((option) => option.optionId);
+  return options
+    .map((option) => ({
+      optionId: String(option.optionId || ""),
+      name: String(option.name || option.optionId || "Permission option"),
+      kind: String(option.kind || "other")
+    }))
+    .filter((option) => option.optionId);
 }
 
-function optionByPreferredKinds(options, kinds) {
-  for (const kind of kinds) {
-    const option = options.find((candidate) => candidate.kind === kind);
-    if (option) return option;
-  }
+function permissionInput(params) {
+  const value = params.toolCall?.rawInput ?? params.rawInput ?? null;
+  if (typeof value === "string") return value.slice(0, 4000);
+  if (value && typeof value === "object") return JSON.stringify(value, null, 2).slice(0, 4000);
   return null;
-}
-
-export function normalizeAgentMode(value) {
-  const mode = String(value ?? "full-access").trim().toLowerCase();
-  if (mode === "full-access" || mode === "read-only") {
-    return mode;
-  }
-  throw new Error(`Unsupported XUANNIAO_AGENT_MODE: ${value}. Expected full-access or read-only.`);
 }
 
 export function acpAgentMode(value) {
   return normalizeAgentMode(value) === "full-access" ? "agent-full-access" : "read-only";
 }
 
-export function parseCommandLine(commandLine) {
-  const tokens = [];
-  let current = "";
-  let quote = null;
-
-  for (let index = 0; index < commandLine.length; index += 1) {
-    const char = commandLine[index];
-    if (quote) {
-      if (char === quote) {
-        quote = null;
-      } else if (char === "\\" && index + 1 < commandLine.length) {
-        current += commandLine[++index];
-      } else {
-        current += char;
-      }
-      continue;
-    }
-
-    if (char === "'" || char === "\"") {
-      quote = char;
-    } else if (/\s/.test(char)) {
-      if (current) {
-        tokens.push(current);
-        current = "";
-      }
-    } else {
-      current += char;
-    }
-  }
-
-  if (current) {
-    tokens.push(current);
-  }
-  return tokens;
-}
-
-export function buildPrompt({ question, document, thread, mode = "chat", accessMode = "full-access" }) {
-  const history = (thread.messages || [])
-    .map((message) => `${message.role}: ${message.content}`)
-    .join("\n\n");
-  const branchSelection = thread.branchSelection?.text
-    ? [
-        "Selected excerpt from the current conversation context:",
-        "Treat this excerpt as the specific subject of the current user question.",
-        "<XUANNIAO_BRANCH_SELECTION>",
-        thread.branchSelection.text,
-        "</XUANNIAO_BRANCH_SELECTION>",
-        ""
-      ]
-    : [];
-
-  const common = [
-    "You are Codex collaborating with the user in Xuanniao, a local Markdown plan document workspace.",
-    "The document is the source of truth. Discuss the selected details and propose precise improvements.",
-    "For normal chat replies, return Markdown-compatible plain text. Use fenced code blocks for code, XML, JSON, diffs, logs, and protocol examples.",
-    accessMode === "full-access"
-      ? "Xuanniao has granted full filesystem, command, and network access for this session. Do not ask for permission before acting on the user's request."
-      : "This session is read-only. You may inspect files, but do not modify files or perform mutating operations.",
-    "",
-    `Document path: ${document.path}`,
-    `Document title: ${document.title}`,
-    "",
-    "Complete document content:",
-    "<XUANNIAO_DOCUMENT>",
-    document.content || "",
-    "</XUANNIAO_DOCUMENT>",
-    "",
-    "Selected text:",
-    thread.selectedText || "(no selection)",
-    "",
-    "Anchor:",
-    JSON.stringify(thread.anchor || {}),
-    "",
-    "Current conversation branch ancestor history:",
-    "Treat this explicit branch history as authoritative. Do not infer context from sibling branches or older session context.",
-    history || "(new thread)",
-    "",
-    ...branchSelection,
-    "Current user question:",
-    question
-  ];
-
-  if (mode === "replace-selection") {
-    return [
-      ...common,
-      "",
-      "The user is explicitly asking you to edit the selected Markdown.",
-      "Return only the replacement Markdown for the selected text, wrapped exactly like this:",
-      "<XUANNIAO_REPLACEMENT>",
-      "replacement markdown here",
-      "</XUANNIAO_REPLACEMENT>",
-      "",
-      "Do not include explanation, diff markers, or surrounding document text."
-    ].join("\n");
-  }
-
-  return common.join("\n");
+export function buildPrompt(options) {
+  return `${AGENT_DEVELOPER_INSTRUCTIONS}\n\n${buildAgentPrompt(options)}`;
 }
 
 function compactUpdate(update) {
   if (update.sessionUpdate === "agent_message_chunk") {
-    return { sessionUpdate: update.sessionUpdate, textLength: update.content?.text?.length ?? 0 };
+    return {
+      sessionUpdate: update.sessionUpdate,
+      textLength: update.content?.text?.length ?? 0
+    };
   }
   if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
     return {

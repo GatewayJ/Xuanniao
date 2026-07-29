@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { documentMetadataKey, legacyThreadStorePathFor, threadStorePathFor } from "./metadata-paths.js";
 import { ThreadStore } from "./thread-store.js";
+import { branchRevisionForQuestion } from "./thread-tree.js";
 
 test("thread store paths use the document path sha256 under the metadata root", () => {
   const documentPath = path.join(os.tmpdir(), "xuanniao-docs", "plan.md");
@@ -18,7 +19,7 @@ test("thread store paths use the document path sha256 under the metadata root", 
   assert.equal(legacyThreadStorePathFor(documentPath), path.join(path.dirname(documentPath), ".xuanniao", "plan.md.threads.json"));
 });
 
-test("thread ACP session IDs persist across store instances", async () => {
+test("agent sessions persist across store instances and legacy ACP sessions migrate", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-store-test-"));
   const storePath = path.join(tempDir, "threads.json");
 
@@ -29,11 +30,82 @@ test("thread ACP session IDs persist across store instances", async () => {
       selectedText: "selection",
       anchor: { start: 0, end: 9, lineStart: 1, lineEnd: 1, blockId: null }
     });
-    assert.equal(thread.acpSessionId, null);
-    await firstStore.updateThread(thread.id, { acpSessionId: "session-123" });
+    const question = await firstStore.addMessage(thread.id, {
+      role: "user",
+      content: "Question"
+    });
+    await firstStore.completeAgentTurn(
+      thread.id,
+      question.id,
+      { role: "assistant", content: "Answer" },
+      {
+        adapter: "codex-app-server",
+        sessionId: "session-123",
+        turnId: "turn-123",
+        documentHash: "hash-123"
+      }
+    );
 
     const restored = await new ThreadStore(storePath).get(thread.id);
-    assert.equal(restored.acpSessionId, "session-123");
+    assert.deepEqual(restored.messages.find((message) => message.id === question.id).agentSession, {
+      adapter: "codex-app-server",
+      sessionId: "session-123",
+      turnId: "turn-123",
+      documentHash: "hash-123"
+    });
+
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 2,
+        threads: [
+          {
+            id: "legacy",
+            title: "Legacy",
+            selectedText: "",
+            anchor: {},
+            messages: [
+              {
+                id: "legacy-question",
+                role: "user",
+                content: "Legacy question",
+                nodeId: "legacy-question",
+                parentId: null,
+                acpSessionId: "legacy-acp-session"
+              }
+            ]
+          }
+        ]
+      }),
+      "utf8"
+    );
+    const legacy = await new ThreadStore(storePath).get("legacy");
+    assert.deepEqual(legacy.messages[0].agentSession, {
+      adapter: "acp",
+      sessionId: "legacy-acp-session",
+      turnId: null,
+      documentHash: null
+    });
+
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 1,
+        threads: [
+          {
+            id: "legacy-thread-session",
+            title: "Legacy thread session",
+            selectedText: "",
+            anchor: {},
+            acpSessionId: "legacy-thread-acp-session",
+            messages: [{ id: "root", role: "user", content: "Root" }]
+          }
+        ]
+      }),
+      "utf8"
+    );
+    const legacyThreadSession = await new ThreadStore(storePath).get("legacy-thread-session");
+    assert.equal(legacyThreadSession.messages[0].agentSession.sessionId, "legacy-thread-acp-session");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -56,11 +128,16 @@ test("anchor synchronization deletes removed threads from the store", async () =
       anchor: { start: 5, end: 11, lineStart: 1, lineEnd: 1, blockId: null }
     });
 
-    const threads = await store.updateAnchors([{
-      id: kept.id,
-      selectedText: "kept",
-      anchor: { start: 0, end: 4, lineStart: 1, lineEnd: 1, blockId: null }
-    }], [removed.id]);
+    const threads = await store.updateAnchors(
+      [
+        {
+          id: kept.id,
+          selectedText: "kept",
+          anchor: { start: 0, end: 4, lineStart: 1, lineEnd: 1, blockId: null }
+        }
+      ],
+      [removed.id]
+    );
 
     assert.equal(threads.length, 1);
     assert.equal(threads[0].id, kept.id);
@@ -81,14 +158,46 @@ test("persists question parent links and deletes an entire child subtree", async
       selectedText: "selection",
       anchor: { start: 0, end: 9, lineStart: 1, lineEnd: 1, blockId: null }
     });
-    const root = await store.addMessage(thread.id, { role: "user", content: "Root", parentId: null });
-    await store.addMessage(thread.id, { role: "assistant", content: "Root answer", parentId: root.id });
-    const child = await store.addMessage(thread.id, { role: "user", content: "Child", parentId: root.id });
-    await store.addMessage(thread.id, { role: "assistant", content: "Child answer", parentId: child.id });
-    const grandchild = await store.addMessage(thread.id, { role: "user", content: "Grandchild", parentId: child.id });
-    await store.addMessage(thread.id, { role: "assistant", content: "Grandchild answer", parentId: grandchild.id });
-    const sibling = await store.addMessage(thread.id, { role: "user", content: "Sibling", parentId: root.id });
-    await store.addMessage(thread.id, { role: "assistant", content: "Sibling answer", parentId: sibling.id });
+    const root = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Root",
+      parentId: null
+    });
+    await store.addMessage(thread.id, {
+      role: "assistant",
+      content: "Root answer",
+      parentId: root.id
+    });
+    const child = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Child",
+      parentId: root.id
+    });
+    await store.addMessage(thread.id, {
+      role: "assistant",
+      content: "Child answer",
+      parentId: child.id
+    });
+    const grandchild = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Grandchild",
+      parentId: child.id
+    });
+    await store.addMessage(thread.id, {
+      role: "assistant",
+      content: "Grandchild answer",
+      parentId: grandchild.id
+    });
+    const sibling = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Sibling",
+      parentId: root.id
+    });
+    await store.addMessage(thread.id, {
+      role: "assistant",
+      content: "Sibling answer",
+      parentId: sibling.id
+    });
 
     const restored = await new ThreadStore(storePath).get(thread.id);
     assert.equal(restored.messages.find((message) => message.id === child.id).parentId, root.id);
@@ -98,12 +207,10 @@ test("persists question parent links and deletes an entire child subtree", async
 
     const removed = await store.deleteMessage(thread.id, child.id);
     assert.equal(removed.length, 4);
-    assert.deepEqual((await store.get(thread.id)).messages.map((message) => message.content), [
-      "Root",
-      "Root answer",
-      "Sibling",
-      "Sibling answer"
-    ]);
+    assert.deepEqual(
+      (await store.get(thread.id)).messages.map((message) => message.content),
+      ["Root", "Root answer", "Sibling", "Sibling answer"]
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -114,25 +221,37 @@ test("normalizes legacy linear messages into parent-linked questions", async () 
   const storePath = path.join(tempDir, "threads.json");
 
   try {
-    await writeFile(storePath, JSON.stringify({
-      version: 1,
-      threads: [{
-        id: "legacy",
-        title: "Legacy",
-        selectedText: "selection",
-        anchor: {},
-        messages: [
-          { id: "q1", role: "user", content: "One" },
-          { id: "a1", role: "assistant", content: "Answer one" },
-          { id: "q2", role: "user", content: "Two" },
-          { id: "a2", role: "assistant", content: "Answer two" }
+    await writeFile(
+      storePath,
+      JSON.stringify({
+        version: 1,
+        threads: [
+          {
+            id: "legacy",
+            title: "Legacy",
+            selectedText: "selection",
+            anchor: {},
+            messages: [
+              { id: "q1", role: "user", content: "One" },
+              { id: "a1", role: "assistant", content: "Answer one" },
+              { id: "q2", role: "user", content: "Two" },
+              { id: "a2", role: "assistant", content: "Answer two" }
+            ]
+          }
         ]
-      }]
-    }), "utf8");
+      }),
+      "utf8"
+    );
 
     const thread = await new ThreadStore(storePath).get("legacy");
-    assert.deepEqual(thread.messages.map((message) => message.parentId), [null, "q1", "q1", "q2"]);
-    assert.deepEqual(thread.messages.map((message) => message.nodeId), ["q1", "q1", "q2", "q2"]);
+    assert.deepEqual(
+      thread.messages.map((message) => message.parentId),
+      [null, "q1", "q1", "q2"]
+    );
+    assert.deepEqual(
+      thread.messages.map((message) => message.nodeId),
+      ["q1", "q1", "q2", "q2"]
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -144,16 +263,45 @@ test("keeps continued questions in one node and deletes only that turn", async (
 
   try {
     const store = new ThreadStore(storePath);
-    const thread = await store.create({ title: "Turns", selectedText: "selection", anchor: {} });
-    const root = await store.addMessage(thread.id, { role: "user", content: "Root", parentId: null });
-    await store.addMessage(thread.id, { role: "assistant", content: "Root answer", nodeId: root.nodeId, parentId: root.id });
-    const followUp = await store.addMessage(thread.id, { role: "user", content: "Continue", nodeId: root.nodeId, parentId: null });
-    await store.addMessage(thread.id, { role: "assistant", content: "Continued answer", nodeId: root.nodeId, parentId: followUp.id });
+    const thread = await store.create({
+      title: "Turns",
+      selectedText: "selection",
+      anchor: {}
+    });
+    const root = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Root",
+      parentId: null
+    });
+    await store.addMessage(thread.id, {
+      role: "assistant",
+      content: "Root answer",
+      nodeId: root.nodeId,
+      parentId: root.id
+    });
+    const followUp = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Continue",
+      nodeId: root.nodeId,
+      parentId: null
+    });
+    await store.addMessage(thread.id, {
+      role: "assistant",
+      content: "Continued answer",
+      nodeId: root.nodeId,
+      parentId: followUp.id
+    });
 
     assert.equal((await store.get(thread.id)).messages.filter((message) => message.nodeId === root.nodeId).length, 4);
     const removed = await store.deleteMessage(thread.id, followUp.id);
-    assert.deepEqual(removed.map((message) => message.content), ["Continue", "Continued answer"]);
-    assert.deepEqual((await store.get(thread.id)).messages.map((message) => message.content), ["Root", "Root answer"]);
+    assert.deepEqual(
+      removed.map((message) => message.content),
+      ["Continue", "Continued answer"]
+    );
+    assert.deepEqual(
+      (await store.get(thread.id)).messages.map((message) => message.content),
+      ["Root", "Root answer"]
+    );
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -165,11 +313,17 @@ test("persists planning metadata on user questions", async () => {
 
   try {
     const store = new ThreadStore(storePath);
-    const thread = await store.create({ title: "Planning meta", selectedText: "selection", anchor: {} });
+    const thread = await store.create({
+      title: "Planning meta",
+      selectedText: "selection",
+      anchor: {}
+    });
     const question = await store.addMessage(thread.id, {
       role: "user",
       content: "What is risky?",
-      meta: { branchSelection: { sourceMessageId: "a1", text: "selected text" } }
+      meta: {
+        branchSelection: { sourceMessageId: "a1", text: "selected text" }
+      }
     });
 
     await store.updateMessageMeta(thread.id, question.id, { nodeKind: "risk" });
@@ -189,13 +343,36 @@ test("inserts a continuation node before every existing child subtree", async ()
 
   try {
     const store = new ThreadStore(storePath);
-    const thread = await store.create({ title: "Inserted continuation", selectedText: "selection", anchor: {} });
-    const root = await store.addMessage(thread.id, { role: "user", content: "A", parentId: null });
-    const child = await store.addMessage(thread.id, { role: "user", content: "C", parentId: root.id });
-    const grandchild = await store.addMessage(thread.id, { role: "user", content: "C1", parentId: child.id });
-    const sibling = await store.addMessage(thread.id, { role: "user", content: "C2", parentId: root.id });
+    const thread = await store.create({
+      title: "Inserted continuation",
+      selectedText: "selection",
+      anchor: {}
+    });
+    const root = await store.addMessage(thread.id, {
+      role: "user",
+      content: "A",
+      parentId: null
+    });
+    const child = await store.addMessage(thread.id, {
+      role: "user",
+      content: "C",
+      parentId: root.id
+    });
+    const grandchild = await store.addMessage(thread.id, {
+      role: "user",
+      content: "C1",
+      parentId: child.id
+    });
+    const sibling = await store.addMessage(thread.id, {
+      role: "user",
+      content: "C2",
+      parentId: root.id
+    });
 
-    const inserted = await store.insertNodeAfter(thread.id, root.id, { role: "user", content: "B" });
+    const inserted = await store.insertNodeAfter(thread.id, root.id, {
+      role: "user",
+      content: "B"
+    });
     const restored = await store.get(thread.id);
 
     assert.equal(inserted.parentId, root.id);
@@ -214,16 +391,253 @@ test("inserts a continuation node into one selected child path", async () => {
 
   try {
     const store = new ThreadStore(storePath);
-    const thread = await store.create({ title: "Path insertion", selectedText: "selection", anchor: {} });
-    const root = await store.addMessage(thread.id, { role: "user", content: "A", parentId: null });
-    const child = await store.addMessage(thread.id, { role: "user", content: "C", parentId: root.id });
-    const sibling = await store.addMessage(thread.id, { role: "user", content: "Sibling", parentId: root.id });
+    const thread = await store.create({
+      title: "Path insertion",
+      selectedText: "selection",
+      anchor: {}
+    });
+    const root = await store.addMessage(thread.id, {
+      role: "user",
+      content: "A",
+      parentId: null
+    });
+    const child = await store.addMessage(thread.id, {
+      role: "user",
+      content: "C",
+      parentId: root.id
+    });
+    const sibling = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Sibling",
+      parentId: root.id
+    });
 
     const inserted = await store.insertNodeAfter(thread.id, root.id, { role: "user", content: "B" }, child.id);
     const restored = await store.get(thread.id);
 
     assert.equal(restored.messages.find((message) => message.id === child.id).parentId, inserted.id);
     assert.equal(restored.messages.find((message) => message.id === sibling.id).parentId, root.id);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("editing a question invalidates its node session and every descendant session", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-invalidation-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({
+      title: "Invalidation",
+      selectedText: "selection",
+      anchor: {}
+    });
+    const root = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Root"
+    });
+    const child = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Child",
+      parentId: root.id
+    });
+    const sibling = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Sibling",
+      parentId: null
+    });
+    const session = (id) => ({
+      adapter: "codex-app-server",
+      sessionId: id,
+      turnId: `${id}-turn`,
+      documentHash: "hash"
+    });
+    await store.completeAgentTurn(thread.id, root.id, { role: "assistant", content: "Root answer" }, session("root"));
+    await store.completeAgentTurn(thread.id, child.id, { role: "assistant", content: "Child answer" }, session("child"));
+    await store.completeAgentTurn(thread.id, sibling.id, { role: "assistant", content: "Sibling answer" }, session("sibling"));
+
+    await store.updateMessage(thread.id, root.id, { content: "Edited root" });
+    const restored = await store.get(thread.id);
+    assert.equal(restored.messages.find((message) => message.id === root.id).agentSession, null);
+    assert.equal(restored.messages.find((message) => message.id === child.id).agentSession, null);
+    assert.equal(restored.messages.find((message) => message.id === sibling.id).agentSession.sessionId, "sibling");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("reparenting a branch invalidates sessions whose native ancestry changed", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-reparent-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({
+      title: "Reparent",
+      selectedText: "selection",
+      anchor: {}
+    });
+    const root = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Root"
+    });
+    const child = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Child",
+      parentId: root.id
+    });
+    const grandchild = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Grandchild",
+      parentId: child.id
+    });
+    for (const question of [child, grandchild]) {
+      await store.completeAgentTurn(
+        thread.id,
+        question.id,
+        { role: "assistant", content: `${question.content} answer` },
+        {
+          adapter: "codex-app-server",
+          sessionId: `${question.id}-session`,
+          turnId: `${question.id}-turn`,
+          documentHash: "hash"
+        }
+      );
+    }
+
+    await store.insertNodeAfter(thread.id, root.id, { role: "user", content: "Inserted" }, child.id);
+    const restored = await store.get(thread.id);
+    assert.equal(restored.messages.find((message) => message.id === child.id).agentSession, null);
+    assert.equal(restored.messages.find((message) => message.id === grandchild.id).agentSession, null);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("serializes concurrent mutations without losing branch messages", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-concurrency-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({ title: "Concurrent", selectedText: "selection", anchor: {} });
+    await Promise.all(
+      Array.from({ length: 12 }, (_, index) =>
+        store.addMessage(thread.id, {
+          role: "user",
+          content: `Branch ${index}`
+        })
+      )
+    );
+
+    const restored = await store.get(thread.id);
+    assert.equal(restored.messages.length, 12);
+    assert.deepEqual(
+      new Set(restored.messages.map((message) => message.content)),
+      new Set(Array.from({ length: 12 }, (_, index) => `Branch ${index}`))
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("serializes mutations across multiple stores for the same file", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-multi-store-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const firstStore = new ThreadStore(storePath);
+    const secondStore = new ThreadStore(storePath);
+    const thread = await firstStore.create({ title: "Shared", selectedText: "selection", anchor: {} });
+    await Promise.all(
+      Array.from({ length: 12 }, (_, index) => {
+        const store = index % 2 === 0 ? firstStore : secondStore;
+        return store.addMessage(thread.id, {
+          role: "user",
+          content: `Shared branch ${index}`
+        });
+      })
+    );
+
+    const restored = await new ThreadStore(storePath).get(thread.id);
+    assert.equal(restored.messages.length, 12);
+    assert.deepEqual(
+      new Set(restored.messages.map((message) => message.content)),
+      new Set(Array.from({ length: 12 }, (_, index) => `Shared branch ${index}`))
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("continuing a parent node invalidates existing child branch sessions", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-continuation-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({ title: "Continuation", selectedText: "selection", anchor: {} });
+    const root = await store.addMessage(thread.id, { role: "user", content: "Root" });
+    const child = await store.addMessage(thread.id, { role: "user", content: "Child", parentId: root.id });
+    const session = (id) => ({
+      adapter: "codex-app-server",
+      sessionId: id,
+      turnId: `${id}-turn`,
+      documentHash: "hash"
+    });
+    await store.completeAgentTurn(thread.id, root.id, { role: "assistant", content: "Root answer" }, session("root"));
+    await store.completeAgentTurn(thread.id, child.id, { role: "assistant", content: "Child answer" }, session("child"));
+
+    await store.addMessage(thread.id, {
+      role: "user",
+      content: "Continue root",
+      nodeId: root.id,
+      parentId: null
+    });
+    const restored = await store.get(thread.id);
+    assert.equal(restored.messages.find((message) => message.id === root.id).agentSession.sessionId, "root");
+    assert.equal(restored.messages.find((message) => message.id === child.id).agentSession, null);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("rejects an agent result when its conversation branch changed in flight", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-cas-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({ title: "CAS", selectedText: "selection", anchor: {} });
+    const root = await store.addMessage(thread.id, { role: "user", content: "Root" });
+    const child = await store.addMessage(thread.id, { role: "user", content: "Child", parentId: root.id });
+    const revision = branchRevisionForQuestion(await store.get(thread.id), child.id);
+
+    await store.addMessage(thread.id, {
+      role: "user",
+      content: "Parent changed",
+      nodeId: root.id,
+      parentId: null
+    });
+    await assert.rejects(
+      store.completeAgentTurn(
+        thread.id,
+        child.id,
+        { role: "assistant", content: "Stale answer" },
+        {
+          adapter: "codex-app-server",
+          sessionId: "stale-session",
+          turnId: "stale-turn",
+          documentHash: "hash"
+        },
+        revision
+      ),
+      /conversation branch changed/
+    );
+
+    const restored = await store.get(thread.id);
+    assert.equal(restored.messages.some((message) => message.content === "Stale answer"), false);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

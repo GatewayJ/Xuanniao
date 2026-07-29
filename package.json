@@ -8,7 +8,10 @@
     "dev": "node server/index.js",
     "web:dev": "vite --host 127.0.0.1 --port 5173 --open",
     "web:build": "vite build",
-    "check": "node --check server/index.js && node --check server/lib/acp-client.js && node --check server/lib/block-index.js && node --check server/lib/file-browser.js && node --check server/lib/metadata-paths.js && node --check server/lib/thread-anchor-remap.js && node --check server/lib/thread-store.js && tsc --noEmit && node --test server/lib/*.test.js web/src/*.test.ts"
+    "lint": "node --check server/index.js && node --check server/lib/*.js && tsc --noEmit",
+    "format:check": "node scripts/check-format.mjs",
+    "test": "node --test server/lib/*.test.js web/src/*.test.ts web/src/hooks/*.test.ts",
+    "check": "npm run lint && npm run format:check && npm test"
   },
   "dependencies": {
     "@codemirror/commands": "^6.8.0",

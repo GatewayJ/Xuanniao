@@ -1,16 +1,18 @@
 import { createServer } from "node:http";
 import { createReadStream, existsSync } from "node:fs";
-import { copyFile, mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, stat } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { AcpDocumentAgent, parseCommandLine } from "./lib/acp-client.js";
-import { buildBlockIndex } from "./lib/block-index.js";
+import { createAgentRuntime, runtimeCommand } from "./lib/agent-runtime.js";
+import { atomicWriteText } from "./lib/atomic-file.js";
+import { ConversationService } from "./lib/conversation-service.js";
+import { DocumentWorkspace } from "./lib/document-workspace.js";
 import { browseMarkdownDirectory } from "./lib/file-browser.js";
+import { HttpRequestError, assertSafeHostBinding, assertTrustedRequest, setSecurityHeaders } from "./lib/http-security.js";
 import { legacyThreadStorePathFor, threadStorePathFor } from "./lib/metadata-paths.js";
-import { reconcileThreadsForContent, remapThreadsForReplacement } from "./lib/thread-anchor-remap.js";
 import { ThreadStore } from "./lib/thread-store.js";
-import { branchThreadForQuestion, conversationNode, parentQuestion, selectionComesFromNode } from "./lib/thread-tree.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -22,58 +24,63 @@ const args = parseArgs(process.argv.slice(2));
 const workspaceRoot = process.cwd();
 const host = args.host ?? process.env.HOST ?? "127.0.0.1";
 const port = Number(args.port ?? process.env.PORT ?? 4173);
+const allowRemote = process.env.XUANNIAO_UNSAFE_ALLOW_REMOTE === "1";
 const maxBodyBytes = 8 * 1024 * 1024;
 const ignoredFileManagerDirs = new Set([".git", "node_modules", "dist", ".xuanniao"]);
 const conversationNodeKinds = new Set(["question", "idea", "assumption", "evidence", "risk", "decision", "task"]);
 
-let documentPath = path.resolve(workspaceRoot, args.file ?? "prd.md");
-await ensureDocument(documentPath);
-
-let threadStore = await createThreadStoreFor(documentPath);
-let agent = createAgentFor(documentPath);
-await agent.start();
+assertSafeHostBinding(host, allowRemote);
+const initialDocumentPath = path.resolve(workspaceRoot, args.file ?? "prd.md");
+await ensureDocument(initialDocumentPath);
+let activeDocument = await createDocumentContext(initialDocumentPath);
 
 const server = createServer(async (req, res) => {
+  const context = activeDocument;
+  const requestId = randomUUID();
+  setSecurityHeaders(res, requestId);
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
+    assertTrustedRequest(req, url, { boundHost: host, allowRemote });
 
     if (url.pathname === "/api/health" && req.method === "GET") {
       return sendJson(res, 200, {
         ok: true,
-        documentPath,
+        documentPath: context.path,
         workspaceRoot,
-        acp: agent.status()
+        agent: context.agent.status()
       });
     }
 
     if (url.pathname === "/api/files" && req.method === "GET") {
       return sendJson(res, 200, {
         root: workspaceRoot,
-        currentPath: documentPath,
-        files: await listMarkdownFiles()
+        currentPath: context.path,
+        files: await listMarkdownFiles(context.path)
       });
     }
 
     if (url.pathname === "/api/files/browse" && req.method === "GET") {
-      const targetPath = url.searchParams.get("path") || documentPath;
+      const targetPath = url.searchParams.get("path") || context.path;
       return sendJson(res, 200, await browseMarkdownDirectory(targetPath, workspaceRoot));
     }
 
     if (url.pathname === "/api/document" && req.method === "GET") {
-      return sendJson(res, 200, await readDocumentPayload());
+      return sendJson(res, 200, await context.document.payload());
     }
 
     if (url.pathname === "/api/document/open" && req.method === "POST") {
       const body = await readJson(req);
       const nextPath = resolveMarkdownPath(String(body.path || ""));
       if (!existsSync(nextPath)) {
-        return sendJson(res, 404, { error: `Markdown file not found: ${nextPath}` });
+        return sendJson(res, 404, {
+          error: `Markdown file not found: ${nextPath}`
+        });
       }
-      await switchDocument(nextPath);
+      const opened = await switchDocument(nextPath);
       return sendJson(res, 200, {
-        document: await readDocumentPayload(),
-        threads: await threadStore.list(),
-        files: await listMarkdownFiles()
+        document: await opened.document.payload(),
+        threads: await opened.threadStore.list(),
+        files: await listMarkdownFiles(opened.path)
       });
     }
 
@@ -82,24 +89,24 @@ const server = createServer(async (req, res) => {
       if (typeof body.content !== "string") {
         return sendJson(res, 400, { error: "content must be a string" });
       }
-      await writeFile(documentPath, body.content, "utf8");
       const patches = Array.isArray(body.threads) ? body.threads.map(normalizeThreadAnchorPatch).filter((patch) => patch.id) : null;
-      const deletedThreadIds = Array.isArray(body.deletedThreadIds)
-        ? [...new Set(body.deletedThreadIds.map((id) => String(id)).filter(Boolean))]
-        : [];
-      const threads = patches
-        ? await threadStore.updateAnchors(patches, deletedThreadIds)
-        : await reconcileThreadStoreForContent(body.content);
-      return sendJson(res, 200, { document: await readDocumentPayload(), threads });
+      const deletedThreadIds = Array.isArray(body.deletedThreadIds) ? [...new Set(body.deletedThreadIds.map((id) => String(id)).filter(Boolean))] : [];
+      const result = await context.document.save({
+        content: body.content,
+        expectedRevision: body.expectedRevision,
+        anchorPatches: patches,
+        deletedThreadIds
+      });
+      return sendJson(res, 200, result);
     }
 
     if (url.pathname === "/api/threads" && req.method === "GET") {
-      return sendJson(res, 200, { threads: await threadStore.list() });
+      return sendJson(res, 200, { threads: await context.threadStore.list() });
     }
 
     if (url.pathname === "/api/threads" && req.method === "POST") {
       const body = await readJson(req);
-      const thread = await threadStore.create({
+      const thread = await context.threadStore.create({
         title: String(body.title || body.selectedText || "Untitled thread").slice(0, 120),
         selectedText: String(body.selectedText || ""),
         anchor: normalizeAnchor(body.anchor)
@@ -107,112 +114,33 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 201, { thread });
     }
 
-    if (url.pathname === "/api/threads/anchors" && req.method === "PUT") {
-      const body = await readJson(req);
-      const patches = Array.isArray(body.threads) ? body.threads.map(normalizeThreadAnchorPatch).filter((patch) => patch.id) : [];
-      const deletedThreadIds = Array.isArray(body.deletedThreadIds)
-        ? [...new Set(body.deletedThreadIds.map((id) => String(id)).filter(Boolean))]
-        : [];
-      const threads = await threadStore.updateAnchors(patches, deletedThreadIds);
-      return sendJson(res, 200, { threads });
-    }
-
     if (url.pathname === "/api/permissions" && req.method === "GET") {
-      return sendJson(res, 200, { requests: agent.listPermissionRequests() });
+      return sendJson(res, 200, { requests: context.agent.listPermissionRequests() });
     }
 
     const permissionMatch = url.pathname.match(/^\/api\/permissions\/([^/]+)\/resolve$/);
     if (permissionMatch && req.method === "POST") {
       const permissionId = decodeURIComponent(permissionMatch[1]);
       const body = await readJson(req);
-      agent.resolvePermissionRequest(permissionId, {
+      context.agent.resolvePermissionRequest(permissionId, {
         optionId: typeof body.optionId === "string" ? body.optionId : "",
         cancelled: body.cancelled === true
       });
-      return sendJson(res, 200, { requests: agent.listPermissionRequests() });
+      return sendJson(res, 200, { requests: context.agent.listPermissionRequests() });
     }
 
     const threadMatch = url.pathname.match(/^\/api\/threads\/([^/]+)$/);
     if (threadMatch && req.method === "DELETE") {
       const threadId = decodeURIComponent(threadMatch[1]);
-      await threadStore.delete(threadId);
-      return sendJson(res, 200, { threads: await threadStore.list() });
+      await context.threadStore.delete(threadId);
+      return sendJson(res, 200, { threads: await context.threadStore.list() });
     }
 
     const messageMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages$/);
     if (messageMatch && req.method === "POST") {
       const threadId = decodeURIComponent(messageMatch[1]);
       const body = await readJson(req);
-      const content = String(body.content || "").trim();
-      if (!content) {
-        return sendJson(res, 400, { error: "message content is required" });
-      }
-
-      const thread = await threadStore.get(threadId);
-      const requestedNodeId = typeof body.nodeId === "string" && body.nodeId ? body.nodeId : null;
-      const existingNode = requestedNodeId ? conversationNode(thread, requestedNodeId) : null;
-      if (requestedNodeId && !existingNode) {
-        return sendJson(res, 400, { error: `conversation node not found: ${requestedNodeId}` });
-      }
-      const parentMessageId = existingNode
-        ? existingNode.parentId || null
-        : typeof body.parentMessageId === "string" && body.parentMessageId ? body.parentMessageId : null;
-      if (!existingNode) parentQuestion(thread, parentMessageId);
-      const adoptExistingChildren = body.adoptExistingChildren === true;
-      const insertBeforeNodeId = typeof body.insertBeforeNodeId === "string" && body.insertBeforeNodeId
-        ? body.insertBeforeNodeId
-        : null;
-      if ((adoptExistingChildren || insertBeforeNodeId) && (existingNode || !parentMessageId)) {
-        return sendJson(res, 400, { error: "continuing a branch must create a new node after an existing node" });
-      }
-      if (insertBeforeNodeId) {
-        const insertBeforeNode = conversationNode(thread, insertBeforeNodeId);
-        if (!insertBeforeNode || insertBeforeNode.parentId !== parentMessageId) {
-          return sendJson(res, 400, { error: "insert target must be a direct child of the parent node" });
-        }
-      }
-
-      const branchSelection = normalizeBranchSelection(body.branchSelection);
-      if (branchSelection) {
-        const sourceNodeId = existingNode ? requestedNodeId : parentMessageId;
-        if (!sourceNodeId) return sendJson(res, 400, { error: "selected message text requires a conversation node" });
-        if (!selectionComesFromNode(thread, branchSelection, sourceNodeId)) {
-          return sendJson(res, 400, { error: "selected message text must come from the target node" });
-        }
-      }
-
-      const question = {
-        role: "user",
-        content,
-        nodeId: requestedNodeId,
-        parentId: parentMessageId,
-        meta: branchSelection ? { branchSelection } : {}
-      };
-      const userMessage = adoptExistingChildren || insertBeforeNodeId
-        ? await threadStore.insertNodeAfter(threadId, parentMessageId, question, insertBeforeNodeId)
-        : await threadStore.addMessage(threadId, question);
-
-      if (body.askAgent === false) {
-        return sendJson(res, 200, {
-          userMessage,
-          assistantMessage: null,
-          threads: await threadStore.list()
-        });
-      }
-
-      const { assistantMessage, updatedDocument } = await createAssistantReply(
-        threadId,
-        content,
-        userMessage.id,
-        (message) => threadStore.addMessage(threadId, { ...message, nodeId: userMessage.nodeId, parentId: userMessage.id })
-      );
-
-      return sendJson(res, 200, {
-        userMessage,
-        assistantMessage,
-        threads: await threadStore.list(),
-        document: updatedDocument
-      });
+      return sendJson(res, 200, await context.conversation.addQuestion(threadId, body));
     }
 
     const messageUpdateMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)$/);
@@ -225,86 +153,97 @@ const server = createServer(async (req, res) => {
       try {
         metaPatch = normalizeMessageMetaPatch(body.meta ?? body);
       } catch (error) {
-        return sendJson(res, 400, { error: error instanceof Error ? error.message : String(error) });
+        return sendJson(res, 400, {
+          error: error instanceof Error ? error.message : String(error)
+        });
       }
       if (Object.keys(metaPatch).length === 0) {
         return sendJson(res, 400, { error: "metadata patch is required" });
       }
-      const message = await threadStore.updateMessageMeta(threadId, messageId, metaPatch);
+      const message = await context.threadStore.updateMessageMeta(threadId, messageId, metaPatch);
       return sendJson(res, 200, {
         message,
-        threads: await threadStore.list()
+        threads: await context.threadStore.list()
       });
     }
 
     if (messageUpdateMatch && req.method === "DELETE") {
       const threadId = decodeURIComponent(messageUpdateMatch[1]);
       const messageId = decodeURIComponent(messageUpdateMatch[2]);
-      await threadStore.deleteMessage(threadId, messageId);
-      return sendJson(res, 200, { threads: await threadStore.list() });
+      await context.threadStore.deleteMessage(threadId, messageId);
+      return sendJson(res, 200, { threads: await context.threadStore.list() });
     }
 
     if (messageUpdateMatch && req.method === "PUT") {
       const threadId = decodeURIComponent(messageUpdateMatch[1]);
       const messageId = decodeURIComponent(messageUpdateMatch[2]);
       const body = await readJson(req);
-      const content = String(body.content || "").trim();
-      if (!content) {
-        return sendJson(res, 400, { error: "message content is required" });
-      }
-      const shouldRerunAgent = body.rerunAgent === true || await threadStore.hasAssistantAfter(threadId, messageId);
-      const message = await threadStore.updateMessage(threadId, messageId, { content });
-      let assistantMessage = null;
-      let updatedDocument = null;
-      if (shouldRerunAgent) {
-        await threadStore.removeAssistantAfter(threadId, messageId);
-        const reply = await createAssistantReply(
-          threadId,
-          content,
-          messageId,
-          (assistant) => threadStore.addMessageAfter(threadId, messageId, { ...assistant, nodeId: message.nodeId, parentId: messageId })
-        );
-        assistantMessage = reply.assistantMessage;
-        updatedDocument = reply.updatedDocument;
-      }
-      return sendJson(res, 200, {
-        message,
-        assistantMessage,
-        threads: await threadStore.list(),
-        document: updatedDocument
-      });
+      return sendJson(res, 200, await context.conversation.updateQuestion(threadId, messageId, body));
     }
 
     return serveStatic(url.pathname, res);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    return sendJson(res, 500, { error: message });
+    const statusCode = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+    console.error(JSON.stringify({
+      level: "error",
+      requestId,
+      method: req.method,
+      path: req.url,
+      statusCode,
+      code: error?.code || null,
+      message
+    }));
+    return sendJson(res, statusCode, {
+      error: message,
+      requestId,
+      ...(error?.currentRevision ? { currentRevision: error.currentRevision } : {})
+    });
   }
 });
 
 server.listen(port, host, () => {
   const url = `http://${host}:${port}`;
-  console.log(`Xuanniao serving ${documentPath}`);
+  console.log(`Xuanniao serving ${activeDocument.path}`);
   console.log(`Open ${url}`);
-  console.log(`Agent mode: ${agent.accessMode}`);
-  console.log(`ACP command: ${parseCommandLine(agent.commandLine).join(" ")}`);
+  console.log(`Agent mode: ${activeDocument.agent.status().accessMode}`);
+  console.log(`Agent transport: ${activeDocument.agent.status().transport}`);
+  console.log(`Agent command: ${runtimeCommand(activeDocument.agent)}`);
 });
 
 function createAgentFor(filePath) {
-  return new AcpDocumentAgent({
+  return createAgentRuntime({
     documentPath: filePath,
-    cwd: path.dirname(filePath),
-    commandLine: process.env.XUANNIAO_ACP_CMD ?? "codex-acp",
-    accessMode: process.env.XUANNIAO_AGENT_MODE ?? "full-access",
-    timeoutMs: Number(process.env.XUANNIAO_ACP_TIMEOUT_MS ?? 180000)
+    cwd: workspaceRoot,
+    env: process.env
   });
 }
 
-function normalizeBranchSelection(value) {
-  if (!value || typeof value !== "object") return null;
-  const sourceMessageId = typeof value.sourceMessageId === "string" ? value.sourceMessageId.trim() : "";
-  const text = typeof value.text === "string" ? value.text.replace(/\s+/g, " ").trim().slice(0, 2000) : "";
-  return sourceMessageId && text ? { sourceMessageId, text } : null;
+async function createDocumentContext(filePath) {
+  const resolved = path.resolve(filePath);
+  const threadStore = await createThreadStoreFor(resolved);
+  const agent = createAgentFor(resolved);
+  const document = new DocumentWorkspace(resolved, threadStore);
+  return Object.freeze({
+    path: resolved,
+    threadStore,
+    document,
+    agent,
+    conversation: new ConversationService({
+      threadStore,
+      document,
+      agent,
+      controlledReplacement: process.env.XUANNIAO_CONTROLLED_REPLACEMENT === "1",
+      onAgentError: (event) => {
+        console.error(JSON.stringify({
+          level: "error",
+          event: "agent_turn_failed",
+          documentPath: resolved,
+          ...event
+        }));
+      }
+    })
+  });
 }
 
 function normalizeMessageMetaPatch(value) {
@@ -321,123 +260,25 @@ function normalizeMessageMetaPatch(value) {
 
 async function switchDocument(nextPath) {
   const resolved = path.resolve(nextPath);
-  if (resolved === documentPath) {
-    return;
+  if (resolved === activeDocument.path) {
+    return activeDocument;
   }
-  const nextAgent = createAgentFor(resolved);
-  await nextAgent.start();
-  agent.dispose();
-  documentPath = resolved;
-  threadStore = await createThreadStoreFor(documentPath);
-  agent = nextAgent;
+  const next = await createDocumentContext(resolved);
+  const previous = activeDocument;
+  activeDocument = next;
+  previous.agent.dispose();
+  return next;
 }
 
-async function readDocumentPayload() {
-  const content = await readFile(documentPath, "utf8");
-  return {
-    path: documentPath,
-    title: path.basename(documentPath),
-    content,
-    blocks: buildBlockIndex(content)
-  };
-}
 
-async function createAssistantReply(threadId, content, questionMessageId, saveAssistantMessage) {
-  let updatedDocument = null;
-  let assistantMessage;
-  try {
-    const document = await readDocumentPayload();
-    const storedThread = await threadStore.get(threadId);
-    const question = storedThread.messages.find((message) => message.id === questionMessageId && message.role === "user");
-    if (!question) throw new Error(`question message not found: ${questionMessageId}`);
-    const nodeId = question.nodeId || question.id;
-    const thread = branchThreadForQuestion(storedThread, questionMessageId);
-    const editRequested = process.env.XUANNIAO_CONTROLLED_REPLACEMENT === "1" && wantsDocumentEdit(content) && canReplaceSelection(storedThread);
-    const answer = await agent.prompt({
-      question: content,
-      document,
-      thread,
-      mode: editRequested ? "replace-selection" : "chat",
-      onSessionId: (acpSessionId) => threadStore.updateMessageSession(threadId, nodeId, acpSessionId)
-    });
-
-    if (editRequested) {
-      const replacement = extractReplacement(answer.content);
-      if (replacement === null) {
-        throw new Error("Codex did not return a Xuanniao replacement block for the selected text.");
-      }
-
-      const edit = applySelectionReplacement(document.content, storedThread, replacement);
-      await writeFile(documentPath, edit.content, "utf8");
-      updatedDocument = await readDocumentPayload();
-      const remapped = remapThreadsForReplacement(await threadStore.list(), document.content, edit, threadId);
-      await threadStore.updateAnchors(remapped.threads, remapped.deletedThreadIds);
-      answer.content = [
-        "Applied this replacement to the document:",
-        "",
-        "```md",
-        replacement,
-        "```"
-      ].join("\n");
-      answer.appliedEdit = true;
-    }
-
-    if (!updatedDocument) {
-      const latestDocument = await readDocumentPayload();
-      if (latestDocument.content !== document.content) {
-        updatedDocument = latestDocument;
-        await reconcileThreadStoreForContent(latestDocument.content);
-      }
-    }
-
-    assistantMessage = await saveAssistantMessage({
-      role: "assistant",
-      content: answer.content,
-      meta: {
-        stopReason: answer.stopReason,
-        transport: answer.transport,
-        appliedEdit: Boolean(answer.appliedEdit),
-        updates: answer.updates
-      }
-    });
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const startupFailure = /Failed to start ACP command|XUANNIAO_ACP_CMD is empty/.test(errorMessage);
-    const failureContent = [
-      "Codex request failed.",
-      "",
-      errorMessage
-    ];
-    if (startupFailure) {
-      failureContent.push(
-        "",
-        "Install codex-acp or set XUANNIAO_ACP_CMD to an ACP-compatible Codex adapter:",
-        "",
-        "```bash",
-        "npm install -g @agentclientprotocol/codex-acp",
-        "XUANNIAO_ACP_CMD=\"/path/to/codex-acp\" npm start -- prd.md",
-        "```"
-      );
-    } else {
-      failureContent.push("", "The ACP adapter is available. Retry the request or inspect the server log for details.");
-    }
-    assistantMessage = await saveAssistantMessage({
-      role: "assistant",
-      content: failureContent.join("\n"),
-      error: true
-    });
-  }
-  return { assistantMessage, updatedDocument };
-}
-
-async function listMarkdownFiles() {
+async function listMarkdownFiles(activePath) {
   const files = [];
-  await collectMarkdownFiles(workspaceRoot, files);
+  await collectMarkdownFiles(workspaceRoot, files, activePath);
   files.sort((left, right) => left.relativePath.localeCompare(right.relativePath));
   return files.slice(0, 500);
 }
 
-async function collectMarkdownFiles(dir, files) {
+async function collectMarkdownFiles(dir, files, activePath) {
   const entries = await readdir(dir, { withFileTypes: true });
   for (const entry of entries) {
     if (entry.name.startsWith(".") && entry.name !== ".github") {
@@ -446,7 +287,7 @@ async function collectMarkdownFiles(dir, files) {
     const entryPath = path.join(dir, entry.name);
     if (entry.isDirectory()) {
       if (!ignoredFileManagerDirs.has(entry.name)) {
-        await collectMarkdownFiles(entryPath, files);
+        await collectMarkdownFiles(entryPath, files, activePath);
       }
       continue;
     }
@@ -462,7 +303,7 @@ async function collectMarkdownFiles(dir, files) {
       directory: path.dirname(relativePath) === "." ? "" : path.dirname(relativePath),
       size: info.size,
       modifiedAt: info.mtime.toISOString(),
-      active: entryPath === documentPath
+      active: entryPath === activePath
     });
   }
 }
@@ -482,68 +323,12 @@ function isMarkdownPath(filePath) {
   return [".md", ".markdown", ".mdown", ".mkdn"].includes(path.extname(filePath).toLowerCase());
 }
 
-function wantsDocumentEdit(text) {
-  return /修改|改成|改为|替换|翻译|英文|translate|rewrite|replace|change|edit|update/i.test(text);
-}
-
-function canReplaceSelection(thread) {
-  const anchor = thread?.anchor || {};
-  return Number.isInteger(anchor.start) && Number.isInteger(anchor.end) && anchor.end > anchor.start;
-}
-
-function extractReplacement(content) {
-  const tagged = /<XUANNIAO_REPLACEMENT>\s*([\s\S]*?)\s*<\/XUANNIAO_REPLACEMENT>/i.exec(content);
-  if (tagged) {
-    return tagged[1].replace(/\n$/, "");
-  }
-
-  const fenced = /```(?:xuanniao-replacement|md|markdown)?\s*([\s\S]*?)```/i.exec(content);
-  if (fenced && !/^[+-]/m.test(fenced[1])) {
-    return fenced[1].replace(/\n$/, "");
-  }
-
-  const trimmed = content.trim();
-  if (trimmed && !trimmed.includes("```") && trimmed.length < 20000) {
-    return trimmed;
-  }
-
-  return null;
-}
-
-function applySelectionReplacement(content, thread, replacement) {
-  const anchor = thread.anchor || {};
-  let start = anchor.start;
-  let end = anchor.end;
-  const selectedText = String(thread.selectedText || "");
-
-  if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start || content.slice(start, end) !== selectedText) {
-    const first = selectedText ? content.indexOf(selectedText) : -1;
-    const last = selectedText ? content.lastIndexOf(selectedText) : -1;
-    if (first < 0 || first !== last) {
-      throw new Error("Selected text no longer matches the document. Re-select the text and create a new comment thread.");
-    }
-    start = first;
-    end = first + selectedText.length;
-  }
-
-  return {
-    start,
-    end,
-    replacement,
-    content: `${content.slice(0, start)}${replacement}${content.slice(end)}`
-  };
-}
-
-function lineNumberAt(content, offset) {
-  return content.slice(0, Math.max(offset, 0)).split(/\r?\n/).length;
-}
-
 async function ensureDocument(filePath) {
   if (existsSync(filePath)) {
     return;
   }
   await mkdir(path.dirname(filePath), { recursive: true });
-  await writeFile(filePath, "", "utf8");
+  await atomicWriteText(filePath, "");
 }
 
 async function createThreadStoreFor(filePath) {
@@ -571,11 +356,6 @@ function normalizeAnchor(anchor) {
   };
 }
 
-async function reconcileThreadStoreForContent(content) {
-  const reconciled = reconcileThreadsForContent(await threadStore.list(), content);
-  return threadStore.updateAnchors(reconciled.threads, reconciled.deletedThreadIds);
-}
-
 function normalizeThreadAnchorPatch(value) {
   const patch = value && typeof value === "object" ? value : {};
   return {
@@ -598,12 +378,13 @@ function serveStatic(routePath, res) {
     filePath = path.join(staticRoot, "index.html");
   }
 
-  const contentType = {
-    ".html": "text/html; charset=utf-8",
-    ".js": "text/javascript; charset=utf-8",
-    ".css": "text/css; charset=utf-8",
-    ".svg": "image/svg+xml"
-  }[path.extname(filePath)] ?? "application/octet-stream";
+  const contentType =
+    {
+      ".html": "text/html; charset=utf-8",
+      ".js": "text/javascript; charset=utf-8",
+      ".css": "text/css; charset=utf-8",
+      ".svg": "image/svg+xml"
+    }[path.extname(filePath)] ?? "application/octet-stream";
 
   res.writeHead(200, { "content-type": contentType });
   createReadStream(filePath).pipe(res);
@@ -615,16 +396,23 @@ async function readJson(req) {
   for await (const chunk of req) {
     size += chunk.length;
     if (size > maxBodyBytes) {
-      throw new Error("request body is too large");
+      throw new HttpRequestError(413, "request body is too large", "REQUEST_TOO_LARGE");
     }
     chunks.push(chunk);
   }
   const raw = Buffer.concat(chunks).toString("utf8");
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new HttpRequestError(400, "request body must contain valid JSON", "INVALID_JSON");
+  }
 }
 
 function sendJson(res, statusCode, payload) {
-  res.writeHead(statusCode, { "content-type": "application/json; charset=utf-8" });
+  res.writeHead(statusCode, {
+    "content-type": "application/json; charset=utf-8"
+  });
   res.end(JSON.stringify(payload));
 }
 

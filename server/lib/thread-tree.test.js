@@ -4,30 +4,130 @@ import test from "node:test";
 import { branchThreadForQuestion, parentQuestion, selectionComesFromNode } from "./thread-tree.js";
 
 const messages = [
-  { id: "q-root", role: "user", content: "Root", nodeId: "q-root", parentId: null },
-  { id: "a-root", role: "assistant", content: "Root answer", nodeId: "q-root", parentId: "q-root" },
-  { id: "q-left", role: "user", content: "Left", nodeId: "q-left", parentId: "q-root" },
-  { id: "a-left", role: "assistant", content: "Left answer", nodeId: "q-left", parentId: "q-left" },
-  { id: "q-right", role: "user", content: "Right", nodeId: "q-right", parentId: "q-root" },
-  { id: "a-right", role: "assistant", content: "Right answer", nodeId: "q-right", parentId: "q-right" },
-  { id: "q-leaf", role: "user", content: "Leaf", nodeId: "q-leaf", parentId: "q-left", acpSessionId: "leaf-session" }
+  {
+    id: "q-root",
+    role: "user",
+    content: "Root",
+    nodeId: "q-root",
+    parentId: null
+  },
+  {
+    id: "a-root",
+    role: "assistant",
+    content: "Root answer",
+    nodeId: "q-root",
+    parentId: "q-root"
+  },
+  {
+    id: "q-left",
+    role: "user",
+    content: "Left",
+    nodeId: "q-left",
+    parentId: "q-root"
+  },
+  {
+    id: "a-left",
+    role: "assistant",
+    content: "Left answer",
+    nodeId: "q-left",
+    parentId: "q-left"
+  },
+  {
+    id: "q-right",
+    role: "user",
+    content: "Right",
+    nodeId: "q-right",
+    parentId: "q-root"
+  },
+  {
+    id: "a-right",
+    role: "assistant",
+    content: "Right answer",
+    nodeId: "q-right",
+    parentId: "q-right"
+  },
+  {
+    id: "q-leaf",
+    role: "user",
+    content: "Leaf",
+    nodeId: "q-leaf",
+    parentId: "q-left",
+    agentSession: {
+      adapter: "codex-app-server",
+      sessionId: "leaf-session",
+      turnId: "leaf-turn",
+      documentHash: "hash"
+    }
+  }
 ];
 
 test("builds agent history from ancestors without sibling branches", () => {
   const branch = branchThreadForQuestion({ id: "thread-1", messages }, "q-leaf");
   assert.equal(branch.sessionKey, "thread-1:q-leaf");
-  assert.equal(branch.acpSessionId, "leaf-session");
-  assert.deepEqual(branch.messages.map((message) => message.id), ["q-root", "a-root", "q-left", "a-left"]);
+  assert.equal(branch.agentSession.sessionId, "leaf-session");
+  assert.equal(branch.parentAgentSession, null);
+  assert.deepEqual(
+    branch.ancestorMessages.map((message) => message.id),
+    ["q-root", "a-root", "q-left", "a-left"]
+  );
+  assert.deepEqual(branch.currentNodeMessages, []);
+  assert.deepEqual(
+    branch.messages.map((message) => message.id),
+    ["q-root", "a-root", "q-left", "a-left"]
+  );
 });
 
 test("continuing a node includes earlier turns from that node", () => {
   const continued = [
     ...messages.slice(0, 4),
-    { id: "q-left-follow", role: "user", content: "Follow up", nodeId: "q-left", parentId: "q-root" }
+    {
+      id: "q-left-follow",
+      role: "user",
+      content: "Follow up",
+      nodeId: "q-left",
+      parentId: "q-root"
+    }
   ];
   const branch = branchThreadForQuestion({ id: "thread-1", messages: continued }, "q-left-follow");
   assert.equal(branch.sessionKey, "thread-1:q-left");
-  assert.deepEqual(branch.messages.map((message) => message.id), ["q-root", "a-root", "q-left", "a-left"]);
+  assert.deepEqual(
+    branch.messages.map((message) => message.id),
+    ["q-root", "a-root", "q-left", "a-left"]
+  );
+});
+
+test("resumed sessions include only local messages added since the last agent reply", () => {
+  const continued = [
+    {
+      id: "q-root",
+      role: "user",
+      content: "Root",
+      nodeId: "q-root",
+      parentId: null,
+      agentSession: {
+        adapter: "codex-app-server",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        documentHash: "hash"
+      }
+    },
+    {
+      id: "a-root",
+      role: "assistant",
+      content: "Root answer",
+      nodeId: "q-root",
+      parentId: "q-root",
+      meta: { transport: "codex-app-server" }
+    },
+    { id: "q-local", role: "user", content: "A local note", nodeId: "q-root", parentId: null },
+    { id: "q-next", role: "user", content: "Continue", nodeId: "q-root", parentId: null }
+  ];
+
+  const branch = branchThreadForQuestion({ id: "thread-1", messages: continued }, "q-next");
+  assert.deepEqual(
+    branch.unsyncedCurrentNodeMessages.map((message) => message.id),
+    ["q-local"]
+  );
 });
 
 test("carries a selected parent excerpt into a new child branch", () => {
@@ -39,11 +139,19 @@ test("carries a selected parent excerpt into a new child branch", () => {
       content: "Explain this",
       nodeId: "q-quoted",
       parentId: "q-left",
-      meta: { branchSelection: { sourceMessageId: "a-left", text: "selected answer text" } }
+      meta: {
+        branchSelection: {
+          sourceMessageId: "a-left",
+          text: "selected answer text"
+        }
+      }
     }
   ];
   const branch = branchThreadForQuestion({ id: "thread-1", messages: quoted }, "q-quoted");
-  assert.deepEqual(branch.branchSelection, { sourceMessageId: "a-left", text: "selected answer text" });
+  assert.deepEqual(branch.branchSelection, {
+    sourceMessageId: "a-left",
+    text: "selected answer text"
+  });
 });
 
 test("carries a selected excerpt into a continued turn in the same node", () => {
@@ -55,11 +163,16 @@ test("carries a selected excerpt into a continued turn in the same node", () => 
       content: "Explain only this part",
       nodeId: "q-left",
       parentId: "q-root",
-      meta: { branchSelection: { sourceMessageId: "a-left", text: "focused excerpt" } }
+      meta: {
+        branchSelection: { sourceMessageId: "a-left", text: "focused excerpt" }
+      }
     }
   ];
   const branch = branchThreadForQuestion({ id: "thread-1", messages: continued }, "q-left-follow");
-  assert.deepEqual(branch.branchSelection, { sourceMessageId: "a-left", text: "focused excerpt" });
+  assert.deepEqual(branch.branchSelection, {
+    sourceMessageId: "a-left",
+    text: "focused excerpt"
+  });
 });
 
 test("validates that child questions target a user question", () => {

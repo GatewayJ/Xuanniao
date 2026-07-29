@@ -1,4 +1,4 @@
-import type { Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
+import type { AgentOutcome, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
 
 type JsonRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
 
@@ -6,10 +6,12 @@ async function request<T>(url: string, options: JsonRequestInit = {}): Promise<T
   const { body, headers, ...requestOptions } = options;
   const response = await fetch(url, {
     ...requestOptions,
-    headers: {
-      "content-type": "application/json",
-      ...(headers || {})
-    },
+    headers: body === undefined
+      ? headers
+      : {
+          "content-type": "application/json",
+          ...(headers || {})
+        },
     body: body === undefined ? undefined : JSON.stringify(body)
   });
   const payload = await response.json();
@@ -27,9 +29,9 @@ export const api = {
     method: "POST",
     body: { path }
   }),
-  saveDocument: (content: string, threads?: Array<{ id: string; selectedText: string; anchor: Anchor }>, deletedThreadIds: string[] = []) => request<{ document: DocumentPayload; threads: Thread[] }>("/api/document", {
+  saveDocument: (content: string, expectedRevision: string, threads?: Array<{ id: string; selectedText: string; anchor: Anchor }>, deletedThreadIds: string[] = []) => request<{ document: DocumentPayload; threads: Thread[] }>("/api/document", {
     method: "PUT",
-    body: { content, threads, deletedThreadIds }
+    body: { content, expectedRevision, threads, deletedThreadIds }
   }),
   threads: () => request<{ threads: Thread[] }>("/api/threads"),
   createThread: (body: { title: string; selectedText: string; anchor: unknown }) =>
@@ -37,17 +39,12 @@ export const api = {
       method: "POST",
       body
     }),
-  saveThreadAnchors: (threads: Array<{ id: string; selectedText: string; anchor: Anchor }>, deletedThreadIds: string[] = []) =>
-    request<{ threads: Thread[] }>("/api/threads/anchors", {
-      method: "PUT",
-      body: { threads, deletedThreadIds }
-    }),
   deleteThread: (threadId: string) =>
     request<{ threads: Thread[] }>(`/api/threads/${encodeURIComponent(threadId)}`, {
       method: "DELETE"
     }),
   sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null; adoptExistingChildren?: boolean; insertBeforeNodeId?: string | null }) =>
-    request<{ userMessage: Message; assistantMessage: Message | null; threads: Thread[]; document?: DocumentPayload }>(
+    request<{ userMessage: Message; assistantMessage: Message | null; agentOutcome: AgentOutcome; threads: Thread[]; document?: DocumentPayload | null }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages`,
       {
         method: "POST",
@@ -55,7 +52,7 @@ export const api = {
       }
     ),
   updateMessage: (threadId: string, messageId: string, body: { content: string; rerunAgent?: boolean }) =>
-    request<{ message: Message; assistantMessage: Message | null; threads: Thread[]; document?: DocumentPayload }>(
+    request<{ message: Message; assistantMessage: Message | null; agentOutcome: AgentOutcome; threads: Thread[]; document?: DocumentPayload | null }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,
       {
         method: "PUT",

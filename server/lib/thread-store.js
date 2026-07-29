@@ -1,19 +1,36 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
+
+import { atomicWriteText } from "./atomic-file.js";
+import {
+  appendConversationMessage,
+  completeConversationAgentTurn,
+  deleteConversationMessage,
+  hasAssistantReply,
+  insertConversationNode,
+  normalizeAgentSession,
+  removeAssistantReply,
+  updateConversationMessage,
+  updateConversationMessageMeta
+} from "./conversation-model.js";
+
+const mutationLocks = new Map();
 
 export class ThreadStore {
   constructor(filePath) {
-    this.filePath = filePath;
+    this.filePath = path.resolve(filePath);
   }
 
   async list() {
+    await this.waitForMutations();
     const data = await this.read();
     return data.threads;
   }
 
   async get(id) {
+    await this.waitForMutations();
     const data = await this.read();
     const thread = data.threads.find((item) => item.id === id);
     if (!thread) {
@@ -23,278 +40,187 @@ export class ThreadStore {
   }
 
   async create({ title, selectedText, anchor }) {
-    const data = await this.read();
-    const existing = findExistingThread(data.threads, { selectedText, anchor });
-    if (existing) {
-      return existing;
-    }
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const existing = findExistingThread(data.threads, {
+        selectedText,
+        anchor
+      });
+      if (existing) {
+        return existing;
+      }
 
-    const now = new Date().toISOString();
-    const thread = {
-      id: randomUUID(),
-      title,
-      selectedText,
-      anchor,
-      acpSessionId: null,
-      messages: [],
-      createdAt: now,
-      updatedAt: now
-    };
-    data.threads.unshift(thread);
-    await this.write(data);
-    return thread;
+      const now = new Date().toISOString();
+      const thread = {
+        id: randomUUID(),
+        title,
+        selectedText,
+        anchor,
+        messages: [],
+        createdAt: now,
+        updatedAt: now
+      };
+      data.threads.unshift(thread);
+      await this.write(data);
+      return thread;
+    });
   }
 
   async addMessage(threadId, message) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-
-    const now = new Date().toISOString();
-    const saved = makeSavedMessage(message, now);
-    thread.messages.push(saved);
-    thread.updatedAt = now;
-    await this.write(data);
-    return saved;
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const now = new Date().toISOString();
+      const saved = appendConversationMessage(thread, message, { id: randomUUID(), now });
+      await this.write(data);
+      return saved;
+    });
   }
 
   async insertNodeAfter(threadId, parentNodeId, message, insertBeforeNodeId = null) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-    const parent = thread.messages.find((item) => (
-      item.role === "user" && item.id === parentNodeId && (item.nodeId || item.id) === parentNodeId
-    ));
-    if (!parent) {
-      throw new Error(`parent question not found: ${parentNodeId}`);
-    }
-
-    const now = new Date().toISOString();
-    const saved = makeSavedMessage({ ...message, nodeId: null, parentId: parentNodeId }, now);
-    for (const existing of thread.messages) {
-      if (
-        existing.role === "user"
-        && existing.id === (existing.nodeId || existing.id)
-        && existing.parentId === parentNodeId
-        && (!insertBeforeNodeId || existing.nodeId === insertBeforeNodeId)
-      ) {
-        existing.parentId = saved.nodeId;
-      }
-    }
-    thread.messages.push(saved);
-    thread.updatedAt = now;
-    await this.write(data);
-    return saved;
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const now = new Date().toISOString();
+      const saved = insertConversationNode(
+        thread,
+        parentNodeId,
+        message,
+        insertBeforeNodeId,
+        { id: randomUUID(), now }
+      );
+      await this.write(data);
+      return saved;
+    });
   }
 
-  async addMessageAfter(threadId, afterMessageId, message) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-    const index = thread.messages.findIndex((item) => item.id === afterMessageId);
-    if (index < 0) {
-      throw new Error(`message not found: ${afterMessageId}`);
-    }
-
-    const now = new Date().toISOString();
-    const saved = makeSavedMessage(message, now);
-    thread.messages.splice(index + 1, 0, saved);
-    thread.updatedAt = now;
-    await this.write(data);
-    return saved;
+  async completeAgentTurn(threadId, userMessageId, message, agentSession, expectedBranchRevision = null) {
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const now = new Date().toISOString();
+      const saved = completeConversationAgentTurn(
+        thread,
+        userMessageId,
+        message,
+        agentSession,
+        expectedBranchRevision,
+        { id: randomUUID(), now }
+      );
+      await this.write(data);
+      return saved;
+    });
   }
 
   async updateMessage(threadId, messageId, patch) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-
-    const message = thread.messages.find((item) => item.id === messageId);
-    if (!message) {
-      throw new Error(`message not found: ${messageId}`);
-    }
-    if (message.role !== "user") {
-      throw new Error("only local user comments can be edited");
-    }
-
-    message.content = patch.content;
-    message.updatedAt = new Date().toISOString();
-    thread.updatedAt = message.updatedAt;
-    await this.write(data);
-    return message;
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const message = updateConversationMessage(thread, messageId, patch, new Date().toISOString());
+      await this.write(data);
+      return message;
+    });
   }
 
   async updateMessageMeta(threadId, messageId, metaPatch) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-
-    const message = thread.messages.find((item) => item.id === messageId);
-    if (!message) {
-      throw new Error(`message not found: ${messageId}`);
-    }
-    if (message.role !== "user") {
-      throw new Error("only user questions can store planning metadata");
-    }
-
-    const now = new Date().toISOString();
-    message.meta = { ...(message.meta || {}), ...metaPatch };
-    message.updatedAt = now;
-    thread.updatedAt = now;
-    await this.write(data);
-    return message;
-  }
-
-  async updateMessageSession(threadId, messageId, acpSessionId) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-
-    const message = thread.messages.find((item) => item.id === messageId);
-    if (!message || message.role !== "user") {
-      throw new Error(`question message not found: ${messageId}`);
-    }
-
-    message.acpSessionId = acpSessionId || null;
-    await this.write(data);
-    return message;
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const now = new Date().toISOString();
+      const message = updateConversationMessageMeta(thread, messageId, metaPatch, now);
+      await this.write(data);
+      return message;
+    });
   }
 
   async deleteMessage(threadId, messageId) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-
-    const message = thread.messages.find((item) => item.id === messageId);
-    if (!message) {
-      throw new Error(`message not found: ${messageId}`);
-    }
-
-    let removed;
-    if (message.role === "user" && message.nodeId === message.id) {
-      const nodeIds = descendantNodeIds(thread.messages, message.nodeId);
-      removed = thread.messages.filter((item) => (
-        item.nodeId && nodeIds.has(item.nodeId)
-      ));
-      thread.messages = thread.messages.filter((item) => !removed.includes(item));
-    } else if (message.role === "user") {
-      const messageIndex = thread.messages.findIndex((item) => item.id === message.id);
-      const assistantIndex = findAssistantReplyIndex(thread.messages, messageIndex);
-      const removedIds = new Set([message.id]);
-      if (assistantIndex >= 0) removedIds.add(thread.messages[assistantIndex].id);
-      removed = thread.messages.filter((item) => removedIds.has(item.id));
-      thread.messages = thread.messages.filter((item) => !removedIds.has(item.id));
-    } else {
-      removed = [message];
-      thread.messages = thread.messages.filter((item) => item.id !== message.id);
-    }
-
-    thread.updatedAt = new Date().toISOString();
-    await this.write(data);
-    return removed;
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const removed = deleteConversationMessage(thread, messageId, new Date().toISOString());
+      await this.write(data);
+      return removed;
+    });
   }
 
   async removeAssistantAfter(threadId, userMessageId) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-    const index = thread.messages.findIndex((item) => item.id === userMessageId);
-    if (index < 0) {
-      throw new Error(`message not found: ${userMessageId}`);
-    }
-    const assistantIndex = findAssistantReplyIndex(thread.messages, index);
-    if (assistantIndex < 0) {
-      return null;
-    }
-
-    const [removed] = thread.messages.splice(assistantIndex, 1);
-    thread.updatedAt = new Date().toISOString();
-    await this.write(data);
-    return removed;
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const removed = removeAssistantReply(thread, userMessageId, new Date().toISOString());
+      if (!removed) return null;
+      await this.write(data);
+      return removed;
+    });
   }
 
   async hasAssistantAfter(threadId, userMessageId) {
+    await this.waitForMutations();
     const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-    const index = thread.messages.findIndex((item) => item.id === userMessageId);
-    if (index < 0) {
-      throw new Error(`message not found: ${userMessageId}`);
-    }
-    return findAssistantReplyIndex(thread.messages, index) >= 0;
-  }
-
-  async updateThread(threadId, patch) {
-    const data = await this.read();
-    const thread = data.threads.find((item) => item.id === threadId);
-    if (!thread) {
-      throw new Error(`thread not found: ${threadId}`);
-    }
-
-    Object.assign(thread, patch, {
-      updatedAt: new Date().toISOString()
-    });
-    await this.write(data);
-    return thread;
+    return hasAssistantReply(requireThread(data, threadId), userMessageId);
   }
 
   async updateAnchors(patches, deletedThreadIds = []) {
-    const data = await this.read();
-    const patchById = new Map(patches.map((patch) => [patch.id, patch]));
-    const deletedIds = new Set(deletedThreadIds);
-    const originalLength = data.threads.length;
-    data.threads = data.threads.filter((thread) => !deletedIds.has(thread.id));
-    let changed = data.threads.length !== originalLength;
-    const now = new Date().toISOString();
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const patchById = new Map(patches.map((patch) => [patch.id, patch]));
+      const deletedIds = new Set(deletedThreadIds);
+      const originalLength = data.threads.length;
+      data.threads = data.threads.filter((thread) => !deletedIds.has(thread.id));
+      let changed = data.threads.length !== originalLength;
+      const now = new Date().toISOString();
 
-    for (const thread of data.threads) {
-      const patch = patchById.get(thread.id);
-      if (!patch) continue;
-      thread.anchor = patch.anchor;
-      if (typeof patch.selectedText === "string") {
-        thread.selectedText = patch.selectedText;
+      for (const thread of data.threads) {
+        const patch = patchById.get(thread.id);
+        if (!patch) continue;
+        thread.anchor = patch.anchor;
+        if (typeof patch.selectedText === "string") {
+          thread.selectedText = patch.selectedText;
+        }
+        thread.updatedAt = now;
+        changed = true;
       }
-      thread.updatedAt = now;
-      changed = true;
-    }
 
-    if (changed) {
-      await this.write(data);
-    }
-    return data.threads;
+      if (changed) {
+        await this.write(data);
+      }
+      return data.threads;
+    });
   }
 
   async delete(threadId) {
-    const data = await this.read();
-    const originalLength = data.threads.length;
-    data.threads = data.threads.filter((item) => item.id !== threadId);
-    if (data.threads.length === originalLength) {
-      throw new Error(`thread not found: ${threadId}`);
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const originalLength = data.threads.length;
+      data.threads = data.threads.filter((item) => item.id !== threadId);
+      if (data.threads.length === originalLength) {
+        throw new Error(`thread not found: ${threadId}`);
+      }
+      await this.write(data);
+    });
+  }
+
+  async withMutation(operation) {
+    const previous = mutationLocks.get(this.filePath) || Promise.resolve();
+    const run = previous.then(operation, operation);
+    const barrier = run.catch(() => {});
+    mutationLocks.set(this.filePath, barrier);
+    try {
+      return await run;
+    } finally {
+      if (mutationLocks.get(this.filePath) === barrier) {
+        mutationLocks.delete(this.filePath);
+      }
     }
-    await this.write(data);
+  }
+
+  async waitForMutations() {
+    await (mutationLocks.get(this.filePath) || Promise.resolve());
   }
 
   async read() {
     if (!existsSync(this.filePath)) {
-      return { version: 1, threads: [] };
+      return { version: 3, threads: [] };
     }
     const raw = await readFile(this.filePath, "utf8");
     const data = JSON.parse(raw);
@@ -306,15 +232,21 @@ export class ThreadStore {
 
   async write(data) {
     await mkdir(path.dirname(this.filePath), { recursive: true });
-    await writeFile(this.filePath, `${JSON.stringify({ ...data, version: 2 }, null, 2)}\n`, "utf8");
+    await atomicWriteText(this.filePath, `${JSON.stringify({ ...data, version: 3 }, null, 2)}\n`);
   }
 }
 
 function normalizeStoredThread(thread) {
+  const { acpSessionId, agentSession, ...stored } = thread;
+  const messages = normalizeStoredMessages(thread.messages);
+  const legacySession = normalizeAgentSession(agentSession, acpSessionId);
+  const firstNodeRoot = messages.find((message) => message.role === "user" && message.id === (message.nodeId || message.id));
+  if (legacySession && firstNodeRoot && !firstNodeRoot.agentSession) {
+    firstNodeRoot.agentSession = legacySession;
+  }
   return {
-    ...thread,
-    acpSessionId: typeof thread.acpSessionId === "string" && thread.acpSessionId ? thread.acpSessionId : null,
-    messages: normalizeStoredMessages(thread.messages)
+    ...stored,
+    messages
   };
 }
 
@@ -324,16 +256,13 @@ function normalizeStoredMessages(messages) {
   let previousNodeId = null;
   return messages.map((message) => {
     const hasParentId = Object.prototype.hasOwnProperty.call(message, "parentId");
-    const parentId = hasParentId
-      ? (typeof message.parentId === "string" && message.parentId ? message.parentId : null)
-      : previousQuestionId;
+    const parentId = hasParentId ? (typeof message.parentId === "string" && message.parentId ? message.parentId : null) : previousQuestionId;
+    const { acpSessionId, ...stored } = message;
     const normalized = {
-      ...message,
-      nodeId: typeof message.nodeId === "string" && message.nodeId
-        ? message.nodeId
-        : message.role === "user" ? message.id : parentId || previousNodeId,
+      ...stored,
+      nodeId: typeof message.nodeId === "string" && message.nodeId ? message.nodeId : message.role === "user" ? message.id : parentId || previousNodeId,
       parentId,
-      acpSessionId: typeof message.acpSessionId === "string" && message.acpSessionId ? message.acpSessionId : null
+      agentSession: normalizeAgentSession(message.agentSession, acpSessionId)
     };
     if (message.role === "user") {
       previousQuestionId = message.id;
@@ -343,69 +272,28 @@ function normalizeStoredMessages(messages) {
   });
 }
 
-function makeSavedMessage(message, now) {
-  const id = randomUUID();
-  return {
-    id,
-    role: message.role,
-    content: message.content,
-    nodeId: typeof message.nodeId === "string" && message.nodeId ? message.nodeId : message.role === "user" ? id : null,
-    parentId: typeof message.parentId === "string" && message.parentId ? message.parentId : null,
-    acpSessionId: typeof message.acpSessionId === "string" && message.acpSessionId ? message.acpSessionId : null,
-    error: Boolean(message.error),
-    meta: message.meta || {},
-    createdAt: now
-  };
-}
-
 function findExistingThread(threads, { selectedText, anchor }) {
   const hasAnchorRange = Number.isInteger(anchor?.start) && Number.isInteger(anchor?.end);
   const normalizedText = normalizeText(selectedText);
-  return threads.find((thread) => {
-    const threadAnchor = thread.anchor || {};
-    if (hasAnchorRange) {
-      return threadAnchor.start === anchor.start && threadAnchor.end === anchor.end;
-    }
-    return normalizedText && normalizeText(thread.selectedText) === normalizedText;
-  }) || null;
+  return (
+    threads.find((thread) => {
+      const threadAnchor = thread.anchor || {};
+      if (hasAnchorRange) {
+        return threadAnchor.start === anchor.start && threadAnchor.end === anchor.end;
+      }
+      return normalizedText && normalizeText(thread.selectedText) === normalizedText;
+    }) || null
+  );
 }
 
-function findAssistantReplyIndex(messages, userMessageIndex) {
-  const userMessageId = messages[userMessageIndex]?.id;
-  const linkedIndex = messages.findIndex((message) => message.role === "assistant" && message.parentId === userMessageId);
-  if (linkedIndex >= 0) return linkedIndex;
-  for (let index = userMessageIndex + 1; index < messages.length; index += 1) {
-    const message = messages[index];
-    if (message.role === "assistant") {
-      return index;
-    }
-    if (message.role === "user") {
-      return -1;
-    }
-  }
-  return -1;
-}
-
-function descendantNodeIds(messages, rootNodeId) {
-  const ids = new Set([rootNodeId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const message of messages) {
-      if (
-        message.role !== "user" ||
-        message.id !== message.nodeId ||
-        ids.has(message.nodeId) ||
-        !message.parentId ||
-        !ids.has(message.parentId)
-      ) continue;
-      ids.add(message.nodeId);
-      changed = true;
-    }
-  }
-  return ids;
+function requireThread(data, threadId) {
+  const thread = data.threads.find((item) => item.id === threadId);
+  if (!thread) throw new Error(`thread not found: ${threadId}`);
+  return thread;
 }
 
 function normalizeText(value) {
-  return String(value || "").replace(/\s+/g, " ").trim();
+  return String(value || "")
+    .replace(/\s+/g, " ")
+    .trim();
 }

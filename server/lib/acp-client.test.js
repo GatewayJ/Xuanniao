@@ -4,12 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import {
-  AcpDocumentAgent,
-  acpAgentMode,
-  buildPrompt,
-  normalizeAgentMode
-} from "./acp-client.js";
+import { AcpDocumentAgent, acpAgentMode, buildPrompt, normalizeAgentMode } from "./acp-client.js";
 
 function createAgent(documentPath, accessMode) {
   return new AcpDocumentAgent({
@@ -38,31 +33,52 @@ test("full access writes arbitrary files while read-only rejects writes", async 
   await writeFile(documentPath, "document", "utf8");
 
   try {
-    await createAgent(documentPath, "full-access").writeTextFile({ path: otherPath, content: "changed" });
+    await createAgent(documentPath, "full-access").writeTextFile({
+      path: otherPath,
+      content: "changed"
+    });
     assert.equal(await readFile(otherPath, "utf8"), "changed");
     await assert.rejects(
-      createAgent(documentPath, "read-only").writeTextFile({ path: otherPath, content: "denied" }),
+      createAgent(documentPath, "read-only").writeTextFile({
+        path: otherPath,
+        content: "denied"
+      }),
       /write denied in read-only mode/
     );
+    await assert.rejects(
+      createAgent(documentPath, "full-access").writeTextFile({
+        path: documentPath,
+        content: "bypass"
+      }),
+      /protected active document/
+    );
+    assert.equal(await readFile(documentPath, "utf8"), "document");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
 
-test("permission requests resolve automatically in both modes", async () => {
-  const fullAccess = createAgent("/tmp/document.md", "full-access");
-  const readOnly = createAgent("/tmp/document.md", "read-only");
+test("permission requests are surfaced to the approval broker", async () => {
+  const agent = createAgent("/tmp/document.md", "full-access");
   const options = [
     { optionId: "allow", kind: "allow_once", name: "Allow" },
     { optionId: "deny", kind: "reject_once", name: "Deny" }
   ];
 
-  assert.deepEqual(await fullAccess.requestUserPermission({ options }), {
+  const pending = agent.requestUserPermission({
+    sessionId: "session-1",
+    title: "Run command",
+    options
+  });
+  const [request] = agent.listPermissionRequests();
+  assert.equal(request.sessionId, "session-1");
+  assert.equal(request.title, "Run command");
+  assert.deepEqual(request.options, options);
+  agent.resolvePermissionRequest(request.id, { optionId: "allow" });
+  assert.deepEqual(await pending, {
     outcome: { outcome: "selected", optionId: "allow" }
   });
-  assert.deepEqual(await readOnly.requestUserPermission({ options }), {
-    outcome: { outcome: "selected", optionId: "deny" }
-  });
+  assert.deepEqual(agent.listPermissionRequests(), []);
 });
 
 test("each thread creates or loads its own persisted ACP session", async () => {
@@ -87,19 +103,35 @@ test("each thread creates or loads its own persisted ACP session", async () => {
   }
 
   const newAgent = new StubAgent();
-  let persistedSessionId = null;
-  const newThread = { id: "thread-new", acpSessionId: null };
-  assert.equal(await newAgent.ensureThreadSession(newThread, (id) => { persistedSessionId = id; }), "new-session");
-  assert.equal(persistedSessionId, "new-session");
+  const newThread = { id: "thread-new", agentSession: null };
+  assert.deepEqual(await newAgent.ensureThreadSession(newThread), {
+    sessionId: "new-session",
+    documentHash: null,
+    historyMode: "fresh"
+  });
   assert.deepEqual(newAgent.calls, [{ method: "session/new", params: { cwd: "/tmp", mcpServers: [] } }]);
 
   const restoredAgent = new StubAgent();
-  const restoredThread = { id: "thread-restored", acpSessionId: "stored-session" };
-  assert.equal(await restoredAgent.ensureThreadSession(restoredThread), "stored-session");
-  assert.deepEqual(restoredAgent.calls, [{
-    method: "session/load",
-    params: { sessionId: "stored-session", cwd: "/tmp", mcpServers: [] }
-  }]);
+  const restoredThread = {
+    id: "thread-restored",
+    agentSession: {
+      adapter: "acp",
+      sessionId: "stored-session",
+      turnId: null,
+      documentHash: "document-hash"
+    }
+  };
+  assert.deepEqual(await restoredAgent.ensureThreadSession(restoredThread), {
+    sessionId: "stored-session",
+    documentHash: "document-hash",
+    historyMode: "inherited"
+  });
+  assert.deepEqual(restoredAgent.calls, [
+    {
+      method: "session/load",
+      params: { sessionId: "stored-session", cwd: "/tmp", mcpServers: [] }
+    }
+  ]);
 });
 
 test("creates and persists a new session when a stored session cannot be loaded", async () => {
@@ -126,14 +158,21 @@ test("creates and persists a new session when a stored session cannot be loaded"
 
   for (const loadSession of [true, false]) {
     const agent = new StubAgent(loadSession);
-    let persistedSessionId = null;
-    const thread = { id: `thread-${loadSession}`, acpSessionId: "stale-session" };
+    const thread = {
+      id: `thread-${loadSession}`,
+      agentSession: {
+        adapter: "acp",
+        sessionId: "stale-session",
+        turnId: null,
+        documentHash: "old-hash"
+      }
+    };
 
-    assert.equal(
-      await agent.ensureThreadSession(thread, (id) => { persistedSessionId = id; }),
-      "replacement-session"
-    );
-    assert.equal(persistedSessionId, "replacement-session");
+    assert.deepEqual(await agent.ensureThreadSession(thread), {
+      sessionId: "replacement-session",
+      documentHash: null,
+      historyMode: "fresh"
+    });
     assert.equal(agent.calls.at(-1).method, "session/new");
     assert.equal(agent.calls.filter(({ method }) => method === "session/load").length, loadSession ? 1 : 0);
   }
@@ -160,10 +199,18 @@ test("sibling conversation nodes use isolated ACP sessions", async () => {
   }
 
   const agent = new StubAgent();
-  const left = await agent.ensureThreadSession({ id: "thread-1", sessionKey: "thread-1:left", acpSessionId: null });
-  const right = await agent.ensureThreadSession({ id: "thread-1", sessionKey: "thread-1:right", acpSessionId: null });
-  assert.equal(left, "session-1");
-  assert.equal(right, "session-2");
+  const left = await agent.ensureThreadSession({
+    id: "thread-1",
+    sessionKey: "thread-1:left",
+    agentSession: null
+  });
+  const right = await agent.ensureThreadSession({
+    id: "thread-1",
+    sessionKey: "thread-1:right",
+    agentSession: null
+  });
+  assert.equal(left.sessionId, "session-1");
+  assert.equal(right.sessionId, "session-2");
 });
 
 test("prompt contains the complete document and every supplied branch message", () => {
@@ -173,14 +220,22 @@ test("prompt contains the complete document and every supplied branch message", 
   }));
   const prompt = buildPrompt({
     question: "message-13",
-    document: { path: "/tmp/plan.md", title: "plan.md", content: "# Complete plan\n\nAll details." },
-    thread: { selectedText: "All details.", anchor: { start: 17, end: 29 }, messages }
+    document: {
+      path: "/tmp/plan.md",
+      title: "plan.md",
+      content: "# Complete plan\n\nAll details."
+    },
+    thread: {
+      selectedText: "All details.",
+      anchor: { start: 17, end: 29 },
+      messages
+    }
   });
 
   assert.match(prompt, /# Complete plan\n\nAll details\./);
-  assert.match(prompt, /user: message-0/);
-  assert.match(prompt, /assistant: message-13/);
-  assert.match(prompt, /Current conversation branch ancestor history:/);
+  assert.match(prompt, /<message role="user">\nmessage-0/);
+  assert.match(prompt, /<message role="assistant">\nmessage-13/);
+  assert.match(prompt, /Conversation history required to reconstruct this branch:/);
 });
 
 test("prompt identifies the selected conversation excerpt for a focused follow-up", () => {
@@ -191,7 +246,10 @@ test("prompt identifies the selected conversation excerpt for a focused follow-u
       selectedText: "Plan",
       anchor: {},
       messages: [],
-      branchSelection: { sourceMessageId: "answer-1", text: "A precise selected excerpt." }
+      branchSelection: {
+        sourceMessageId: "answer-1",
+        text: "A precise selected excerpt."
+      }
     }
   });
 

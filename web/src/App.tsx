@@ -9,41 +9,35 @@ import { SelectionAskPopover } from "./components/SelectionAskPopover";
 import { ThreadRail } from "./components/ThreadRail";
 import { TopBar } from "./components/TopBar";
 import { useRenderedPreview } from "./hooks/useRenderedPreview";
+import { useConversationCommands } from "./hooks/useConversationCommands";
+import { useDocumentSession } from "./hooks/useDocumentSession";
+import { usePermissionInbox } from "./hooks/usePermissionInbox";
 import { useThreadPaneWidth } from "./hooks/useThreadPaneWidth";
 import { MarkdownThreadEditor, nearestThreadForLine } from "./ThreadEditor";
 import { anchorContextForRange, locateTextInMarkdown, resolveThreadAnchor } from "./thread-anchors";
 import { remapThreadsForChange } from "./thread-anchor-remap";
 import { buildPreviewThreadLayout } from "./thread-spatial";
 import {
-  appendPendingMessage,
   findThreadForSelection,
-  hasAssistantReplyAfter,
   insertThreadOnce,
   orderThreads,
-  titleForSelection,
-  updateMessageWithPendingReply
+  titleForSelection
 } from "./thread-utils";
-import type { BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, Message, PermissionRequest, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
+import type { FileBrowserPayload, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 const EXPLICIT_THREAD_ACTIVATION_HOLD_MS = 2500;
 
 export function App() {
-  const [documentData, setDocumentData] = useState<DocumentPayload | null>(null);
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>("edit");
   const [status, setStatus] = useState("正在加载");
-  const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
-  const [editingMessage, setEditingMessage] = useState<string | null>(null);
-  const [editText, setEditText] = useState("");
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [workspaceRoot, setWorkspaceRoot] = useState("");
   const [fileBrowser, setFileBrowser] = useState<FileBrowserPayload>({ directory: "", parent: null, selectedPath: null, entries: [] });
   const [fileBrowserLoading, setFileBrowserLoading] = useState(false);
   const [fileBrowserError, setFileBrowserError] = useState("");
   const [diagramViewer, setDiagramViewer] = useState<{ title: string; svg: string } | null>(null);
-  const [permissionRequests, setPermissionRequests] = useState<PermissionRequest[]>([]);
-  const [resolvingPermissionIds, setResolvingPermissionIds] = useState<Set<string>>(() => new Set());
   const [threadSpatialLayout, setThreadSpatialLayout] = useState<ThreadSpatialLayout | null>(null);
   const [selectionAsk, setSelectionAsk] = useState<{
     selection: SelectionContext;
@@ -54,9 +48,6 @@ export function App() {
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MarkdownThreadEditor | null>(null);
   const previewRef = useRef<HTMLElement | null>(null);
-  const saveTimerRef = useRef<number | null>(null);
-  const deletedThreadIdsRef = useRef<Set<string>>(new Set());
-  const hasPendingDocumentSaveRef = useRef(false);
   const scrollSyncFrameRef = useRef<number | null>(null);
   const explicitThreadActivationTimerRef = useRef<number | null>(null);
   const explicitlyActivatedThreadIdRef = useRef<string | null>(null);
@@ -64,6 +55,26 @@ export function App() {
   const activeThreadIdRef = useRef<string | null>(null);
   const modeRef = useRef<Mode>("edit");
   const { threadWidth, startResize } = useThreadPaneWidth();
+  const documentSession = useDocumentSession({
+    editorRef,
+    threadsRef,
+    setThreads,
+    setStatus
+  });
+  const { documentData } = documentSession;
+  const {
+    permissionRequests,
+    resolvingPermissionIds,
+    resolvePermissionRequest
+  } = usePermissionInbox({ setStatus });
+  const conversation = useConversationCommands({
+    threadsRef,
+    setThreads,
+    setActiveThreadId,
+    setStatus,
+    flushDocumentSave: documentSession.flushDocumentSave,
+    applyDocument: documentSession.applyServerDocument
+  });
 
   const activeThread = threads.find((thread) => thread.id === activeThreadId) || null;
   const orderedThreads = useMemo(() => orderThreads(threads, documentData?.content), [threads, documentData?.content]);
@@ -89,28 +100,6 @@ export function App() {
     if (explicitThreadActivationTimerRef.current !== null) {
       window.clearTimeout(explicitThreadActivationTimerRef.current);
     }
-  }, []);
-
-  useEffect(() => {
-    let stopped = false;
-    let timer: number | null = null;
-
-    async function pollPermissions() {
-      try {
-        const payload = await api.permissions();
-        if (!stopped) setPermissionRequests(payload.requests);
-      } catch {
-        if (!stopped) setPermissionRequests([]);
-      } finally {
-        if (!stopped) timer = window.setTimeout(pollPermissions, 900);
-      }
-    }
-
-    void pollPermissions();
-    return () => {
-      stopped = true;
-      if (timer) window.clearTimeout(timer);
-    };
   }, []);
 
   useEffect(() => {
@@ -144,12 +133,16 @@ export function App() {
   });
 
   async function loadAll() {
-    const [doc, threadPayload, filePayload] = await Promise.all([api.document(), api.threads(), api.files()]);
-    setDocumentData(doc);
-    setThreads(threadPayload.threads);
-    setActiveThreadId(threadPayload.threads[0]?.id || null);
-    setWorkspaceRoot(filePayload.root);
-    setStatus("就绪");
+    try {
+      const [doc, threadPayload, filePayload] = await Promise.all([api.document(), api.threads(), api.files()]);
+      documentSession.loadDocument(doc);
+      setThreads(threadPayload.threads);
+      setActiveThreadId(threadPayload.threads[0]?.id || null);
+      setWorkspaceRoot(filePayload.root);
+      setStatus("就绪");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function handleEditorChange(update: ViewUpdate) {
@@ -162,17 +155,11 @@ export function App() {
         const fallbackId = remapped.threads[0]?.id || null;
         activeThreadIdRef.current = fallbackId;
         setActiveThreadId(fallbackId);
-        setEditingMessage(null);
-        setEditText("");
+        conversation.cancelEdit();
       }
-      for (const threadId of remapped.deletedThreadIds) deletedThreadIdsRef.current.add(threadId);
     }
-    setDocumentData((current) => current ? { ...current, content } : current);
-    setStatus("正在编辑");
+    documentSession.recordEditorChange(content, remapped.deletedThreadIds);
     scheduleThreadSpatialSync();
-    hasPendingDocumentSaveRef.current = true;
-    if (saveTimerRef.current) window.clearTimeout(saveTimerRef.current);
-    saveTimerRef.current = window.setTimeout(() => void saveDocument(content), 1000);
   }
 
   function handleEditorScroll() {
@@ -246,41 +233,6 @@ export function App() {
     }
   }
 
-  async function saveDocument(content = editorRef.current?.getContent() || documentData?.content || ""): Promise<boolean> {
-    saveTimerRef.current = null;
-    const threadSnapshot = threadsRef.current;
-    const deletedThreadIds = [...deletedThreadIdsRef.current];
-    deletedThreadIdsRef.current.clear();
-    hasPendingDocumentSaveRef.current = false;
-    try {
-      const payload = await api.saveDocument(content, threadSnapshot.map((thread) => ({
-        id: thread.id,
-        selectedText: thread.selectedText,
-        anchor: thread.anchor
-      })), deletedThreadIds);
-      if (editorRef.current?.getContent() === content) {
-        threadsRef.current = payload.threads;
-        setThreads(payload.threads);
-        setDocumentData(payload.document);
-        setStatus("已保存");
-      }
-      return true;
-    } catch (error) {
-      for (const threadId of deletedThreadIds) deletedThreadIdsRef.current.add(threadId);
-      hasPendingDocumentSaveRef.current = true;
-      setStatus(error instanceof Error ? error.message : String(error));
-      return false;
-    }
-  }
-
-  async function flushDocumentSave(): Promise<boolean> {
-    if (saveTimerRef.current) {
-      window.clearTimeout(saveTimerRef.current);
-      saveTimerRef.current = null;
-    }
-    return hasPendingDocumentSaveRef.current ? saveDocument() : true;
-  }
-
   async function openFileManager() {
     setFilePickerOpen(true);
     await browseFiles(documentData?.path || workspaceRoot);
@@ -302,21 +254,14 @@ export function App() {
   async function openDocument(path: string) {
     setStatus("正在打开文档");
     try {
-      if (saveTimerRef.current) {
-        window.clearTimeout(saveTimerRef.current);
-        saveTimerRef.current = null;
-      }
       if (documentData) {
-        if (!await flushDocumentSave()) return;
+        if (!await documentSession.flushDocumentSave()) return;
       }
       const payload = await api.openDocument(path);
-      setDocumentData(payload.document);
-      editorRef.current?.setContent(payload.document.content);
+      documentSession.loadDocument(payload.document, true);
       setThreads(payload.threads);
       setActiveThreadId(payload.threads[0]?.id || null);
-      setMessageDrafts({});
-      setEditingMessage(null);
-      setEditText("");
+      conversation.resetConversationEditor();
       setFilePickerOpen(false);
       setFileBrowserError("");
       setStatus("文档已打开");
@@ -412,65 +357,6 @@ export function App() {
     return created.thread;
   }
 
-  async function send(
-    threadId: string,
-    content: string,
-    draftKey: string,
-    askAgent: boolean,
-    nodeId: string | null = null,
-    parentMessageId: string | null = null,
-    branchSelection: BranchSelection | null = null,
-    adoptExistingChildren = false,
-    insertBeforeNodeId: string | null = null
-  ) {
-    const thread = threadsRef.current.find((item) => item.id === threadId) || null;
-    if (!thread) return;
-    await sendThreadMessage(thread, content, askAgent, draftKey, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId);
-  }
-
-  async function sendThreadMessage(
-    thread: Thread,
-    content: string,
-    askAgent: boolean,
-    clearDraftKey: string | null = null,
-    nodeId: string | null = null,
-    parentMessageId: string | null = null,
-    branchSelection: BranchSelection | null = null,
-    adoptExistingChildren = false,
-    insertBeforeNodeId: string | null = null
-  ) {
-    const trimmed = content.trim();
-    if (!trimmed) {
-      setStatus("请先输入内容");
-      return;
-    }
-    if (!await flushDocumentSave()) return;
-    if (clearDraftKey) {
-      setMessageDrafts((current) => {
-        const next = { ...current };
-        delete next[clearDraftKey];
-        return next;
-      });
-    }
-    setStatus(askAgent ? "正在询问 Codex" : "正在添加评论");
-    setThreads((current) => appendPendingMessage(current, thread.id, trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId));
-
-    try {
-      const payload = await api.sendMessage(thread.id, { content: trimmed, askAgent, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId });
-      setThreads(payload.threads);
-      if (payload.document) {
-        setDocumentData(payload.document);
-        editorRef.current?.setContent(payload.document.content);
-      }
-      setActiveThreadId(thread.id);
-      setStatus(askAgent ? "Codex 已回答" : "评论已保存");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-      const fresh = await api.threads();
-      setThreads(fresh.threads);
-    }
-  }
-
   function askSelection() {
     const selection = currentSelection();
     if (!selection) {
@@ -491,140 +377,16 @@ export function App() {
       const question = selectionQuestion;
       setSelectionAsk(null);
       setSelectionQuestion("");
-      void sendThreadMessage(thread, question, true);
+      void conversation.send({
+        threadId: thread.id,
+        content: question,
+        draftKey: null,
+        askAgent: true
+      });
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setCreatingSelectionThread(false);
-    }
-  }
-
-  async function saveEditedMessage(threadId: string, messageId: string) {
-    const content = editText.trim();
-    if (!content) return;
-    const rerunAgent = hasAssistantReplyAfter(threadsRef.current, threadId, messageId);
-    setThreads((current) => updateMessageWithPendingReply(current, threadId, messageId, content, rerunAgent));
-    setEditingMessage(null);
-    setEditText("");
-    setStatus(rerunAgent ? "正在更新 Codex 回答" : "评论已更新");
-    try {
-      const payload = await api.updateMessage(threadId, messageId, { content, rerunAgent });
-      setThreads(payload.threads);
-      if (payload.document) {
-        setDocumentData(payload.document);
-        editorRef.current?.setContent(payload.document.content);
-      }
-      setStatus(payload.assistantMessage ? "Codex 已回答" : "评论已更新");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-      const fresh = await api.threads();
-      setThreads(fresh.threads);
-    }
-  }
-
-  async function updateMessageMeta(threadId: string, messageId: string, nodeKind: ConversationNodeKind) {
-    setThreads((current) => current.map((thread) => (
-      thread.id !== threadId ? thread : {
-        ...thread,
-        messages: thread.messages.map((message) => (
-          message.id === messageId
-            ? { ...message, meta: { ...(message.meta || {}), nodeKind } }
-            : message
-        ))
-      }
-    )));
-    setStatus("节点类型已更新");
-    try {
-      const payload = await api.updateMessageMeta(threadId, messageId, { nodeKind });
-      setThreads(payload.threads);
-      setStatus("节点类型已保存");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-      const fresh = await api.threads();
-      setThreads(fresh.threads);
-    }
-  }
-
-  async function retryAssistantReply(threadId: string, assistantMessageId: string) {
-    const thread = threadsRef.current.find((item) => item.id === threadId);
-    const assistantIndex = thread?.messages.findIndex((msg) => msg.id === assistantMessageId) ?? -1;
-    const userMessage = thread ? findUserMessageForAssistant(thread.messages, assistantIndex) : null;
-    if (!userMessage) {
-      setStatus("没有找到这条 Codex 回答对应的问题");
-      return;
-    }
-
-    setStatus("正在重试 Codex");
-    setThreads((current) => updateMessageWithPendingReply(current, threadId, userMessage.id, userMessage.content, true));
-    try {
-      const payload = await api.updateMessage(threadId, userMessage.id, { content: userMessage.content, rerunAgent: true });
-      setThreads(payload.threads);
-      if (payload.document) {
-        setDocumentData(payload.document);
-        editorRef.current?.setContent(payload.document.content);
-      }
-      setActiveThreadId(threadId);
-      setStatus(payload.assistantMessage ? "Codex 已回答" : "重试完成");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-      const fresh = await api.threads();
-      setThreads(fresh.threads);
-    }
-  }
-
-  async function resolvePermissionRequest(requestId: string, optionId: string | null) {
-    setResolvingPermissionIds((current) => new Set(current).add(requestId));
-    setStatus(optionId ? "正在发送权限决定" : "正在取消权限请求");
-    try {
-      const payload = await api.resolvePermission(requestId, optionId ? { optionId } : { cancelled: true });
-      setPermissionRequests(payload.requests);
-      setStatus("权限决定已发送");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-      try {
-        const payload = await api.permissions();
-        setPermissionRequests(payload.requests);
-      } catch {
-        setPermissionRequests([]);
-      }
-    } finally {
-      setResolvingPermissionIds((current) => {
-        const next = new Set(current);
-        next.delete(requestId);
-        return next;
-      });
-    }
-  }
-
-  async function deleteMessage(threadId: string, messageId: string) {
-    const thread = threadsRef.current.find((item) => item.id === threadId);
-    const target = thread?.messages.find((msg) => msg.id === messageId);
-    const deletesReply = target?.role === "user" && hasAssistantReplyAfter(threadsRef.current, threadId, messageId);
-    const descendantCount = target?.role === "user" && target.nodeId === target.id && thread
-      ? countDescendantNodes(thread.messages, target.nodeId)
-      : 0;
-    const confirmed = window.confirm(
-      descendantCount > 0
-        ? `确定删除这个问题、对应回答以及 ${descendantCount} 个子问题吗？`
-        : deletesReply
-          ? "确定删除这个问题及其 Codex 回答吗？"
-          : target?.role === "user" ? "确定删除这个问题吗？" : "确定删除这条 Codex 回答吗？"
-    );
-    if (!confirmed) return;
-
-    setStatus("正在删除消息");
-    try {
-      const payload = await api.deleteMessage(threadId, messageId);
-      setThreads(payload.threads);
-      if (editingMessage === messageId) {
-        setEditingMessage(null);
-        setEditText("");
-      }
-      setStatus("消息已删除");
-    } catch (error) {
-      setStatus(error instanceof Error ? error.message : String(error));
-      const fresh = await api.threads();
-      setThreads(fresh.threads);
     }
   }
 
@@ -640,13 +402,15 @@ export function App() {
       const nextActiveId = activeThreadId === thread.id ? fallbackId : activeThreadId;
       setThreads(payload.threads);
       setActiveThreadId(nextActiveId && payload.threads.some((item) => item.id === nextActiveId) ? nextActiveId : fallbackId);
-      setEditingMessage(null);
-      setEditText("");
+      conversation.cancelEdit();
       setStatus("讨论已删除");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
-      const fresh = await api.threads();
-      setThreads(fresh.threads);
+      try {
+        setThreads((await api.threads()).threads);
+      } catch {
+        // Preserve the original delete error when recovery also fails.
+      }
     }
   }
 
@@ -709,7 +473,7 @@ export function App() {
         documentPath={documentData?.path || "正在加载…"}
         status={status}
         onOpenFileManager={() => void openFileManager()}
-        onSave={() => void saveDocument()}
+        onSave={() => void documentSession.saveDocument()}
       />
       <main className="workspace">
         <DocumentPane
@@ -730,26 +494,23 @@ export function App() {
           spatialLayout={threadSpatialLayout}
           permissionRequests={permissionRequests}
           resolvingPermissionIds={resolvingPermissionIds}
-          editingMessage={editingMessage}
-          editText={editText}
-          messageDrafts={messageDrafts}
+          editingMessage={conversation.editingMessage}
+          editText={conversation.editText}
+          messageDrafts={conversation.messageDrafts}
           onActivate={activateThread}
           onDelete={(thread) => void deleteThread(thread)}
           onAskSelection={askSelection}
-          onEdit={(msg: Message) => {
-            setEditingMessage(msg.id);
-            setEditText(msg.content);
-          }}
-          onCancelEdit={() => setEditingMessage(null)}
-          onSaveEdit={saveEditedMessage}
-          onUpdateMessageMeta={(threadId, messageId, nodeKind) => void updateMessageMeta(threadId, messageId, nodeKind)}
-          onRetryAssistant={retryAssistantReply}
-          onDeleteMessage={deleteMessage}
+          onEdit={conversation.beginEdit}
+          onCancelEdit={conversation.cancelEdit}
+          onSaveEdit={conversation.saveEditedMessage}
+          onUpdateMessageMeta={conversation.updateMessageMeta}
+          onRetryAssistant={conversation.retryAssistantReply}
+          onDeleteMessage={conversation.deleteMessage}
           onResolvePermission={resolvePermissionRequest}
           onSpatialScroll={syncDocumentScrollFromThreadRail}
-          setEditText={setEditText}
-          setMessageDraft={(draftKey, value) => setMessageDrafts((current) => ({ ...current, [draftKey]: value }))}
-          onSend={send}
+          setEditText={conversation.setEditText}
+          setMessageDraft={conversation.setMessageDraft}
+          onSend={conversation.send}
         />
       </main>
       <FilePickerModal
@@ -780,40 +541,6 @@ export function App() {
       <DiagramViewer diagram={diagramViewer} onClose={() => setDiagramViewer(null)} />
     </div>
   );
-}
-
-function findUserMessageForAssistant(messages: Message[], assistantIndex: number): Message | null {
-  if (assistantIndex <= 0 || messages[assistantIndex]?.role !== "assistant") return null;
-  const parentId = messages[assistantIndex].parentId;
-  if (parentId) {
-    const parent = messages.find((message) => message.id === parentId && message.role === "user");
-    if (parent) return parent;
-  }
-  for (let index = assistantIndex - 1; index >= 0; index -= 1) {
-    if (messages[index].role === "user") return messages[index];
-  }
-  return null;
-}
-
-function countDescendantNodes(messages: Message[], rootNodeId: string): number {
-  const ids = new Set([rootNodeId]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const message of messages) {
-      if (
-        message.role !== "user" ||
-        message.id !== message.nodeId ||
-        !message.nodeId ||
-        ids.has(message.nodeId) ||
-        !message.parentId ||
-        !ids.has(message.parentId)
-      ) continue;
-      ids.add(message.nodeId);
-      changed = true;
-    }
-  }
-  return ids.size - 1;
 }
 
 function remapThreadsForEditorChange(threads: Thread[], update: ViewUpdate) {

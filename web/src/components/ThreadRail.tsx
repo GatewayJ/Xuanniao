@@ -8,6 +8,7 @@ import {
   type WheelEvent
 } from "react";
 import { createPortal } from "react-dom";
+import { useMessageSelection } from "../hooks/useMessageSelection";
 import { renderMarkdown, renderMermaidBlocks, renderMessageMarkdown } from "../markdown";
 import {
   THREAD_CANVAS_NODE_HEIGHT,
@@ -25,7 +26,7 @@ import {
   defaultConversationRoute,
   flattenConversationTree
 } from "../thread-tree";
-import type { BranchSelection, ConversationNodeKind, DocumentPayload, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
+import type { BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
 
 const THREAD_FOCUS_NODE_WIDTH = 920;
 const THREAD_FOCUS_NODE_HEIGHT = 720;
@@ -49,6 +50,7 @@ const NODE_QUICK_ACTIONS = [
 ] as const;
 
 type NodeQuickActionId = typeof NODE_QUICK_ACTIONS[number]["id"];
+type ThreadQuestionCommand = Omit<ConversationMessageCommand, "threadId" | "askAgent">;
 
 type ThreadRailProps = {
   documentData: DocumentPayload | null;
@@ -73,7 +75,7 @@ type ThreadRailProps = {
   onSpatialScroll: (scrollTop: number) => void;
   setEditText: (value: string) => void;
   setMessageDraft: (draftKey: string, value: string) => void;
-  onSend: (threadId: string, content: string, draftKey: string, askAgent: boolean, nodeId: string | null, parentMessageId: string | null, branchSelection?: BranchSelection | null, adoptExistingChildren?: boolean, insertBeforeNodeId?: string | null) => void;
+  onSend: (command: ConversationMessageCommand) => void;
 };
 
 export function ThreadRail(props: ThreadRailProps) {
@@ -355,7 +357,7 @@ export function ThreadRail(props: ThreadRailProps) {
           onResolvePermission={props.onResolvePermission}
           setEditText={props.setEditText}
           setMessageDraft={props.setMessageDraft}
-          onSend={(content, draftKey, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId) => props.onSend(openThreadDetail.id, content, draftKey, true, nodeId, parentMessageId, branchSelection, adoptExistingChildren, insertBeforeNodeId)}
+          onSend={props.onSend}
         />,
         document.body
       )}
@@ -382,19 +384,15 @@ function ThreadDetailModal(props: {
   onResolvePermission: (requestId: string, optionId: string | null) => void;
   setEditText: (value: string) => void;
   setMessageDraft: (draftKey: string, value: string) => void;
-  onSend: (content: string, draftKey: string, nodeId: string | null, parentMessageId: string | null, branchSelection?: BranchSelection | null, adoptExistingChildren?: boolean, insertBeforeNodeId?: string | null) => void;
+  onSend: (command: ConversationMessageCommand) => void;
 }) {
   const modalRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
-  const selectionComposerRef = useRef<HTMLInputElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const documentContextRef = useRef<HTMLElement | null>(null);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const messageSelectionSurfaceRef = useRef<HTMLDivElement | null>(null);
-  const selectingMessageRef = useRef<HTMLElement | null>(null);
-  const lastValidSelectionRangeRef = useRef<Range | null>(null);
-  const selectionActiveRef = useRef(false);
   const inspectorOpenRef = useRef(false);
   const selectionPopoverOpenRef = useRef(false);
   const nodeNavigationRef = useRef<ReturnType<typeof conversationNavigation>>({ left: null, right: null, up: null, down: null });
@@ -411,13 +409,6 @@ function ThreadDetailModal(props: {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [insertBeforeNodeId, setInsertBeforeNodeId] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [selectionPopover, setSelectionPopover] = useState<(BranchSelection & {
-    left: number;
-    top: number;
-    highlightRects: Array<{ left: number; top: number; width: number; height: number }>;
-    prompt: string;
-    insertBeforeNodeId: string | null;
-  }) | null>(null);
   const [minimapCollapsed, setMinimapCollapsed] = useState(true);
   const [documentContextOpen, setDocumentContextOpen] = useState(true);
   const [isPanning, setIsPanning] = useState(false);
@@ -431,6 +422,19 @@ function ThreadDetailModal(props: {
     ? Math.max(520, canvasSize.height - 28)
     : THREAD_FOCUS_NODE_HEIGHT;
   const canvasTransformRef = useRef(canvasTransform);
+  const {
+    selectionPopover,
+    setSelectionPopover,
+    selectionComposerRef,
+    beginMessageSelection,
+    captureMessageSelection,
+    clearCapturedMessageSelection
+  } = useMessageSelection({
+    inspectorRef,
+    canvasScaleRef: canvasTransformRef,
+    selectedNodeId,
+    defaultRouteChoice
+  });
   inspectorOpenRef.current = inspectorOpen;
   selectionPopoverOpenRef.current = Boolean(selectionPopover);
   canvasTransformRef.current = canvasTransform;
@@ -492,7 +496,7 @@ function ThreadDetailModal(props: {
       const route = addedNode ? defaultConversationRoute(addedNode) : null;
       setSelectedNodeId(addedNode?.id || null);
       setInsertBeforeNodeId(route?.kind === "choose" ? ROUTE_CHOICE_REQUIRED : route?.insertBeforeNodeId || null);
-      setSelectionPopover(null);
+      clearCapturedMessageSelection();
       setInspectorOpen(true);
       return;
     }
@@ -551,55 +555,6 @@ function ThreadDetailModal(props: {
   }, [canvasLayout.nodes, canvasSize, compactFocusLayout, focusNodeHeight, focusNodeWidth, inspectorOpen, selectedNodeId]);
 
   useEffect(() => {
-    function keepSelectionInsideMessage(event: MouseEvent) {
-      if (!selectionActiveRef.current || !(event.buttons & 1)) return;
-      const selection = window.getSelection();
-      const messageContent = selectingMessageRef.current;
-      if (!selection || selection.rangeCount === 0 || !messageContent) return;
-
-      if (!selection.isCollapsed) {
-        const range = selection.getRangeAt(0);
-        const startContent = selectionElement(range.startContainer)?.closest(".messageContent");
-        const endContent = selectionElement(range.endContainer)?.closest(".messageContent");
-        if (startContent === messageContent && endContent === messageContent) {
-          lastValidSelectionRangeRef.current = range.cloneRange();
-        }
-      }
-
-      const rect = messageContent.getBoundingClientRect();
-      const insideMessage = event.clientX >= rect.left
-        && event.clientX <= rect.right
-        && event.clientY >= rect.top
-        && event.clientY <= rect.bottom;
-      if (insideMessage) return;
-
-      event.preventDefault();
-      const lastValidRange = lastValidSelectionRangeRef.current;
-      if (lastValidRange) {
-        selection.removeAllRanges();
-        selection.addRange(lastValidRange);
-      }
-    }
-
-    function finishMessageSelection() {
-      if (!selectionActiveRef.current) return;
-      selectionActiveRef.current = false;
-      captureMessageSelection();
-      selectingMessageRef.current = null;
-      lastValidSelectionRangeRef.current = null;
-    }
-
-    window.addEventListener("mousemove", keepSelectionInsideMessage, { passive: false });
-    window.addEventListener("mouseup", finishMessageSelection);
-    window.addEventListener("blur", finishMessageSelection);
-    return () => {
-      window.removeEventListener("mousemove", keepSelectionInsideMessage);
-      window.removeEventListener("mouseup", finishMessageSelection);
-      window.removeEventListener("blur", finishMessageSelection);
-    };
-  }, []);
-
-  useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
@@ -608,7 +563,7 @@ function ThreadDetailModal(props: {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         if (selectionPopoverOpenRef.current) {
-          setSelectionPopover(null);
+          clearCapturedMessageSelection();
           window.getSelection()?.removeAllRanges();
           return;
         }
@@ -700,7 +655,7 @@ function ThreadDetailModal(props: {
 
   function applyNodeQuickAction(actionId: NodeQuickActionId, forceNewBranch: boolean) {
     if (!selectedNode) return;
-    setSelectionPopover(null);
+    clearCapturedMessageSelection();
     setInsertBeforeNodeId(defaultRouteChoice(selectedNode.id, forceNewBranch));
     props.setMessageDraft(draftKey, promptForNodeQuickAction(actionId, selectedNode));
     window.getSelection()?.removeAllRanges();
@@ -711,7 +666,7 @@ function ThreadDetailModal(props: {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(nodeId);
     setInsertBeforeNodeId(defaultRouteChoice(nodeId, forceNewBranch));
-    setSelectionPopover(null);
+    clearCapturedMessageSelection();
     setInspectorOpen(true);
     window.getSelection()?.removeAllRanges();
     if (startComposer) window.requestAnimationFrame(() => composerRef.current?.focus());
@@ -721,7 +676,7 @@ function ThreadDetailModal(props: {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(parentNodeId);
     setInsertBeforeNodeId(childNodeId);
-    setSelectionPopover(null);
+    clearCapturedMessageSelection();
     setInspectorOpen(true);
     window.getSelection()?.removeAllRanges();
     window.requestAnimationFrame(() => composerRef.current?.focus());
@@ -731,7 +686,7 @@ function ThreadDetailModal(props: {
     if (!nodeId) return;
     setSelectedNodeId(nodeId);
     setInsertBeforeNodeId(defaultRouteChoice(nodeId));
-    setSelectionPopover(null);
+    clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
     window.requestAnimationFrame(() => {
       if (messageSelectionSurfaceRef.current) messageSelectionSurfaceRef.current.scrollTop = 0;
@@ -746,7 +701,7 @@ function ThreadDetailModal(props: {
     setInspectorOpen(false);
     setSelectedNodeId(null);
     setInsertBeforeNodeId(null);
-    setSelectionPopover(null);
+    clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
     if (overviewTransformRef.current) {
       setCanvasTransform(overviewTransformRef.current);
@@ -758,7 +713,7 @@ function ThreadDetailModal(props: {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(null);
     setInsertBeforeNodeId(null);
-    setSelectionPopover(null);
+    clearCapturedMessageSelection();
     setInspectorOpen(true);
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }
@@ -849,56 +804,11 @@ function ThreadDetailModal(props: {
     setIsPanning(false);
   }
 
-  function captureMessageSelection() {
-    window.requestAnimationFrame(() => {
-      const selection = window.getSelection();
-      const inspector = inspectorRef.current;
-      if (!selection || selection.isCollapsed || selection.rangeCount === 0 || !inspector || !selectedNode) {
-        setSelectionPopover(null);
-        return;
-      }
-
-      const startElement = selectionElement(selection.anchorNode);
-      const endElement = selectionElement(selection.focusNode);
-      const startContent = startElement?.closest(".messageContent");
-      const endContent = endElement?.closest(".messageContent");
-      const messageElement = startContent?.closest<HTMLElement>("[data-thread-message-id]");
-      if (!startContent || startContent !== endContent || !messageElement || !inspector.contains(messageElement)) {
-        setSelectionPopover(null);
-        return;
-      }
-
-      const text = selection.toString().replace(/\s+/g, " ").trim().slice(0, 2000);
-      if (!text) {
-        setSelectionPopover(null);
-        return;
-      }
-
-      const range = selection.getRangeAt(0);
-      const selectionRect = range.getBoundingClientRect();
-      const inspectorRect = inspector.getBoundingClientRect();
-      const focusScale = canvasTransformRef.current.scale;
-      const inspectorWidth = inspectorRect.width / focusScale;
-      const inspectorHeight = inspectorRect.height / focusScale;
-      const preferredTop = (selectionRect.bottom - inspectorRect.top) / focusScale + 8;
-      const highlightRects = Array.from(range.getClientRects()).flatMap((rect) => {
-        const left = clamp((rect.left - inspectorRect.left) / focusScale, 0, inspectorWidth);
-        const right = clamp((rect.right - inspectorRect.left) / focusScale, 0, inspectorWidth);
-        const top = clamp((rect.top - inspectorRect.top) / focusScale, 0, inspectorHeight);
-        const bottom = clamp((rect.bottom - inspectorRect.top) / focusScale, 0, inspectorHeight);
-        return right > left && bottom > top
-          ? [{ left, top, width: right - left, height: bottom - top }]
-          : [];
-      });
-      setSelectionPopover({
-        sourceMessageId: messageElement.dataset.threadMessageId || "",
-        text,
-        left: clamp((selectionRect.left - inspectorRect.left + selectionRect.width / 2) / focusScale, 190, inspectorWidth - 190),
-        top: clamp(preferredTop, 58, inspectorHeight - 112),
-        highlightRects,
-        prompt: "",
-        insertBeforeNodeId: defaultRouteChoice(selectedNode.id)
-      });
+  function sendQuestion(command: ThreadQuestionCommand) {
+    props.onSend({
+      ...command,
+      threadId: props.thread.id,
+      askAgent: true
     });
   }
 
@@ -909,27 +819,20 @@ function ThreadDetailModal(props: {
       || !selectionPopover.prompt.trim()
       || selectionPopover.insertBeforeNodeId === ROUTE_CHOICE_REQUIRED
     ) return;
-    props.onSend(
-      selectionPopover.prompt,
-      "",
-      null,
-      selectedNode.id,
-      { sourceMessageId: selectionPopover.sourceMessageId, text: selectionPopover.text },
-      false,
-      selectionPopover.insertBeforeNodeId
-    );
-    setSelectionPopover(null);
+    sendQuestion({
+      content: selectionPopover.prompt,
+      draftKey: null,
+      nodeId: null,
+      parentMessageId: selectedNode.id,
+      branchSelection: {
+        sourceMessageId: selectionPopover.sourceMessageId,
+        text: selectionPopover.text
+      },
+      adoptExistingChildren: false,
+      insertBeforeNodeId: selectionPopover.insertBeforeNodeId
+    });
+    clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
-  }
-
-  function beginMessageSelection(event: ReactPointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    const messageContent = (event.target as HTMLElement).closest<HTMLElement>(".messageContent");
-    if (!messageContent) return;
-    selectionActiveRef.current = true;
-    selectingMessageRef.current = messageContent;
-    lastValidSelectionRangeRef.current = null;
-    setSelectionPopover(null);
   }
 
   const selectedCanvasItem = selectedNodeId
@@ -1168,7 +1071,7 @@ function ThreadDetailModal(props: {
                             onKeyDown={(event) => {
                               if (event.key === "Escape") {
                                 event.stopPropagation();
-                                setSelectionPopover(null);
+                                clearCapturedMessageSelection();
                                 window.getSelection()?.removeAllRanges();
                               }
                             }}
@@ -1213,10 +1116,8 @@ function ThreadDetailModal(props: {
                     ref={messageSelectionSurfaceRef}
                     className="threadModalContent threadCanvasInspectorContent"
                     onPointerDown={beginMessageSelection}
-                    onMouseUp={captureMessageSelection}
-                    onPointerUp={captureMessageSelection}
                     onKeyUp={captureMessageSelection}
-                    onScroll={() => setSelectionPopover(null)}
+                    onScroll={clearCapturedMessageSelection}
                   >
                     {selectedNodeOrigin && (
                       <div className="threadNodeOriginQuote">
@@ -1257,9 +1158,25 @@ function ThreadDetailModal(props: {
                     onSubmit={(event) => {
                       event.preventDefault();
                       if (routeChoiceRequired) return;
-                      if (!selectedNode) props.onSend(messageDraft, draftKey, null, null);
-                      else props.onSend(messageDraft, draftKey, null, selectedNode.id, null, false, insertBeforeNodeId);
-                      setSelectionPopover(null);
+                      if (!selectedNode) {
+                        sendQuestion({
+                          content: messageDraft,
+                          draftKey,
+                          nodeId: null,
+                          parentMessageId: null
+                        });
+                      } else {
+                        sendQuestion({
+                          content: messageDraft,
+                          draftKey,
+                          nodeId: null,
+                          parentMessageId: selectedNode.id,
+                          branchSelection: null,
+                          adoptExistingChildren: false,
+                          insertBeforeNodeId
+                        });
+                      }
+                      clearCapturedMessageSelection();
                     }}
                   >
                     <div className="threadFocusComposerTopline">
@@ -1377,7 +1294,12 @@ function ThreadDetailModal(props: {
                     className="threadModalComposer threadRootComposer"
                     onSubmit={(event) => {
                       event.preventDefault();
-                      props.onSend(messageDraft, draftKey, null, null);
+                      sendQuestion({
+                        content: messageDraft,
+                        draftKey,
+                        nodeId: null,
+                        parentMessageId: null
+                      });
                     }}
                   >
                     <textarea
@@ -1591,11 +1513,6 @@ function keyboardTargetAcceptsArrows(target: EventTarget | null): boolean {
   if (selection && !selection.isCollapsed) return true;
   const element = target instanceof Element ? target : document.activeElement;
   return Boolean(element?.closest("textarea, input, select, [contenteditable='true']"));
-}
-
-function selectionElement(node: Node | null): Element | null {
-  if (!node) return null;
-  return node.nodeType === Node.ELEMENT_NODE ? node as Element : node.parentElement;
 }
 
 function messageBranchSelection(message: Message): BranchSelection | null {

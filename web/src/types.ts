@@ -22,6 +22,7 @@ export type DocumentPayload = {
   path: string;
   title: string;
   content: string;
+  revision: string;
   blocks: Block[];
 };
 
@@ -56,25 +57,32 @@ export type Message = {
   content: string;
   nodeId?: string | null;
   parentId?: string | null;
-  acpSessionId?: string | null;
+  agentSession?: AgentSession | null;
   error?: boolean;
   meta?: Record<string, unknown>;
   createdAt: string;
   updatedAt?: string;
 };
 
-export type ConversationNodeKind =
-  | "question"
-  | "idea"
-  | "assumption"
-  | "evidence"
-  | "risk"
-  | "decision"
-  | "task";
+export type ConversationNodeKind = "question" | "idea" | "assumption" | "evidence" | "risk" | "decision" | "task";
 
 export type BranchSelection = {
   sourceMessageId: string;
   text: string;
+};
+
+export type AgentOutcome = "completed" | "failed" | "not-requested";
+
+export type ConversationMessageCommand = {
+  threadId: string;
+  content: string;
+  draftKey: string | null;
+  askAgent: boolean;
+  nodeId?: string | null;
+  parentMessageId?: string | null;
+  branchSelection?: BranchSelection | null;
+  adoptExistingChildren?: boolean;
+  insertBeforeNodeId?: string | null;
 };
 
 export type PermissionOption = {
@@ -111,13 +119,19 @@ export type ThreadSpatialLayout = {
 
 export type Thread = {
   id: string;
-  acpSessionId: string | null;
   title: string;
   selectedText: string;
   anchor: Anchor;
   messages: Message[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type AgentSession = {
+  adapter: string;
+  sessionId: string;
+  turnId: string | null;
+  documentHash: string | null;
 };
 
 export type SelectionContext = {
