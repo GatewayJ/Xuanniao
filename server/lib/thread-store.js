@@ -9,7 +9,6 @@ import {
   completeConversationAgentTurn,
   deleteConversationMessage,
   hasAssistantReply,
-  insertConversationNode,
   normalizeAgentSession,
   removeAssistantReply,
   updateConversationMessage,
@@ -77,23 +76,6 @@ export class ThreadStore {
     });
   }
 
-  async insertNodeAfter(threadId, parentNodeId, message, insertBeforeNodeId = null) {
-    return this.withMutation(async () => {
-      const data = await this.read();
-      const thread = requireThread(data, threadId);
-      const now = new Date().toISOString();
-      const saved = insertConversationNode(
-        thread,
-        parentNodeId,
-        message,
-        insertBeforeNodeId,
-        { id: randomUUID(), now }
-      );
-      await this.write(data);
-      return saved;
-    });
-  }
-
   async completeAgentTurn(threadId, userMessageId, message, agentSession, expectedBranchRevision = null) {
     return this.withMutation(async () => {
       const data = await this.read();
@@ -109,6 +91,36 @@ export class ThreadStore {
       );
       await this.write(data);
       return saved;
+    });
+  }
+
+  async completeAgentTurnWithAnchorReconciliation({
+    threadId,
+    userMessageId,
+    message,
+    agentSession,
+    expectedBranchRevision,
+    reconcile
+  }) {
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const update = await reconcile(data.threads);
+      const thread = requireThread(data, threadId);
+      const assistantMessage = completeConversationAgentTurn(
+        thread,
+        userMessageId,
+        message,
+        agentSession,
+        expectedBranchRevision,
+        { id: randomUUID(), now: new Date().toISOString() }
+      );
+      applyAnchorUpdates(
+        data,
+        Array.isArray(update?.patches) ? update.patches : [],
+        Array.isArray(update?.deletedThreadIds) ? update.deletedThreadIds : []
+      );
+      await this.write(data);
+      return { assistantMessage, threads: data.threads };
     });
   }
 
@@ -163,27 +175,22 @@ export class ThreadStore {
   async updateAnchors(patches, deletedThreadIds = []) {
     return this.withMutation(async () => {
       const data = await this.read();
-      const patchById = new Map(patches.map((patch) => [patch.id, patch]));
-      const deletedIds = new Set(deletedThreadIds);
-      const originalLength = data.threads.length;
-      data.threads = data.threads.filter((thread) => !deletedIds.has(thread.id));
-      let changed = data.threads.length !== originalLength;
-      const now = new Date().toISOString();
+      const changed = applyAnchorUpdates(data, patches, deletedThreadIds);
+      if (changed) await this.write(data);
+      return data.threads;
+    });
+  }
 
-      for (const thread of data.threads) {
-        const patch = patchById.get(thread.id);
-        if (!patch) continue;
-        thread.anchor = patch.anchor;
-        if (typeof patch.selectedText === "string") {
-          thread.selectedText = patch.selectedText;
-        }
-        thread.updatedAt = now;
-        changed = true;
-      }
-
-      if (changed) {
-        await this.write(data);
-      }
+  async reconcileAnchors(reconciler) {
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const update = await reconciler(data.threads);
+      const changed = applyAnchorUpdates(
+        data,
+        Array.isArray(update?.patches) ? update.patches : [],
+        Array.isArray(update?.deletedThreadIds) ? update.deletedThreadIds : []
+      );
+      if (changed) await this.write(data);
       return data.threads;
     });
   }
@@ -234,6 +241,25 @@ export class ThreadStore {
     await mkdir(path.dirname(this.filePath), { recursive: true });
     await atomicWriteText(this.filePath, `${JSON.stringify({ ...data, version: 3 }, null, 2)}\n`);
   }
+}
+
+function applyAnchorUpdates(data, patches, deletedThreadIds) {
+  const patchById = new Map(patches.map((patch) => [patch.id, patch]));
+  const deletedIds = new Set(deletedThreadIds);
+  const originalLength = data.threads.length;
+  data.threads = data.threads.filter((thread) => !deletedIds.has(thread.id));
+  let changed = data.threads.length !== originalLength;
+  const now = new Date().toISOString();
+
+  for (const thread of data.threads) {
+    const patch = patchById.get(thread.id);
+    if (!patch) continue;
+    thread.anchor = patch.anchor;
+    if (typeof patch.selectedText === "string") thread.selectedText = patch.selectedText;
+    thread.updatedAt = now;
+    changed = true;
+  }
+  return changed;
 }
 
 function normalizeStoredThread(thread) {

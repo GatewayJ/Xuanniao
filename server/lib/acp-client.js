@@ -9,7 +9,7 @@ import {
   buildAgentPrompt,
   documentHash
 } from "./agent-context.js";
-import { JsonLineRpcProcess } from "./json-line-rpc-process.js";
+import { JsonLineRpcProcess, RpcRequestTimeoutError } from "./json-line-rpc-process.js";
 
 export { normalizeAgentMode, parseCommandLine } from "./agent-config.js";
 
@@ -248,7 +248,12 @@ export class AcpDocumentAgent {
   }
 
   request(method, params) {
-    return this.rpc.request(method, params);
+    return this.rpc.request(method, params).catch((error) => {
+      if (error instanceof RpcRequestTimeoutError || error?.code === "RPC_REQUEST_TIMEOUT") {
+        this.resetAfterTimeout(error);
+      }
+      throw error;
+    });
   }
 
   writeMessage(payload) {
@@ -258,7 +263,11 @@ export class AcpDocumentAgent {
   handleRpcMessage(message) {
     if (message.method) {
       if (Object.hasOwn(message, "id")) {
-        this.handleClientRequest(message);
+        void this.handleClientRequest(message).catch((error) => {
+          this.rpc.appendDiagnostic(
+            `\nFailed to handle ACP client request '${message.method}': ${error instanceof Error ? error.message : String(error)}`
+          );
+        });
       } else {
         this.handleNotification(message);
       }
@@ -271,24 +280,40 @@ export class AcpDocumentAgent {
     this.threadSessions.clear();
   }
 
+  resetAfterTimeout(error) {
+    this.cancelPendingPermissions();
+    this.initialized = false;
+    this.agentCapabilities = {};
+    this.threadSessions.clear();
+    this.documentSnapshots.clear();
+    this.rpc.dispose(
+      new Error(`ACP runtime was restarted after a request timeout: ${error.message}`)
+    );
+  }
+
   async handleClientRequest(message) {
     try {
       if (message.method === "fs/read_text_file") {
         const result = await this.readTextFile(message.params || {});
-        return this.writeMessage({ jsonrpc: "2.0", id: message.id, result });
+        return this.writeClientResponse({ jsonrpc: "2.0", id: message.id, result });
       }
 
       if (message.method === "fs/write_text_file") {
         const result = await this.writeTextFile(message.params || {});
-        return this.writeMessage({ jsonrpc: "2.0", id: message.id, result });
+        return this.writeClientResponse({ jsonrpc: "2.0", id: message.id, result });
       }
 
       if (message.method === "session/request_permission") {
-        const result = await this.requestUserPermission(message.params || {});
-        return this.writeMessage({ jsonrpc: "2.0", id: message.id, result });
+        this.rpc.pauseRequests("session/prompt");
+        try {
+          const result = await this.requestUserPermission(message.params || {});
+          return this.writeClientResponse({ jsonrpc: "2.0", id: message.id, result });
+        } finally {
+          this.rpc.resumeRequests("session/prompt");
+        }
       }
 
-      return this.writeMessage({
+      return this.writeClientResponse({
         jsonrpc: "2.0",
         id: message.id,
         error: {
@@ -297,7 +322,7 @@ export class AcpDocumentAgent {
         }
       });
     } catch (error) {
-      return this.writeMessage({
+      return this.writeClientResponse({
         jsonrpc: "2.0",
         id: message.id,
         error: {
@@ -306,6 +331,12 @@ export class AcpDocumentAgent {
         }
       });
     }
+  }
+
+  writeClientResponse(payload) {
+    if (!this.rpc.running) return false;
+    this.writeMessage(payload);
+    return true;
   }
 
   listPermissionRequests() {
@@ -393,6 +424,7 @@ export class AcpDocumentAgent {
       return;
     }
 
+    this.rpc.touchRequests("session/prompt");
     this.activeTurn.updates.push(compactUpdate(update));
     if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text") {
       this.activeTurn.chunks.push(update.content.text || "");

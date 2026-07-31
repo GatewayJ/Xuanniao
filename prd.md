@@ -91,7 +91,7 @@ flowchart LR
 - 与 Edit/Preview 的滚动位置同步。
 - 点击 thread 跳到对应文本，双击展开或折叠消息。
 - Thread 工作区按“文档预览 / 节点 content / Tree”三栏联动展示；切换 Tree 节点时文档预览自动定位当前 Thread 原文锚点，并使用与主 Preview 相同的激活高亮；两条分隔线支持拖动或键盘调整宽度。
-- Tree 总览和节点 content 都提供创建子节点与独立分支的入口。
+- Tree 总览和节点 content 使用互斥创建入口：叶子节点只创建子节点，已有子路径的节点只创建独立分支；新节点始终直接挂到当前节点，不重排既有路径，连接线不提供创建按钮。
 - 上一个/下一个 thread 导航。
 - 编辑用户问题并保存时始终重新询问 Codex；刷新后未回答的节点可显式恢复请求。
 - 重试或删除 Codex 回复。
@@ -107,7 +107,7 @@ flowchart LR
 | Markdown Preview | markdown-it 14 | HTML 关闭；renderer 注入源行信息 |
 | Diagram | Mermaid 11 | `securityLevel: strict`，浏览器本地渲染 |
 | Styling | 原生 CSS | 没有 Tailwind |
-| Server | Node.js 20+，ESM JavaScript | 使用内置 `http` 和文件系统 API，没有 Web 框架 |
+| Server | Node.js 20.19.x / 22.12+，ESM JavaScript | 使用内置 `http` 和文件系统 API，没有 Web 框架 |
 | Browser/Server 通信 | REST + JSON | 没有 WebSocket 或 SSE |
 | Agent Runtime | stdio JSONL / JSON-RPC | 默认直连 `codex app-server`；可切换 ACP adapter |
 | Thread 持久化 | 本地 JSON | 每个文档一个 `threads.json` |
@@ -219,7 +219,7 @@ CodeMirror transaction
   → 返回重新生成的 document payload
 ```
 
-Document payload 携带 SHA-256 revision。浏览器保存使用 compare-and-swap，Thread metadata 和 Markdown 通过临时文件与 rename 原子落盘；检测到外部修改时返回冲突，不会静默覆盖。
+Document payload 携带路径和 SHA-256 revision。浏览器保存绑定文档会话并使用 compare-and-swap，服务端同时校验文档路径；Thread metadata 和 Markdown 通过临时文件与 rename 原子落盘。检测到切换或外部修改时返回冲突，不会静默覆盖。
 
 ### 5.3 向 Codex 提问
 
@@ -253,7 +253,7 @@ sequenceDiagram
 1. Browser 通过 `PUT /api/document` 保存完整 Markdown。
 2. 开启 `XUANNIAO_CONTROLLED_REPLACEMENT=1` 后，Server 解析 Codex replacement 并通过同一事务入口替换选区。
 
-活动 Markdown 是受保护资源：ACP 文件写直接拒绝；每个 Agent turn 前后记录文档快照，发现绕过事务的直接写入时恢复原文并返回失败。full-access Codex 仍缺少操作系统级单文件隔离，因此该 turn 后校验是保护层而不是内核强制边界。
+活动 Markdown 是受保护资源：ACP 文件写直接拒绝；每个 Agent turn 前后记录文档快照，发现绕过事务的直接写入时保留当前文件并返回冲突，避免旧快照覆盖未知外部修改。full-access Codex 仍缺少操作系统级单文件隔离，因此该 turn 后校验是保护层而不是内核强制边界。
 
 ## 6. Agent Runtime 实现
 
@@ -299,7 +299,7 @@ type AgentSession = {
 }
 ```
 
-同一节点继续对话时复用其 session；新子节点从父节点最近成功 turn fork，因此 Agent 可见历史与 UI 路径一致。编辑或删除问题、删除回答、继续一个已有子分支的父节点、在既有路径中插入节点时，ThreadStore 会清除受影响节点或后代的 session；下一次调用会从仍可信的父节点 fork，或根据本地分支历史重建。
+同一节点继续对话时复用其 session；新子节点从父节点最近成功 turn fork，因此 Agent 可见历史与 UI 路径一致。编辑或删除问题、删除回答、继续一个已有子分支的父节点时，ThreadStore 会清除受影响节点或后代的 session；下一次调用会从仍可信的父节点 fork，或根据本地分支历史重建。新节点只允许直接追加到指定父节点，旧的插入和子树重排参数会在领域边界被拒绝。
 
 每次调用还会携带当前 lineage revision。Agent 完成时，ThreadStore 在写入回答与 AgentSession 的同一 mutation 中重新校验 revision；如果祖先路径在运行期间改变，旧回答不会提交，而是要求重试。
 
@@ -331,6 +331,7 @@ Runtime 保留 agent message delta 和 item 生命周期更新；当前 HTTP API
 - 继续提供 ACP 文件接口和 update 事件。
 - 不声明原生 fork 能力；分支通过新 session 与本地祖先历史恢复。
 - 因一个 adapter 进程只维护一个 active turn，prompt 仍全局串行。
+- prompt 使用活动空闲超时：update 事件会续期，等待权限选择时暂停；连续无活动超时后 adapter 会被终止并在下一轮重建，旧 session 和迟到事件不会复用。
 
 ## 7. 文档、Block 与 Thread Anchor
 
@@ -419,7 +420,7 @@ type Message = {
 }
 ```
 
-ThreadStore 每次操作都读取并重写完整 JSON 文件；同一 Store 实例的 mutation 通过 Promise 队列串行提交，防止并行 Agent 分支丢失更新。当前仍没有跨进程事务、通用 schema migration 框架或损坏恢复机制。
+ThreadStore 每次操作都读取并重写完整 JSON 文件；同一路径的所有 Store 实例共享进程内 Promise mutation lock，防止并行 Agent 分支和 anchor 校准丢失更新。当前仍没有跨进程事务、通用 schema migration 框架或损坏恢复机制。
 
 ## 9. REST API
 
@@ -464,7 +465,7 @@ Server 默认监听 `127.0.0.1`。不应在没有额外认证和路径限制的�
 
 ### 11.1 依赖
 
-- Node.js 20+
+- Node.js 20.19.x，或 22.12+
 - npm
 - Codex CLI，默认命令为 `codex app-server`
 
@@ -512,12 +513,12 @@ Node Server 检测到 `web/dist/index.html` 时会提供构建后的静态资源
 | `PORT` | `4173` | Node Server 端口 |
 | `XUANNIAO_AGENT_TRANSPORT` | `codex` | `codex` 原生模式或 `acp` 兼容模式 |
 | `XUANNIAO_AGENT_MODE` | `full-access` | `full-access` 或 `read-only` |
-| `XUANNIAO_AGENT_TIMEOUT_MS` | `600000` | 原生 turn 活动空闲超时；ACP request 总超时 |
+| `XUANNIAO_AGENT_TIMEOUT_MS` | `600000` | 原生与 ACP turn 活动空闲超时 |
 | `XUANNIAO_CODEX_CMD` | `codex app-server` | 原生 Codex app-server 命令 |
 | `XUANNIAO_CODEX_MODEL` | 未设置 | 可选模型覆盖；默认使用 Codex 配置 |
 | `XUANNIAO_CODEX_REASONING_EFFORT` | 未设置 | 可选推理强度覆盖；默认使用 Codex 配置 |
 | `XUANNIAO_ACP_CMD` | `codex-acp` | ACP 兼容 adapter 命令 |
-| `XUANNIAO_ACP_TIMEOUT_MS` | 通用超时 | ACP request 超时覆盖 |
+| `XUANNIAO_ACP_TIMEOUT_MS` | 通用超时 | ACP 活动空闲超时覆盖 |
 | `XUANNIAO_ACP_SKIP_AUTH` | 未设置 | 设置为 `1` 时允许 adapter 使用已有认证 |
 | `XUANNIAO_CONTROLLED_REPLACEMENT` | 未设置 | 设置为 `1` 时启用实验性选区替换 |
 | `XUANNIAO_AGENT_CONTEXT_MAX_CHARS` | `1500000` | Agent 单次上下文字符上限 |
@@ -540,8 +541,9 @@ npm run check
 - Frontend TypeScript `tsc --noEmit`
 - 源码换行、缩进与尾随空白检查
 - Node test runner 单元测试
+- Vite production build
 
-截至当前代码，102 个测试全部通过。覆盖范围包括：
+截至当前代码，118 个测试全部通过。覆盖范围包括：
 
 - 原生 Codex session start/resume/fork、事件归并、审批挂起和上下文去重
 - ACP 模式映射、文件写权限、session new/load/fallback、审批和启动失败
@@ -568,7 +570,7 @@ npm run check
 
 ### 13.1 Agent 直接文件写入仍在事务边界之外
 
-Browser 保存和实验性 replacement 已收口到 `DocumentWorkspace`，统一执行 revision 校验、原子写入和 anchor 同步。ACP 直接写活动文档会被拒绝；Agent turn 后校验会恢复绕过事务的修改。但 `danger-full-access` 不能提供操作系统级单文件隔离，进程崩溃发生在写入与恢复之间时仍可能留下外部修改。
+Browser 保存、Thread 创建和实验性 replacement 已收口到 `DocumentWorkspace`，统一执行 revision 校验、原子写入和 anchor 同步。ACP 直接写活动文档会被拒绝；Agent turn 后若发现无法归因的外部修改，会保留当前文件并返回冲突，不再用旧快照覆盖。但 `danger-full-access` 不能提供操作系统级单文件隔离，Agent 仍可能绕过应用事务写入活动文档，因此下一阶段应把受控 edit proposal 设为唯一写入路径。
 
 ### 13.2 外部修改缺少主动通知
 
@@ -600,9 +602,9 @@ Runtime 已避免在未变化的连续 turn 重发完整文档和历史，并增
 load current revision
   → validate base revision / anchor
   → compute proposed change
-  → write atomically
-  → remap threads
-  → persist metadata
+  → write document atomically
+  → remap threads + persist answer/session in one metadata mutation
+  → roll back document if metadata commit fails
   → return new revision
 ```
 

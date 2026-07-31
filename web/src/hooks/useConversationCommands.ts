@@ -1,7 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 
 import { api } from "../api.ts";
+import type { DocumentSessionOperation } from "../document-session-scope.ts";
 import {
   appendPendingMessage,
   hasAssistantReplyAfter,
@@ -23,6 +24,8 @@ type ConversationCommandOptions = {
   setStatus: Dispatch<SetStateAction<string>>;
   flushDocumentSave: () => Promise<boolean>;
   applyDocument: (document: DocumentPayload) => boolean;
+  captureDocumentSession: () => DocumentSessionOperation;
+  isDocumentSessionCurrent: (operation: DocumentSessionOperation) => boolean;
 };
 
 export function useConversationCommands({
@@ -31,72 +34,85 @@ export function useConversationCommands({
   setActiveThreadId,
   setStatus,
   flushDocumentSave,
-  applyDocument
+  applyDocument,
+  captureDocumentSession,
+  isDocumentSessionCurrent
 }: ConversationCommandOptions) {
   const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
   const [editingMessage, setEditingMessage] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
+  const sendRegistryRef = useRef(new ConversationSendRegistry());
 
-  async function send(command: ConversationMessageCommand) {
+  async function send(command: ConversationMessageCommand): Promise<boolean> {
+    const operation = captureDocumentSession();
     const thread = threadsRef.current.find((item) => item.id === command.threadId);
     const content = command.content.trim();
-    if (!thread) return;
+    if (!thread) return false;
     if (!content) {
       setStatus("请先输入内容");
-      return;
+      return false;
     }
-    if (!await flushDocumentSave()) return;
-
-    if (command.draftKey) {
-      setMessageDrafts((current) => {
-        const next = { ...current };
-        delete next[command.draftKey as string];
-        return next;
-      });
+    const sendKey = conversationSendKey(command);
+    const sendToken = sendRegistryRef.current.begin(sendKey);
+    if (!sendToken) {
+      setStatus("这个节点的问题正在发送");
+      return false;
     }
-    const normalized = { ...command, content };
-    setStatus(command.askAgent ? "正在询问 Codex" : "正在添加评论");
-    setThreads((current) => appendPendingMessage(current, normalized));
 
     try {
+      if (!await flushDocumentSave() || !isDocumentSessionCurrent(operation)) return false;
+      const normalized = { ...command, content };
+      setStatus(command.askAgent ? "正在询问 Codex" : "正在添加评论");
+      setThreads((current) => appendPendingMessage(current, normalized));
       const payload = await api.sendMessage(command.threadId, {
         content,
         askAgent: command.askAgent,
         nodeId: command.nodeId,
         parentMessageId: command.parentMessageId,
-        branchSelection: command.branchSelection,
-        adoptExistingChildren: command.adoptExistingChildren,
-        insertBeforeNodeId: command.insertBeforeNodeId
-      });
+        branchSelection: command.branchSelection
+      }, operation.signal);
+      if (!isDocumentSessionCurrent(operation)) return false;
       setThreads(payload.threads);
       const documentApplied = payload.document ? applyDocument(payload.document) : true;
       setActiveThreadId(command.threadId);
+      clearSubmittedDraft(command.draftKey, content);
       if (documentApplied) {
         setStatus(statusForOutcome(payload.agentOutcome, command.askAgent ? "Codex 已回答" : "评论已保存"));
       }
+      return true;
     } catch (error) {
-      await recoverThreads(error);
+      if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
+      return false;
+    } finally {
+      sendRegistryRef.current.finish(sendKey, sendToken);
     }
   }
 
   async function saveEditedMessage(threadId: string, messageId: string) {
+    const operation = captureDocumentSession();
     const content = editText.trim();
     if (!content) return;
     setThreads((current) =>
       updateMessageWithPendingReply(current, threadId, messageId, content, true)
     );
-    setEditingMessage(null);
-    setEditText("");
     setStatus("正在更新 Codex 回答");
     try {
-      const payload = await api.updateMessage(threadId, messageId, { content, rerunAgent: true });
+      const payload = await api.updateMessage(
+        threadId,
+        messageId,
+        { content, rerunAgent: true },
+        operation.signal
+      );
+      if (!isDocumentSessionCurrent(operation)) return;
       setThreads(payload.threads);
       const documentApplied = payload.document ? applyDocument(payload.document) : true;
+      setEditingMessage(null);
+      setEditText("");
       if (documentApplied) {
         setStatus(statusForOutcome(payload.agentOutcome, "Codex 已回答"));
       }
     } catch (error) {
-      await recoverThreads(error);
+      if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
     }
   }
 
@@ -105,6 +121,7 @@ export function useConversationCommands({
     messageId: string,
     nodeKind: ConversationNodeKind
   ) {
+    const operation = captureDocumentSession();
     setThreads((current) => current.map((thread) => (
       thread.id !== threadId ? thread : {
         ...thread,
@@ -117,11 +134,12 @@ export function useConversationCommands({
     )));
     setStatus("节点类型已更新");
     try {
-      const payload = await api.updateMessageMeta(threadId, messageId, { nodeKind });
+      const payload = await api.updateMessageMeta(threadId, messageId, { nodeKind }, operation.signal);
+      if (!isDocumentSessionCurrent(operation)) return;
       setThreads(payload.threads);
       setStatus("节点类型已保存");
     } catch (error) {
-      await recoverThreads(error);
+      if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
     }
   }
 
@@ -142,6 +160,7 @@ export function useConversationCommands({
     userMessageId: string,
     pendingStatus = "正在询问 Codex"
   ) {
+    const operation = captureDocumentSession();
     const thread = threadsRef.current.find((item) => item.id === threadId);
     const userMessage = thread?.messages.find(
       (message) => message.id === userMessageId && message.role === "user"
@@ -159,8 +178,10 @@ export function useConversationCommands({
       const payload = await api.updateMessage(
         threadId,
         userMessage.id,
-        { content: userMessage.content, rerunAgent: true }
+        { content: userMessage.content, rerunAgent: true },
+        operation.signal
       );
+      if (!isDocumentSessionCurrent(operation)) return;
       setThreads(payload.threads);
       const documentApplied = payload.document ? applyDocument(payload.document) : true;
       setActiveThreadId(threadId);
@@ -168,7 +189,7 @@ export function useConversationCommands({
         setStatus(statusForOutcome(payload.agentOutcome, "Codex 已回答"));
       }
     } catch (error) {
-      await recoverThreads(error);
+      if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
     }
   }
 
@@ -194,15 +215,17 @@ export function useConversationCommands({
             : "确定删除这条 Codex 回答吗？"
     );
     if (!confirmed) return;
+    const operation = captureDocumentSession();
 
     setStatus("正在删除消息");
     try {
-      const payload = await api.deleteMessage(threadId, messageId);
+      const payload = await api.deleteMessage(threadId, messageId, operation.signal);
+      if (!isDocumentSessionCurrent(operation)) return;
       setThreads(payload.threads);
       if (editingMessage === messageId) cancelEdit();
       setStatus("消息已删除");
     } catch (error) {
-      await recoverThreads(error);
+      if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
     }
   }
 
@@ -225,10 +248,21 @@ export function useConversationCommands({
     cancelEdit();
   }
 
-  async function recoverThreads(error: unknown) {
+  function clearSubmittedDraft(draftKey: string | null, submittedContent: string) {
+    if (!draftKey) return;
+    setMessageDrafts((current) => {
+      if ((current[draftKey] || "").trim() !== submittedContent) return current;
+      const next = { ...current };
+      delete next[draftKey];
+      return next;
+    });
+  }
+
+  async function recoverThreads(error: unknown, operation: DocumentSessionOperation) {
     setStatus(error instanceof Error ? error.message : String(error));
     try {
-      setThreads((await api.threads()).threads);
+      const payload = await api.threads(operation.signal);
+      if (isDocumentSessionCurrent(operation)) setThreads(payload.threads);
     } catch {
       // Preserve the original actionable error when recovery also fails.
     }
@@ -250,6 +284,28 @@ export function useConversationCommands({
     requestAssistantReply,
     deleteMessage
   };
+}
+
+export class ConversationSendRegistry {
+  private active = new Map<string, symbol>();
+
+  begin(key: string): symbol | null {
+    if (this.active.has(key)) return null;
+    const token = Symbol(key);
+    this.active.set(key, token);
+    return token;
+  }
+
+  finish(key: string, token: symbol): void {
+    if (this.active.get(key) === token) this.active.delete(key);
+  }
+}
+
+export function conversationSendKey(command: ConversationMessageCommand): string {
+  const target = command.nodeId
+    ? `node:${command.nodeId}`
+    : `parent:${command.parentMessageId || "root"}`;
+  return `${command.threadId}:${target}`;
 }
 
 export function statusForOutcome(outcome: AgentOutcome, successStatus: string): string {

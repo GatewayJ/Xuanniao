@@ -2083,7 +2083,7 @@ body.resizing .splitter::before {
   opacity: 0.9;
 }
 
-.threadCanvasViewport.focusMode .threadCanvasConnectors path:not(.insertTarget):not(.ghostConnector) {
+.threadCanvasViewport.focusMode .threadCanvasConnectors path:not(.ghostConnector) {
   opacity: 0.35;
 }
 
@@ -2210,11 +2210,6 @@ body.resizing .splitter::before {
   stroke-linecap: round;
   stroke-width: 1.7;
   transition: opacity 180ms ease, stroke 180ms ease, stroke-width 180ms ease;
-}
-
-.threadCanvasConnectors path.insertTarget {
-  stroke: var(--accent);
-  stroke-width: 2.5;
 }
 
 .threadCanvasConnectors path.ghostConnector {
@@ -2410,46 +2405,6 @@ body.resizing .splitter::before {
 .threadCanvasNodeAdd small {
   font-size: 9px;
   font-weight: 650;
-}
-
-.threadCanvasEdgeInsert {
-  align-items: center;
-  background: rgba(255, 255, 255, 0.96);
-  border: 1px solid #b7c4d4;
-  border-radius: 999px;
-  box-shadow: 0 3px 9px rgba(30, 41, 59, 0.14);
-  color: #58708f;
-  display: inline-flex;
-  font-size: 15px;
-  height: 24px;
-  justify-content: center;
-  min-height: 24px;
-  opacity: 0.58;
-  padding: 0 0 2px;
-  position: absolute;
-  transform: translate(-50%, -50%);
-  transition: background 140ms ease, border-color 140ms ease, color 140ms ease, opacity 140ms ease, scale 140ms ease;
-  width: 24px;
-  z-index: 4;
-}
-
-.threadCanvasEdgeInsert:hover,
-.threadCanvasEdgeInsert:focus-visible,
-.threadCanvasEdgeInsert.active {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #ffffff;
-  opacity: 1;
-  scale: 1.12;
-}
-
-.threadCanvasViewport.focusMode .threadCanvasEdgeInsert:not(.active) {
-  opacity: 0.18;
-}
-
-.threadCanvasViewport.focusMode .threadCanvasEdgeInsert:hover,
-.threadCanvasViewport.focusMode .threadCanvasEdgeInsert:focus-visible {
-  opacity: 1;
 }
 
 .threadCanvasRootPlaceholder {
@@ -2653,24 +2608,17 @@ body.resizing .splitter::before {
   padding: 2px;
 }
 
-.threadCreationMode button {
+.threadCreationMode span {
+  align-items: center;
   background: transparent;
   border: 0;
   border-radius: 6px;
   color: #66758a;
+  display: inline-flex;
   font-size: 10px;
   font-weight: 650;
   height: 26px;
-  min-height: 26px;
   padding: 0 10px;
-}
-
-.threadCreationMode button:hover {
-  background: rgba(255, 255, 255, 0.68);
-  border-color: transparent;
-}
-
-.threadCreationMode button.active {
   background: #ffffff;
   box-shadow: 0 1px 4px rgba(30, 41, 59, 0.12);
   color: var(--accent-strong);

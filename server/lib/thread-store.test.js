@@ -337,91 +337,6 @@ test("persists planning metadata on user questions", async () => {
   }
 });
 
-test("inserts a continuation node before every existing child subtree", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-insert-test-"));
-  const storePath = path.join(tempDir, "threads.json");
-
-  try {
-    const store = new ThreadStore(storePath);
-    const thread = await store.create({
-      title: "Inserted continuation",
-      selectedText: "selection",
-      anchor: {}
-    });
-    const root = await store.addMessage(thread.id, {
-      role: "user",
-      content: "A",
-      parentId: null
-    });
-    const child = await store.addMessage(thread.id, {
-      role: "user",
-      content: "C",
-      parentId: root.id
-    });
-    const grandchild = await store.addMessage(thread.id, {
-      role: "user",
-      content: "C1",
-      parentId: child.id
-    });
-    const sibling = await store.addMessage(thread.id, {
-      role: "user",
-      content: "C2",
-      parentId: root.id
-    });
-
-    const inserted = await store.insertNodeAfter(thread.id, root.id, {
-      role: "user",
-      content: "B"
-    });
-    const restored = await store.get(thread.id);
-
-    assert.equal(inserted.parentId, root.id);
-    assert.equal(inserted.nodeId, inserted.id);
-    assert.equal(restored.messages.find((message) => message.id === child.id).parentId, inserted.id);
-    assert.equal(restored.messages.find((message) => message.id === sibling.id).parentId, inserted.id);
-    assert.equal(restored.messages.find((message) => message.id === grandchild.id).parentId, child.id);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
-test("inserts a continuation node into one selected child path", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-path-insert-test-"));
-  const storePath = path.join(tempDir, "threads.json");
-
-  try {
-    const store = new ThreadStore(storePath);
-    const thread = await store.create({
-      title: "Path insertion",
-      selectedText: "selection",
-      anchor: {}
-    });
-    const root = await store.addMessage(thread.id, {
-      role: "user",
-      content: "A",
-      parentId: null
-    });
-    const child = await store.addMessage(thread.id, {
-      role: "user",
-      content: "C",
-      parentId: root.id
-    });
-    const sibling = await store.addMessage(thread.id, {
-      role: "user",
-      content: "Sibling",
-      parentId: root.id
-    });
-
-    const inserted = await store.insertNodeAfter(thread.id, root.id, { role: "user", content: "B" }, child.id);
-    const restored = await store.get(thread.id);
-
-    assert.equal(restored.messages.find((message) => message.id === child.id).parentId, inserted.id);
-    assert.equal(restored.messages.find((message) => message.id === sibling.id).parentId, root.id);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
 test("editing a question invalidates its node session and every descendant session", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-invalidation-test-"));
   const storePath = path.join(tempDir, "threads.json");
@@ -467,54 +382,6 @@ test("editing a question invalidates its node session and every descendant sessi
   }
 });
 
-test("reparenting a branch invalidates sessions whose native ancestry changed", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-reparent-test-"));
-  const storePath = path.join(tempDir, "threads.json");
-
-  try {
-    const store = new ThreadStore(storePath);
-    const thread = await store.create({
-      title: "Reparent",
-      selectedText: "selection",
-      anchor: {}
-    });
-    const root = await store.addMessage(thread.id, {
-      role: "user",
-      content: "Root"
-    });
-    const child = await store.addMessage(thread.id, {
-      role: "user",
-      content: "Child",
-      parentId: root.id
-    });
-    const grandchild = await store.addMessage(thread.id, {
-      role: "user",
-      content: "Grandchild",
-      parentId: child.id
-    });
-    for (const question of [child, grandchild]) {
-      await store.completeAgentTurn(
-        thread.id,
-        question.id,
-        { role: "assistant", content: `${question.content} answer` },
-        {
-          adapter: "codex-app-server",
-          sessionId: `${question.id}-session`,
-          turnId: `${question.id}-turn`,
-          documentHash: "hash"
-        }
-      );
-    }
-
-    await store.insertNodeAfter(thread.id, root.id, { role: "user", content: "Inserted" }, child.id);
-    const restored = await store.get(thread.id);
-    assert.equal(restored.messages.find((message) => message.id === child.id).agentSession, null);
-    assert.equal(restored.messages.find((message) => message.id === grandchild.id).agentSession, null);
-  } finally {
-    await rm(tempDir, { recursive: true, force: true });
-  }
-});
-
 test("serializes concurrent mutations without losing branch messages", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-concurrency-test-"));
   const storePath = path.join(tempDir, "threads.json");
@@ -537,6 +404,44 @@ test("serializes concurrent mutations without losing branch messages", async () 
       new Set(restored.messages.map((message) => message.content)),
       new Set(Array.from({ length: 12 }, (_, index) => `Branch ${index}`))
     );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("anchor reconciliation holds the repository mutation boundary", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-anchor-reconcile-lock-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const original = await store.create({ title: "Original", selectedText: "one", anchor: {} });
+    let releaseReconciliation;
+    const reconciliationBarrier = new Promise((resolve) => {
+      releaseReconciliation = resolve;
+    });
+    let reconciliationStarted;
+    const started = new Promise((resolve) => {
+      reconciliationStarted = resolve;
+    });
+    const reconciliation = store.reconcileAnchors(async (threads) => {
+      reconciliationStarted();
+      await reconciliationBarrier;
+      return { patches: threads, deletedThreadIds: [] };
+    });
+    await started;
+    let createFinished = false;
+    const create = store.create({ title: "Concurrent", selectedText: "two", anchor: {} })
+      .then(() => {
+        createFinished = true;
+      });
+
+    await Promise.resolve();
+    assert.equal(createFinished, false);
+    releaseReconciliation();
+    await Promise.all([reconciliation, create]);
+    assert.equal((await store.list()).length, 2);
+    assert.equal((await store.get(original.id)).title, "Original");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -638,6 +543,46 @@ test("rejects an agent result when its conversation branch changed in flight", a
 
     const restored = await store.get(thread.id);
     assert.equal(restored.messages.some((message) => message.content === "Stale answer"), false);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("anchor reconciliation and agent completion commit in one store mutation", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-turn-commit-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({
+      title: "Coordinated",
+      selectedText: "before",
+      anchor: { start: 0, end: 6 }
+    });
+    const question = await store.addMessage(thread.id, { role: "user", content: "Replace" });
+    const revision = branchRevisionForQuestion(await store.get(thread.id), question.id);
+
+    const committed = await store.completeAgentTurnWithAnchorReconciliation({
+      threadId: thread.id,
+      userMessageId: question.id,
+      message: { role: "assistant", content: "Applied" },
+      agentSession: null,
+      expectedBranchRevision: revision,
+      reconcile: async () => ({
+        patches: [{
+          id: thread.id,
+          selectedText: "after",
+          anchor: { start: 2, end: 7 }
+        }],
+        deletedThreadIds: []
+      })
+    });
+
+    assert.equal(committed.assistantMessage.content, "Applied");
+    const restored = await store.get(thread.id);
+    assert.equal(restored.selectedText, "after");
+    assert.deepEqual(restored.anchor, { start: 2, end: 7 });
+    assert.equal(restored.messages.some((message) => message.content === "Applied"), true);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

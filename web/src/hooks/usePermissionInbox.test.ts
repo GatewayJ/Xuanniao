@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { samePermissionRequests } from "./usePermissionInbox.ts";
+import { DocumentSessionScope } from "../document-session-scope.ts";
+import {
+  isPermissionOperationCurrent,
+  samePermissionRequests
+} from "./usePermissionInbox.ts";
 import type { PermissionRequest } from "../types";
 
 function permission(
@@ -44,4 +48,12 @@ test("permission polling detects changed request details", () => {
     rawInput: "npm test",
     options: [{ optionId: "allow", name: "Always allow", kind: "allow_once" }]
   })]), false);
+});
+
+test("permission responses become stale synchronously when the document key changes", () => {
+  const scope = new DocumentSessionScope();
+  const operation = { ...scope.capture(), sessionKey: "document-a.md" };
+
+  assert.equal(isPermissionOperationCurrent(operation, "document-a.md", scope), true);
+  assert.equal(isPermissionOperationCurrent(operation, "document-b.md", scope), false);
 });

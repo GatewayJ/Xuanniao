@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { JsonLineRpcProcess } from "./json-line-rpc-process.js";
+import { JsonLineRpcProcess, RpcRequestTimeoutError } from "./json-line-rpc-process.js";
 
 function testProcess(onMessage = () => {}) {
   const writes = [];
@@ -45,3 +45,38 @@ test("JSON line RPC retains bounded diagnostics for malformed output", () => {
   assert.match(rpc.stderrTail, /Invalid Test RPC JSON/);
   assert.ok(rpc.stderrTail.length <= 4000);
 });
+
+test("JSON line RPC uses an activity timeout that can be refreshed", async () => {
+  const { rpc, writes } = testProcess();
+  const response = rpc.request("long-task", {}, 100);
+  await delay(70);
+  rpc.touchRequests("long-task");
+  await delay(70);
+  rpc.acceptChunk(`{"id":${writes[0].id},"result":{"done":true}}\n`);
+  assert.deepEqual(await response, { done: true });
+});
+
+test("JSON line RPC reports typed inactivity timeouts", async () => {
+  const { rpc } = testProcess();
+  await assert.rejects(
+    rpc.request("stuck-task", {}, 5),
+    (error) => error instanceof RpcRequestTimeoutError && error.code === "RPC_REQUEST_TIMEOUT"
+  );
+});
+
+test("JSON line RPC keeps nested request pauses active until every waiter resumes", async () => {
+  const { rpc, writes } = testProcess();
+  const response = rpc.request("session/prompt", {}, 20);
+  rpc.pauseRequests("session/prompt");
+  rpc.pauseRequests("session/prompt");
+  await delay(30);
+  rpc.resumeRequests("session/prompt");
+  await delay(30);
+  rpc.acceptChunk(`{"id":${writes[0].id},"result":{"done":true}}\n`);
+  rpc.resumeRequests("session/prompt");
+  assert.deepEqual(await response, { done: true });
+});
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}

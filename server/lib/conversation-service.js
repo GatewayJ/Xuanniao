@@ -15,19 +15,20 @@ export class ConversationService {
     this.controlledReplacement = controlledReplacement;
     this.onAgentError = onAgentError;
     this.activeReplies = new Map();
+    this.activeThreadOperations = new Map();
   }
 
-  async addQuestion(threadId, command) {
+  addQuestion(threadId, command) {
+    return this.withThreadOperation(
+      threadId,
+      () => this.addQuestionWithinOperation(threadId, command)
+    );
+  }
+
+  async addQuestionWithinOperation(threadId, command) {
     const thread = await this.threadStore.get(threadId);
     const planned = planConversationQuestion(thread, command);
-    const userMessage = planned.placement.kind === "append"
-      ? await this.threadStore.addMessage(threadId, planned.message)
-      : await this.threadStore.insertNodeAfter(
-          threadId,
-          planned.message.parentId,
-          planned.message,
-          planned.placement.insertBeforeNodeId
-        );
+    const userMessage = await this.threadStore.addMessage(threadId, planned.message);
 
     if (!planned.askAgent) {
       return {
@@ -47,7 +48,14 @@ export class ConversationService {
     };
   }
 
-  async updateQuestion(threadId, messageId, { content, rerunAgent = false }) {
+  updateQuestion(threadId, messageId, options) {
+    return this.withThreadOperation(
+      threadId,
+      () => this.updateQuestionWithinOperation(threadId, messageId, options)
+    );
+  }
+
+  async updateQuestionWithinOperation(threadId, messageId, { content, rerunAgent = false }) {
     const normalizedContent = String(content || "").trim();
     if (!normalizedContent) {
       const error = new Error("message content is required");
@@ -91,6 +99,45 @@ export class ConversationService {
     };
   }
 
+  async deleteThread(threadId) {
+    this.assertThreadIdle(threadId, "delete this thread");
+    await this.threadStore.delete(threadId);
+  }
+
+  async deleteMessage(threadId, messageId) {
+    this.assertThreadIdle(threadId, "delete a message");
+    return this.threadStore.deleteMessage(threadId, messageId);
+  }
+
+  assertThreadIdle(threadId, action) {
+    const prefix = `${threadId}:`;
+    if (
+      (this.activeThreadOperations.get(threadId) || 0) > 0 ||
+      [...this.activeReplies.keys()].some((key) => key.startsWith(prefix))
+    ) {
+      throw new ConversationConflictError(
+        `Cannot ${action} while this thread is being updated; wait for the operation to finish and retry.`
+      );
+    }
+  }
+
+  async withThreadOperation(threadId, operation) {
+    this.activeThreadOperations.set(
+      threadId,
+      (this.activeThreadOperations.get(threadId) || 0) + 1
+    );
+    try {
+      return await operation();
+    } finally {
+      const remaining = (this.activeThreadOperations.get(threadId) || 1) - 1;
+      if (remaining === 0) {
+        this.activeThreadOperations.delete(threadId);
+      } else {
+        this.activeThreadOperations.set(threadId, remaining);
+      }
+    }
+  }
+
   createAssistantReply(threadId, content, questionMessageId) {
     const key = activeReplyKey(threadId, questionMessageId);
     const activeReply = this.activeReplies.get(key);
@@ -110,24 +157,22 @@ export class ConversationService {
 
   async runAssistantReply(threadId, content, questionMessageId) {
     let updatedDocument = null;
-    let assistantMessage;
-    let agentOutcome = "completed";
-    let agentSnapshot = null;
+    const agentSnapshot = await this.document.createAgentSnapshot();
     let snapshotVerified = false;
+    const storedThread = await this.threadStore.get(threadId);
+    const question = storedThread.messages.find(
+      (message) => message.id === questionMessageId && message.role === "user"
+    );
+    if (!question) throw new Error(`question message not found: ${questionMessageId}`);
+    const thread = branchThreadForQuestion(storedThread, questionMessageId);
+    const editRequested =
+      this.controlledReplacement &&
+      wantsDocumentEdit(content) &&
+      canReplaceSelection(storedThread);
+    let answer;
 
     try {
-      agentSnapshot = await this.document.createAgentSnapshot();
-      const storedThread = await this.threadStore.get(threadId);
-      const question = storedThread.messages.find(
-        (message) => message.id === questionMessageId && message.role === "user"
-      );
-      if (!question) throw new Error(`question message not found: ${questionMessageId}`);
-      const thread = branchThreadForQuestion(storedThread, questionMessageId);
-      const editRequested =
-        this.controlledReplacement &&
-        wantsDocumentEdit(content) &&
-        canReplaceSelection(storedThread);
-      const answer = await this.agent.runTurn({
+      answer = await this.agent.runTurn({
         question: content,
         document: agentSnapshot.document,
         thread,
@@ -136,81 +181,127 @@ export class ConversationService {
 
       updatedDocument = await this.document.verifyAgentSnapshot(agentSnapshot);
       snapshotVerified = true;
-
-      if (editRequested) {
-        const replacement = extractReplacement(answer.content);
-        if (replacement === null) {
-          throw new Error("Codex did not return a Xuanniao replacement block for the selected text.");
+    } catch (initialError) {
+      if (initialError instanceof ConversationConflictError) throw initialError;
+      let error = initialError;
+      if (!snapshotVerified) {
+        try {
+          updatedDocument = await this.document.verifyAgentSnapshot(agentSnapshot);
+        } catch (guardError) {
+          if (guardError?.document) updatedDocument = guardError.document;
+          error = guardError;
         }
-        const applied = await this.document.applySelectionReplacement({
-          expectedRevision: agentSnapshot.revision,
-          thread: storedThread,
-          replacement,
-          threadId
-        });
-        updatedDocument = applied.document;
-        answer.content = [
+      }
+      return this.persistAgentFailure(
+        threadId,
+        questionMessageId,
+        error,
+        updatedDocument,
+        thread.revision
+      );
+    }
+
+    if (editRequested) {
+      const replacement = extractReplacement(answer.content);
+      if (replacement === null) {
+        return this.persistAgentFailure(
+          threadId,
+          questionMessageId,
+          new Error("Codex did not return a Xuanniao replacement block for the selected text."),
+          updatedDocument,
+          thread.revision
+        );
+      }
+      const message = assistantMessageForAnswer({
+        ...answer,
+        content: [
           "Applied this replacement to the document:",
           "",
           "```md",
           replacement,
           "```"
-        ].join("\n");
-        answer.appliedEdit = true;
-      }
-
-      assistantMessage = await this.threadStore.completeAgentTurn(
-        threadId,
-        questionMessageId,
-        {
-          role: "assistant",
-          content: answer.content,
-          meta: {
-            stopReason: answer.stopReason,
-            transport: answer.transport,
-            appliedEdit: Boolean(answer.appliedEdit),
-            updates: answer.updates
-          }
-        },
-        answer.session,
-        thread.revision
-      );
-    } catch (initialError) {
-      if (initialError instanceof ConversationConflictError) throw initialError;
-      let error = initialError;
-      if (agentSnapshot && !snapshotVerified) {
-        try {
-          updatedDocument = await this.document.verifyAgentSnapshot(agentSnapshot);
-        } catch (guardError) {
-          error = guardError;
-        }
-      }
-      agentOutcome = "failed";
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      this.onAgentError({
-        threadId,
-        questionMessageId,
-        code: error?.code || null,
-        message: errorMessage
+        ].join("\n"),
+        appliedEdit: true
       });
-      assistantMessage = await this.threadStore.completeAgentTurn(
+      const applied = await this.document.applySelectionReplacement({
+        expectedRevision: agentSnapshot.revision,
+        thread: storedThread,
+        replacement,
         threadId,
-        questionMessageId,
-        {
-          role: "assistant",
-          content: agentFailureContent(errorMessage),
-          error: true
-        },
-        null
-      );
+        agentTurn: {
+          userMessageId: questionMessageId,
+          message,
+          agentSession: answer.session,
+          expectedBranchRevision: thread.revision
+        }
+      });
+      updatedDocument = applied.document;
+      return {
+        assistantMessage: applied.assistantMessage,
+        agentOutcome: "completed",
+        document: updatedDocument
+      };
     }
+
+    const assistantMessage = await this.threadStore.completeAgentTurn(
+      threadId,
+      questionMessageId,
+      assistantMessageForAnswer(answer),
+      answer.session,
+      thread.revision
+    );
 
     return {
       assistantMessage,
-      agentOutcome,
+      agentOutcome: "completed",
       document: updatedDocument
     };
   }
+
+  async persistAgentFailure(
+    threadId,
+    questionMessageId,
+    error,
+    updatedDocument,
+    expectedBranchRevision
+  ) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    this.onAgentError({
+      threadId,
+      questionMessageId,
+      code: error?.code || null,
+      message: errorMessage
+    });
+    const assistantMessage = await this.threadStore.completeAgentTurn(
+      threadId,
+      questionMessageId,
+      {
+        role: "assistant",
+        content: agentFailureContent(errorMessage),
+        error: true
+      },
+      null,
+      expectedBranchRevision
+    );
+    return {
+      assistantMessage,
+      agentOutcome: "failed",
+      document: updatedDocument
+    };
+  }
+}
+
+function assistantMessageForAnswer(answer) {
+  return {
+    role: "assistant",
+    content: answer.content,
+    meta: {
+      stopReason: answer.stopReason,
+      transport: answer.transport,
+      appliedEdit: Boolean(answer.appliedEdit),
+      updates: answer.updates
+    }
+  };
 }
 
 function activeReplyKey(threadId, questionMessageId) {

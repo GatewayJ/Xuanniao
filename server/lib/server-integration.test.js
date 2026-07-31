@@ -40,21 +40,66 @@ test("HTTP server starts without Agent availability and reports failed turns exp
     const document = await jsonRequest(`${baseUrl}/api/document`);
     assert.equal(document.payload.content, "# Plan\n");
 
+    const staleSave = await jsonRequest(`${baseUrl}/api/document`, {
+      method: "PUT",
+      body: {
+        documentPath: path.join(tempDir, "other.md"),
+        content: "wrong document",
+        expectedRevision: document.payload.revision,
+        threads: []
+      }
+    });
+    assert.equal(staleSave.response.status, 409);
+    assert.equal((await jsonRequest(`${baseUrl}/api/document`)).payload.content, "# Plan\n");
+
     const created = await jsonRequest(`${baseUrl}/api/threads`, {
       method: "POST",
       body: {
+        documentPath,
         title: "Plan",
         selectedText: "Plan",
-        anchor: {
+          anchor: {
           start: 2,
           end: 6,
           lineStart: 1,
           lineEnd: 1,
-          blockId: null
-        }
+            blockId: null
+          },
+          expectedRevision: document.payload.revision
       }
     });
     assert.equal(created.response.status, 201);
+
+    const rootQuestion = await jsonRequest(
+      `${baseUrl}/api/threads/${encodeURIComponent(created.payload.thread.id)}/messages`,
+      {
+        method: "POST",
+        body: {
+          content: "Root question",
+          askAgent: false
+        }
+      }
+    );
+    assert.equal(rootQuestion.response.status, 200);
+
+    const obsoletePlacement = await jsonRequest(
+      `${baseUrl}/api/threads/${encodeURIComponent(created.payload.thread.id)}/messages`,
+      {
+        method: "POST",
+        body: {
+          content: "Do not reparent",
+          askAgent: false,
+          parentMessageId: rootQuestion.payload.userMessage.id,
+          adoptExistingChildren: true
+        }
+      }
+    );
+    assert.equal(obsoletePlacement.response.status, 400);
+    const afterRejectedPlacement = await jsonRequest(`${baseUrl}/api/threads`);
+    assert.deepEqual(
+      afterRejectedPlacement.payload.threads[0].messages.map((message) => message.content),
+      ["Root question"]
+    );
 
     const reply = await jsonRequest(
       `${baseUrl}/api/threads/${encodeURIComponent(created.payload.thread.id)}/messages`,
@@ -62,7 +107,8 @@ test("HTTP server starts without Agent availability and reports failed turns exp
         method: "POST",
         body: {
           content: "Review this",
-          askAgent: true
+          askAgent: true,
+          parentMessageId: rootQuestion.payload.userMessage.id
         }
       }
     );

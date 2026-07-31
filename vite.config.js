@@ -9,7 +9,25 @@ export default defineConfig({
   plugins: [react()],
   build: {
     outDir: "dist",
-    emptyOutDir: true
+    emptyOutDir: true,
+    chunkSizeWarningLimit: 650,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (/[\\/]node_modules[\\/](react|react-dom|scheduler)[\\/]/.test(id)) {
+            return "react-vendor";
+          }
+          if (/[\\/]node_modules[\\/](@codemirror|@lezer|crelt|style-mod|w3c-keyname)[\\/]/.test(id)) {
+            return "editor-vendor";
+          }
+          if (/[\\/]node_modules[\\/](markdown-it|linkify-it|mdurl|punycode.js)[\\/]/.test(id)) {
+            return "markdown-vendor";
+          }
+          return undefined;
+        }
+      }
+    }
   },
   server: {
     host: "127.0.0.1",

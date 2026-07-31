@@ -1,5 +1,4 @@
 import { compareThreadsByAnchor, normalizeSearchText, resolveThreadAnchor } from "./thread-anchors.ts";
-import { reparentConversationNode, reparentDirectChildNodes } from "./thread-tree.ts";
 import type { ConversationMessageCommand, Message, SelectionContext, Thread } from "./types";
 
 let pendingMessageSequence = 0;
@@ -68,12 +67,7 @@ export function appendPendingMessage(
 
   return threads.map((thread) => {
     if (thread.id !== command.threadId) return thread;
-    const messages = command.insertBeforeNodeId
-      ? reparentConversationNode(thread.messages, command.insertBeforeNodeId, pendingNodeId)
-      : command.adoptExistingChildren && command.parentMessageId
-        ? reparentDirectChildNodes(thread.messages, command.parentMessageId, pendingNodeId)
-        : thread.messages;
-    return { ...thread, messages: [...messages, ...pendingMessages] };
+    return { ...thread, messages: [...thread.messages, ...pendingMessages] };
   });
 }
 

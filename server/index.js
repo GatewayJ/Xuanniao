@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { createAgentRuntime, runtimeCommand } from "./lib/agent-runtime.js";
 import { atomicWriteText } from "./lib/atomic-file.js";
 import { ConversationService } from "./lib/conversation-service.js";
+import { normalizeConversationMetaPatch } from "./lib/conversation-model.js";
 import { DocumentWorkspace } from "./lib/document-workspace.js";
 import { browseMarkdownDirectory } from "./lib/file-browser.js";
 import { HttpRequestError, assertSafeHostBinding, assertTrustedRequest, setSecurityHeaders } from "./lib/http-security.js";
@@ -27,12 +28,12 @@ const port = Number(args.port ?? process.env.PORT ?? 4173);
 const allowRemote = process.env.XUANNIAO_UNSAFE_ALLOW_REMOTE === "1";
 const maxBodyBytes = 8 * 1024 * 1024;
 const ignoredFileManagerDirs = new Set([".git", "node_modules", "dist", ".xuanniao"]);
-const conversationNodeKinds = new Set(["question", "idea", "assumption", "evidence", "risk", "decision", "task"]);
 
 assertSafeHostBinding(host, allowRemote);
 const initialDocumentPath = path.resolve(workspaceRoot, args.file ?? "prd.md");
 await ensureDocument(initialDocumentPath);
 let activeDocument = await createDocumentContext(initialDocumentPath);
+let documentSwitchLock = Promise.resolve();
 
 const server = createServer(async (req, res) => {
   const context = activeDocument;
@@ -86,6 +87,7 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/document" && req.method === "PUT") {
       const body = await readJson(req);
+      assertDocumentContext(body.documentPath, context.path);
       if (typeof body.content !== "string") {
         return sendJson(res, 400, { error: "content must be a string" });
       }
@@ -106,10 +108,12 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/threads" && req.method === "POST") {
       const body = await readJson(req);
-      const thread = await context.threadStore.create({
+      assertDocumentContext(body.documentPath, context.path);
+      const thread = await context.document.createThread({
         title: String(body.title || body.selectedText || "Untitled thread").slice(0, 120),
         selectedText: String(body.selectedText || ""),
-        anchor: normalizeAnchor(body.anchor)
+        anchor: normalizeAnchor(body.anchor),
+        expectedRevision: body.expectedRevision
       });
       return sendJson(res, 201, { thread });
     }
@@ -132,7 +136,7 @@ const server = createServer(async (req, res) => {
     const threadMatch = url.pathname.match(/^\/api\/threads\/([^/]+)$/);
     if (threadMatch && req.method === "DELETE") {
       const threadId = decodeURIComponent(threadMatch[1]);
-      await context.threadStore.delete(threadId);
+      await context.conversation.deleteThread(threadId);
       return sendJson(res, 200, { threads: await context.threadStore.list() });
     }
 
@@ -151,7 +155,7 @@ const server = createServer(async (req, res) => {
       const body = await readJson(req);
       let metaPatch;
       try {
-        metaPatch = normalizeMessageMetaPatch(body.meta ?? body);
+        metaPatch = normalizeConversationMetaPatch(body.meta ?? body);
       } catch (error) {
         return sendJson(res, 400, {
           error: error instanceof Error ? error.message : String(error)
@@ -170,7 +174,7 @@ const server = createServer(async (req, res) => {
     if (messageUpdateMatch && req.method === "DELETE") {
       const threadId = decodeURIComponent(messageUpdateMatch[1]);
       const messageId = decodeURIComponent(messageUpdateMatch[2]);
-      await context.threadStore.deleteMessage(threadId, messageId);
+      await context.conversation.deleteMessage(threadId, messageId);
       return sendJson(res, 200, { threads: await context.threadStore.list() });
     }
 
@@ -211,6 +215,30 @@ server.listen(port, host, () => {
   console.log(`Agent command: ${runtimeCommand(activeDocument.agent)}`);
 });
 
+let shuttingDown = false;
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, () => shutdown(signal));
+}
+
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Received ${signal}; closing Xuanniao.`);
+  try {
+    activeDocument.agent.dispose();
+  } catch (error) {
+    console.error(error);
+    process.exitCode = 1;
+  }
+  server.close((error) => {
+    if (error) {
+      console.error(error);
+      process.exitCode = 1;
+    }
+  });
+  server.closeIdleConnections?.();
+}
+
 function createAgentFor(filePath) {
   return createAgentRuntime({
     documentPath: filePath,
@@ -246,19 +274,16 @@ async function createDocumentContext(filePath) {
   });
 }
 
-function normalizeMessageMetaPatch(value) {
-  const patch = value && typeof value === "object" ? value : {};
-  const meta = {};
-  if (Object.prototype.hasOwnProperty.call(patch, "nodeKind")) {
-    if (!conversationNodeKinds.has(patch.nodeKind)) {
-      throw new Error("unsupported node kind");
-    }
-    meta.nodeKind = patch.nodeKind;
-  }
-  return meta;
+async function switchDocument(nextPath) {
+  const run = documentSwitchLock.then(
+    () => performDocumentSwitch(nextPath),
+    () => performDocumentSwitch(nextPath)
+  );
+  documentSwitchLock = run.catch(() => {});
+  return run;
 }
 
-async function switchDocument(nextPath) {
+async function performDocumentSwitch(nextPath) {
   const resolved = path.resolve(nextPath);
   if (resolved === activeDocument.path) {
     return activeDocument;
@@ -354,6 +379,16 @@ function normalizeAnchor(anchor) {
     contextBefore: typeof value.contextBefore === "string" ? value.contextBefore.slice(-32) : null,
     contextAfter: typeof value.contextAfter === "string" ? value.contextAfter.slice(0, 32) : null
   };
+}
+
+function assertDocumentContext(requestedPath, activePath) {
+  if (typeof requestedPath !== "string" || path.resolve(requestedPath) !== activePath) {
+    throw new HttpRequestError(
+      409,
+      "The active document changed before this request was handled; retry in the current document.",
+      "DOCUMENT_CONTEXT_CHANGED"
+    );
+  }
 }
 
 function normalizeThreadAnchorPatch(value) {

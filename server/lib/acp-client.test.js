@@ -81,6 +81,39 @@ test("permission requests are surfaced to the approval broker", async () => {
   assert.deepEqual(agent.listPermissionRequests(), []);
 });
 
+test("disposing ACP while permission is pending does not write to the closed process", async () => {
+  const agent = createAgent("/tmp/document.md", "full-access");
+  const writes = [];
+  agent.process = {
+    killed: false,
+    stdin: {
+      writable: true,
+      write(line) {
+        writes.push(line);
+      }
+    },
+    kill() {
+      this.killed = true;
+    }
+  };
+
+  const handling = agent.handleClientRequest({
+    jsonrpc: "2.0",
+    id: 7,
+    method: "session/request_permission",
+    params: {
+      options: [{ optionId: "allow", kind: "allow_once", name: "Allow" }]
+    }
+  });
+  await Promise.resolve();
+  assert.equal(agent.listPermissionRequests().length, 1);
+
+  agent.dispose();
+
+  await assert.doesNotReject(handling);
+  assert.deepEqual(writes, []);
+});
+
 test("each thread creates or loads its own persisted ACP session", async () => {
   class StubAgent extends AcpDocumentAgent {
     constructor() {
@@ -262,4 +295,28 @@ test("startup fails when the ACP executable does not exist", async () => {
   const agent = createAgent("/tmp/document.md", "full-access");
   agent.commandLine = "xuanniao-missing-codex-acp-command";
   await assert.rejects(agent.start(), /Failed to start ACP command/);
+});
+
+test("an ACP timeout invalidates the process and all resumable session state", async () => {
+  const agent = createAgent("/tmp/document.md", "full-access");
+  const timeout = new Error("ACP request timed out");
+  timeout.code = "RPC_REQUEST_TIMEOUT";
+  let disposedWith = null;
+  agent.initialized = true;
+  agent.threadSessions.set("thread-1", { sessionId: "session-1" });
+  agent.documentSnapshots.set("session-1", "document");
+  agent.rpc = {
+    request: async () => {
+      throw timeout;
+    },
+    dispose(error) {
+      disposedWith = error;
+    }
+  };
+
+  await assert.rejects(agent.request("session/prompt", {}), (error) => error === timeout);
+  assert.equal(agent.initialized, false);
+  assert.equal(agent.threadSessions.size, 0);
+  assert.equal(agent.documentSnapshots.size, 0);
+  assert.match(disposedWith.message, /restarted after a request timeout/);
 });

@@ -4,7 +4,16 @@ import test from "node:test";
 import { ConversationConflictError } from "./conversation-model.js";
 import { ConversationService } from "./conversation-service.js";
 
-function createHarness({ agentError = null, completeAgentError = null, runTurn = null } = {}) {
+function createHarness({
+  agentError = null,
+  completeAgentError = null,
+  runTurn = null,
+  controlledReplacement = false,
+  addMessageBarrier = null
+} = {}) {
+  let completeAgentCalls = 0;
+  const completeAgentRevisions = [];
+  const replacementCalls = [];
   const messages = [{
     id: "root",
     role: "user",
@@ -45,6 +54,7 @@ function createHarness({ agentError = null, completeAgentError = null, runTurn =
       return messages.splice(index, 1)[0];
     },
     async addMessage(_threadId, message) {
+      if (addMessageBarrier) await addMessageBarrier;
       const saved = {
         ...message,
         id: "question",
@@ -54,10 +64,9 @@ function createHarness({ agentError = null, completeAgentError = null, runTurn =
       messages.push(saved);
       return saved;
     },
-    async insertNodeAfter() {
-      throw new Error("unexpected insert");
-    },
-    async completeAgentTurn(_threadId, questionId, message) {
+    async completeAgentTurn(_threadId, questionId, message, _agentSession, expectedBranchRevision) {
+      completeAgentCalls += 1;
+      completeAgentRevisions.push(expectedBranchRevision);
       if (completeAgentError) throw completeAgentError;
       const saved = {
         ...message,
@@ -68,6 +77,12 @@ function createHarness({ agentError = null, completeAgentError = null, runTurn =
       };
       messages.push(saved);
       return saved;
+    },
+    async delete() {},
+    async deleteMessage(_threadId, messageId) {
+      const index = messages.findIndex((message) => message.id === messageId);
+      if (index < 0) throw new Error(`message not found: ${messageId}`);
+      return messages.splice(index, 1)[0];
     }
   };
   const document = {
@@ -79,6 +94,22 @@ function createHarness({ agentError = null, completeAgentError = null, runTurn =
     },
     async verifyAgentSnapshot() {
       return null;
+    },
+    async applySelectionReplacement(input) {
+      replacementCalls.push(input);
+      const saved = {
+        ...input.agentTurn.message,
+        id: "assistant",
+        nodeId: input.agentTurn.userMessageId,
+        parentId: input.agentTurn.userMessageId,
+        createdAt: "now"
+      };
+      messages.push(saved);
+      return {
+        document: { path: "/tmp/plan.md", content: input.replacement, revision: "updated" },
+        assistantMessage: saved,
+        threads: [thread]
+      };
     }
   };
   const agent = {
@@ -94,7 +125,18 @@ function createHarness({ agentError = null, completeAgentError = null, runTurn =
       };
     }
   };
-  return { service: new ConversationService({ threadStore: store, document, agent }), messages };
+  return {
+    service: new ConversationService({
+      threadStore: store,
+      document,
+      agent,
+      controlledReplacement
+    }),
+    messages,
+    completeAgentCalls: () => completeAgentCalls,
+    completeAgentRevisions,
+    replacementCalls
+  };
 }
 
 test("conversation service returns an explicit completed outcome", async () => {
@@ -109,7 +151,9 @@ test("conversation service returns an explicit completed outcome", async () => {
 });
 
 test("conversation service persists agent failures with a failed outcome", async () => {
-  const { service } = createHarness({ agentError: new Error("runtime unavailable") });
+  const { service, completeAgentRevisions } = createHarness({
+    agentError: new Error("runtime unavailable")
+  });
   const result = await service.addQuestion("thread-1", {
     content: "question",
     parentMessageId: "root",
@@ -118,6 +162,7 @@ test("conversation service persists agent failures with a failed outcome", async
   assert.equal(result.agentOutcome, "failed");
   assert.equal(result.assistantMessage.error, true);
   assert.match(result.assistantMessage.content, /runtime unavailable/);
+  assert.match(completeAgentRevisions[0], /^[a-f0-9]{64}$/);
 });
 
 test("an explicit rerun answers a previously unanswered saved question", async () => {
@@ -183,4 +228,109 @@ test("a stale agent result does not bypass the conversation conflict guard", asy
     (error) => error === conflict && error.statusCode === 409
   );
   assert.equal(messages.some((message) => message.role === "assistant"), false);
+});
+
+test("conversation persistence errors are not misreported as agent failures", async () => {
+  const persistenceError = new Error("thread storage unavailable");
+  const { service, messages, completeAgentCalls } = createHarness({
+    completeAgentError: persistenceError
+  });
+
+  await assert.rejects(
+    service.updateQuestion("thread-1", "root", {
+      content: "updated root",
+      rerunAgent: true
+    }),
+    (error) => error === persistenceError
+  );
+  assert.equal(completeAgentCalls(), 1);
+  assert.equal(messages.some((message) => message.role === "assistant"), false);
+});
+
+test("controlled replacement delegates document and answer persistence to one commit", async () => {
+  const { service, completeAgentCalls, replacementCalls } = createHarness({
+    controlledReplacement: true,
+    runTurn: async () => ({
+      content: "```xuanniao-replacement\nupdated\n```",
+      stopReason: "completed",
+      transport: "test",
+      updates: [],
+      session: null
+    })
+  });
+
+  const result = await service.addQuestion("thread-1", {
+    content: "修改这一段",
+    parentMessageId: "root",
+    askAgent: true
+  });
+
+  assert.equal(result.agentOutcome, "completed");
+  assert.equal(result.document.content, "updated");
+  assert.equal(completeAgentCalls(), 0);
+  assert.equal(replacementCalls.length, 1);
+  assert.equal(replacementCalls[0].agentTurn.message.meta.appliedEdit, true);
+  assert.match(replacementCalls[0].agentTurn.expectedBranchRevision, /^[a-f0-9]{64}$/);
+});
+
+test("threads and messages cannot be deleted while an agent reply is active", async () => {
+  let releaseTurn;
+  let markTurnStarted;
+  const turnResult = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+  const turnStarted = new Promise((resolve) => {
+    markTurnStarted = resolve;
+  });
+  const { service } = createHarness({
+    runTurn: async () => {
+      markTurnStarted();
+      return turnResult;
+    }
+  });
+  const reply = service.updateQuestion("thread-1", "root", {
+    content: "root",
+    rerunAgent: true
+  });
+  await turnStarted;
+
+  await assert.rejects(
+    service.deleteThread("thread-1"),
+    (error) => error instanceof ConversationConflictError && error.statusCode === 409
+  );
+  await assert.rejects(
+    service.deleteMessage("thread-1", "root"),
+    (error) => error instanceof ConversationConflictError && error.statusCode === 409
+  );
+
+  releaseTurn({
+    content: "answer",
+    stopReason: "completed",
+    transport: "test",
+    updates: [],
+    session: null
+  });
+  await reply;
+});
+
+test("thread deletion is rejected from the start of question persistence", async () => {
+  let releaseAdd;
+  const addBarrier = new Promise((resolve) => {
+    releaseAdd = resolve;
+  });
+  const { service } = createHarness({ addMessageBarrier: addBarrier });
+  const adding = service.addQuestion("thread-1", {
+    content: "question",
+    parentMessageId: "root",
+    askAgent: false
+  });
+
+  await assert.rejects(
+    service.deleteThread("thread-1"),
+    (error) => error instanceof ConversationConflictError && error.statusCode === 409
+  );
+
+  releaseAdd();
+  await adding;
+  await assert.doesNotReject(service.deleteThread("thread-1"));
 });

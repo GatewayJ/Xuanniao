@@ -12,6 +12,13 @@ export function decoratePreviewThreadAnchors(root: HTMLElement, threads: Thread[
   }
 }
 
+export function clearPreviewThreadAnchors(root: HTMLElement) {
+  for (const marker of root.querySelectorAll<HTMLElement>("[data-preview-thread-id]")) {
+    delete marker.dataset.previewThreadId;
+    marker.classList.remove("threadBlockMark", "active");
+  }
+}
+
 export function updatePreviewActiveThread(root: HTMLElement, activeThreadId: string | null) {
   for (const marker of root.querySelectorAll<HTMLElement>("[data-preview-thread-id]")) {
     const threadIds = (marker.dataset.previewThreadId || "").split(" ");

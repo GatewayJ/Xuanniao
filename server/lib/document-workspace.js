@@ -20,11 +20,15 @@ export class DocumentConflictError extends Error {
 }
 
 export class AgentDocumentMutationError extends Error {
-  constructor(filePath) {
-    super(`Agent modified the protected active document outside Xuanniao: ${filePath}`);
+  constructor(filePath, document) {
+    super(
+      `The active document changed outside a Xuanniao-controlled save while Codex was working. ` +
+      `The current file was preserved; review it before retrying: ${filePath}`
+    );
     this.name = "AgentDocumentMutationError";
     this.code = "AGENT_DOCUMENT_MUTATION";
     this.statusCode = 409;
+    this.document = document;
   }
 }
 
@@ -44,6 +48,31 @@ export class DocumentWorkspace {
   async payload() {
     await this.waitForMutations();
     return payloadFor(this.filePath, await readFile(this.filePath, "utf8"));
+  }
+
+  async createThread({ title, selectedText, anchor, expectedRevision }) {
+    return this.withMutation(async () => {
+      const current = await this.snapshot();
+      assertRevision(current, expectedRevision);
+      const start = anchor?.start;
+      const end = anchor?.end;
+      const canonicalSelectedText = Number.isInteger(start) && Number.isInteger(end)
+        ? current.content.slice(start, end)
+        : "";
+      if (
+        !Number.isInteger(start) ||
+        !Number.isInteger(end) ||
+        start < 0 ||
+        end <= start ||
+        normalizeSelectedText(canonicalSelectedText) !== normalizeSelectedText(selectedText)
+      ) {
+        throw new DocumentConflictError(
+          "Selected text no longer matches the current document. Re-select it before creating a thread.",
+          current.revision
+        );
+      }
+      return this.threadStore.create({ title, selectedText: canonicalSelectedText, anchor });
+    });
   }
 
   async save({ content, expectedRevision, anchorPatches = null, deletedThreadIds = [] }) {
@@ -67,21 +96,48 @@ export class DocumentWorkspace {
     });
   }
 
-  async applySelectionReplacement({ expectedRevision, thread, replacement, threadId }) {
+  async applySelectionReplacement({
+    expectedRevision,
+    thread,
+    replacement,
+    threadId,
+    agentTurn = null
+  }) {
     return this.withMutation(async () => {
       const before = await this.snapshot();
       assertRevision(before, expectedRevision);
       const edit = selectionReplacement(before.content, thread, replacement);
-      const remapped = remapThreadsForReplacement(await this.threadStore.list(), before.content, edit, threadId);
       await atomicWriteText(this.filePath, edit.content);
 
       try {
-        const threads = await this.threadStore.updateAnchors(remapped.threads, remapped.deletedThreadIds);
+        const reconcile = (currentThreads) => {
+          const remapped = remapThreadsForReplacement(
+            currentThreads,
+            before.content,
+            edit,
+            threadId
+          );
+          return {
+            patches: remapped.threads,
+            deletedThreadIds: remapped.deletedThreadIds
+          };
+        };
+        const committed = agentTurn
+          ? await this.threadStore.completeAgentTurnWithAnchorReconciliation({
+              ...agentTurn,
+              threadId,
+              reconcile
+            })
+          : {
+              assistantMessage: null,
+              threads: await this.threadStore.reconcileAnchors(reconcile)
+            };
         this.recordControlledContent(edit.content);
         return {
           document: payloadFor(this.filePath, edit.content),
           edit,
-          threads
+          threads: committed.threads,
+          assistantMessage: committed.assistantMessage
         };
       } catch (error) {
         await atomicWriteText(this.filePath, before.content);
@@ -111,17 +167,16 @@ export class DocumentWorkspace {
         if (controlled?.revision === current.revision) {
           return payloadFor(this.filePath, current.content);
         }
-        await atomicWriteText(
+        throw new AgentDocumentMutationError(
           this.filePath,
-          controlled && controlled.mutationEpoch > snapshot.mutationEpoch
-            ? controlled.content
-            : snapshot.content
+          payloadFor(this.filePath, current.content)
         );
-        throw new AgentDocumentMutationError(this.filePath);
       }
 
-      await atomicWriteText(this.filePath, snapshot.content);
-      throw new AgentDocumentMutationError(this.filePath);
+      throw new AgentDocumentMutationError(
+        this.filePath,
+        payloadFor(this.filePath, current.content)
+      );
     });
   }
 
@@ -153,13 +208,17 @@ export class DocumentWorkspace {
 
   async reconcileThreads(content, anchorProposals = null, deletedThreadIds = []) {
     const deletedIds = new Set(deletedThreadIds);
-    const currentThreads = (await this.threadStore.list()).filter((thread) => !deletedIds.has(thread.id));
-    const candidates = anchorProposals
-      ? applyValidAnchorProposals(currentThreads, anchorProposals, content)
-      : currentThreads;
-    const reconciled = reconcileThreadsForContent(candidates, content);
-    const removed = [...new Set([...deletedIds, ...reconciled.deletedThreadIds])];
-    return this.threadStore.updateAnchors(reconciled.threads, removed);
+    return this.threadStore.reconcileAnchors((storedThreads) => {
+      const currentThreads = storedThreads.filter((thread) => !deletedIds.has(thread.id));
+      const candidates = anchorProposals
+        ? applyValidAnchorProposals(currentThreads, anchorProposals, content)
+        : currentThreads;
+      const reconciled = reconcileThreadsForContent(candidates, content);
+      return {
+        patches: reconciled.threads,
+        deletedThreadIds: [...new Set([...deletedIds, ...reconciled.deletedThreadIds])]
+      };
+    });
   }
 
   recordControlledContent(content) {
@@ -184,6 +243,10 @@ function payloadFor(filePath, content) {
     revision: documentRevision(content),
     blocks: buildBlockIndex(content)
   };
+}
+
+function normalizeSelectedText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
 }
 
 function applyValidAnchorProposals(threads, proposals, content) {

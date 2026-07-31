@@ -1,7 +1,11 @@
 import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
 import { renderMarkdown, renderMermaidBlocks } from "../markdown";
-import { decoratePreviewThreadAnchors, updatePreviewActiveThread } from "../thread-preview";
+import {
+  clearPreviewThreadAnchors,
+  decoratePreviewThreadAnchors,
+  updatePreviewActiveThread
+} from "../thread-preview";
 import type { Thread } from "../types";
 
 type UseRenderedPreviewOptions = {
@@ -44,8 +48,6 @@ export function useRenderedPreview({
     if (!root || content === null) return;
 
     root.innerHTML = renderMarkdown(content);
-    decoratePreviewThreadAnchors(root, threads, content);
-    updatePreviewActiveThread(root, activeThreadId);
     const handleClick = (event: MouseEvent) => {
       const target = event.target instanceof Element ? event.target : null;
       const diagramButton = target?.closest<HTMLElement>("[data-diagram-action='open']");
@@ -70,6 +72,15 @@ export function useRenderedPreview({
     void renderMermaidBlocks(root).finally(() => onRenderedRef.current?.());
     onRenderedRef.current?.();
     return () => root.removeEventListener("click", handleClick);
+  }, [previewRef, content]);
+
+  useEffect(() => {
+    const root = previewRef.current;
+    if (!root || content === null) return;
+    clearPreviewThreadAnchors(root);
+    decoratePreviewThreadAnchors(root, threads, content);
+    updatePreviewActiveThread(root, activeThreadId);
+    onRenderedRef.current?.();
   }, [previewRef, content, threads]);
 
   useEffect(() => {

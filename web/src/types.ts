@@ -81,8 +81,6 @@ export type ConversationMessageCommand = {
   nodeId?: string | null;
   parentMessageId?: string | null;
   branchSelection?: BranchSelection | null;
-  adoptExistingChildren?: boolean;
-  insertBeforeNodeId?: string | null;
 };
 
 export type PermissionOption = {

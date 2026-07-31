@@ -11,7 +11,7 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 - **Local-first**：Markdown 原文件和讨论元数据保存在本地。
 - **Markdown-native**：使用 CodeMirror 编辑源文本，以 markdown-it 和 Mermaid 渲染预览。
 - **文本锚定**：Thread 绑定文档选区，并随编辑自动更新位置。
-- **树形讨论**：每个问题都是节点，可以继续分支，也可以在既有路径中插入追问。
+- **树形讨论**：每个问题都是节点；叶子继续形成子节点，非叶节点创建独立分支，既有路径不会被重排。
 - **局部上下文**：每个节点继承祖先上下文，不会混入无关兄弟分支。
 - **选区追问**：可以在节点的问题或回答中划选文字，直接创建带引用的追问。
 - **空间化导航**：支持无限画布、平移、缩放、节点焦点、面包屑和树形缩略图。
@@ -25,17 +25,17 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 
 ### 讨论树总览
 
-点击 Thread 进入全屏画布。tree 总览和节点 content 都提供“子节点 / 分支”入口，连线上的 `＋` 可以直接在指定路径中插入节点。
+点击 Thread 进入全屏画布。叶子节点提供“子节点”入口；已有子路径的节点只提供“分支”入口。新问题始终直接挂到当前节点，不会重排既有路径。
 
 [![多叉讨论树](docs/images/xuanniao-thread-tree.png)](docs/images/xuanniao-thread-tree.png)
 
 ### 文档、节点内容与 Tree 联动
 
-Thread 工作区采用三栏布局：左侧预览锚定文档，中间显示当前节点的问题、回答和输入区，右侧展示完整 Tree。点击 Tree 节点会同步中间内容和高亮状态；两条分隔线都可以拖动调整栏宽。输入问题时会显示路线预览和幽灵节点，可以选择新建分支或插入某条既有路径。
+Thread 工作区采用三栏布局：左侧预览锚定文档，中间显示当前节点的问题、回答和输入区，右侧展示完整 Tree。点击 Tree 节点会同步中间内容和高亮状态；两条分隔线都可以拖动调整栏宽。叶子节点输入问题时会显示新节点预览和幽灵节点。
 
 ## 交互语义
 
-玄鸟明确区分节点操作和路径操作：
+玄鸟根据当前节点是否已有子路径决定唯一可用操作：
 
 ```text
 从节点创建分支
@@ -46,20 +46,19 @@ Thread 工作区采用三栏布局：左侧预览锚定文档，中间显示当�
 ```
 
 ```text
-在路径中插入追问
+从叶子节点继续追问
 
 A → B → C
       ↓
-A → B → D → C
+A → B → C → D
 ```
 
 - 点击节点：在中间 content 栏打开该节点，并在右侧 Tree 中保持高亮。
 - 切换 Tree 节点：左侧文档预览自动回到当前 Thread 的原文锚点，并使用与主 Preview 相同的激活高亮；原文移动后按最新正文恢复位置。
-- 点击节点底部 `＋ 子节点`：创建子节点；存在既有路径时继续或选择要插入的路径。
-- 点击节点底部 `⑂ 分支`：创建新的独立分支，不移动既有子节点。
-- 节点 content 输入区也可随时切换“子节点 / 分支”。
-- 点击连线 `＋`：在父子节点之间插入新节点。
-- 节点没有子节点时直接创建子节点；只有一个子节点时默认继续当前路径；存在多个子节点时必须选择插入路径或另建分支。
+- 叶子节点只显示 `＋ 子节点`：从当前叶子继续提问。
+- 已有子路径的节点只显示 `⑂ 分支`：从当前节点创建新的独立分支，不移动既有子树。
+- 节点 content 输入区遵循同一规则，不提供创建方式切换或路径插入。
+- Tree 连接线只表达父子关系，不提供创建按钮。
 - 划选问题或回答中的文字：出现带引用的内联提问框。
 - `Esc`：先关闭当前节点 content，再次按下关闭 Thread 工作区。
 - 拖动栏间分隔线：调整文档、content 与 Tree 的宽度。
@@ -72,7 +71,7 @@ A → B → D → C
 
 ### 要求
 
-- Node.js 20 或更高版本
+- Node.js 20.19.x，或 22.12 及更高版本
 - npm
 - Codex CLI
 
@@ -114,7 +113,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 2. 在 Edit 或 Preview 中选择一段文字。
 3. 点击“选中文字提问”，在选区旁的提问框中创建根 Thread 并向 Codex 提问。
 4. 从评论栏打开 Thread，进入讨论树画布。
-5. 点击节点查看问题和回答，或在节点与连线上创建新的讨论路径。
+5. 点击节点查看问题和回答；叶子节点可继续创建子节点，已有子节点的节点可创建并列分支。
 6. 在问题或回答中划选文字，基于精确引用继续追问。
 7. 明确使用“修改、改写、翻译、替换”等意图时，Codex 可以更新锚定的文档范围。
 
@@ -127,7 +126,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 └─────────────────────────────── fetch /api ───────────────────────────────┘
                                       │
 ┌──────────────────────────── Node HTTP Server ───────────────────────────┐
-│ document I/O · thread tree · path insertion · metadata persistence      │
+│ document I/O · append-only thread tree · metadata persistence           │
 │ Agent Runtime · approval broker · context policy · replacement apply    │
 └────────────────────────── semantic runtime API ──────────────────────────┘
                                       │
@@ -178,14 +177,14 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 - 文档未变化时不重复发送完整正文；小范围变化发送精确 splice，大范围变化重新同步完整快照。
 - Agent 上下文超过显式字符预算时会失败并提示，不会静默截断；文档快照使用有界 LRU 缓存。
 - 新建或重建分支只注入该路径需要的祖先历史，不包含兄弟分支。
-- 编辑、删除问题或在路径中插入节点时，会清除当前节点及受影响后代的陈旧 session，避免 Agent 历史与可见树不一致。
+- 编辑、删除问题或继续已有子分支的父节点时，会清除当前节点及受影响后代的陈旧 session，避免 Agent 历史与可见树不一致。
 - 原生 Runtime 只按同一 session 串行化；不同分支可以并行运行。持久化写入由 Thread store 串行提交。
-- Agent 完成时会校验分支 revision，并原子写入回答与 session；运行期间祖先路径变化的旧回答不会覆盖新上下文。
+- Agent 完成时会校验分支 revision，并原子写入回答与 session；运行期间祖先路径变化的旧回答和错误回复都不会覆盖新上下文。
 - 每个文档响应携带内容 revision；浏览器保存和受控替换使用 compare-and-swap，拒绝覆盖并发或外部修改。
 - 浏览器锚点只作为候选位置，服务端根据保存后的正文重新校验并生成 canonical anchor。
-- 活动 Markdown 文档是受保护资源：ACP 文件写直接拒绝；所有 Agent 回合结束后还会校验 revision，并恢复绕过文档事务的直接写入。
-- 文档切换采用请求级上下文快照，旧请求不会写入新文档；Thread metadata 通过临时文件和原子 rename 落盘。
-- 原生 turn 使用活动空闲超时：输出、工具事件等活动会自动续期，等待用户审批时暂停计时；连续无活动超时后先发送 `turn/interrupt`，若 Codex 未在宽限期内停止，会重启 Runtime，避免后台操作继续执行。
+- 活动 Markdown 文档是受保护资源：ACP 文件写直接拒绝；所有 Agent 回合结束后还会校验 revision。无法归因的外部修改会保留原文件并报告冲突，不会用旧快照覆盖用户内容。
+- 文档切换会失效旧保存队列；保存请求同时携带文档路径和 revision，服务端拒绝落到其它活动文档。Thread metadata 通过临时文件和原子 rename 落盘。
+- 原生和 ACP turn 都使用活动空闲超时：输出、工具事件等活动会自动续期，等待用户审批时暂停计时。原生模式先发送 `turn/interrupt`，ACP 模式失效并重启 adapter，避免超时任务的迟到事件污染下一轮。
 
 ACP 仍作为兼容传输保留，但不支持原生 thread fork，且同一 adapter 进程内的请求会串行执行。Local-first 表示文档和玄鸟元数据保存在本机；模型与网络行为取决于 Codex CLI 或所选 adapter 的配置。
 
@@ -199,7 +198,7 @@ replacement markdown here
 </XUANNIAO_REPLACEMENT>
 ```
 
-服务端解析 replacement，校验生成回答时的文档 revision，再原子更新 Markdown 并同步所有受影响的 Thread anchor。revision 已变化时拒绝覆盖；完整删除锚定范围时，对应 Thread 也会删除。
+服务端解析 replacement，校验生成回答时的文档 revision，再协调提交 Markdown、Thread anchor、回答和 session；元数据提交失败时回滚 Markdown。revision 已变化时拒绝覆盖；完整删除锚定范围时，对应 Thread 也会删除。
 
 ## 配置
 
@@ -234,7 +233,7 @@ XUANNIAO_ACP_SKIP_AUTH=1 \
 npm start -- prd.md
 ```
 
-调整活动空闲超时（默认 10 分钟）；ACP 兼容模式仍将其作为请求总超时，也可以单独覆盖：
+调整活动空闲超时（默认 10 分钟）；ACP 兼容模式可以单独覆盖：
 
 ```bash
 XUANNIAO_AGENT_TIMEOUT_MS=300000 npm start -- prd.md
@@ -311,7 +310,7 @@ Key capabilities:
 - local Markdown editing and metadata persistence
 - anchored discussions that follow document edits
 - multi-way conversation trees
-- branch creation and targeted path insertion
+- append-only child and sibling branch creation
 - inline follow-ups from selected question or answer text
 - native Codex threads with per-node resume/fork semantics
 - incremental document context and ancestor-only branch recovery

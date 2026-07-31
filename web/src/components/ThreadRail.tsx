@@ -25,15 +25,14 @@ import {
   CONVERSATION_NODE_KINDS,
   conversationBreadcrumb,
   conversationNavigation,
+  conversationNodeCanBranch,
   conversationNodeKind,
   conversationNodeStatus,
-  defaultConversationRoute,
   flattenConversationTree
 } from "../thread-tree";
 import type { BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
 
 const THREAD_PANE_DIVIDER_WIDTH = 6;
-const ROUTE_CHOICE_REQUIRED = "__route_choice_required__";
 
 const NODE_KIND_META: Record<ConversationNodeKind, { label: string; shortLabel: string }> = {
   question: { label: "问题", shortLabel: "问" },
@@ -46,10 +45,10 @@ const NODE_KIND_META: Record<ConversationNodeKind, { label: string; shortLabel: 
 };
 
 const NODE_QUICK_ACTIONS = [
-  { id: "expand", label: "发散", forceNewBranch: true },
-  { id: "critique", label: "审查", forceNewBranch: false },
-  { id: "decide", label: "收敛", forceNewBranch: false },
-  { id: "task", label: "转任务", forceNewBranch: true }
+  { id: "expand", label: "发散" },
+  { id: "critique", label: "审查" },
+  { id: "decide", label: "收敛" },
+  { id: "task", label: "转任务" }
 ] as const;
 
 type NodeQuickActionId = typeof NODE_QUICK_ACTIONS[number]["id"];
@@ -80,7 +79,7 @@ type ThreadRailProps = {
   onSpatialScroll: (scrollTop: number) => void;
   setEditText: (value: string) => void;
   setMessageDraft: (draftKey: string, value: string) => void;
-  onSend: (command: ConversationMessageCommand) => void;
+  onSend: (command: ConversationMessageCommand) => Promise<boolean>;
 };
 
 export function ThreadRail(props: ThreadRailProps) {
@@ -391,7 +390,7 @@ function ThreadDetailModal(props: {
   onResolvePermission: (requestId: string, optionId: string | null) => void;
   setEditText: (value: string) => void;
   setMessageDraft: (draftKey: string, value: string) => void;
-  onSend: (command: ConversationMessageCommand) => void;
+  onSend: (command: ConversationMessageCommand) => Promise<boolean>;
 }) {
   const modalRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -419,12 +418,11 @@ function ThreadDetailModal(props: {
   const nodes = useMemo(() => flattenConversationTree(tree), [tree]);
   const canvasLayout = useMemo(() => layoutConversationTree(tree), [tree]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [insertBeforeNodeId, setInsertBeforeNodeId] = useState<string | null>(null);
-  const [nodeCreationMode, setNodeCreationMode] = useState<NodeCreationMode>("child");
   const [inspectorOpen, setInspectorOpen] = useState(false);
   const [contentPaneElement, setContentPaneElement] = useState<HTMLElement | null>(null);
   const [documentContextOpen, setDocumentContextOpen] = useState(true);
   const [isPanning, setIsPanning] = useState(false);
+  const [selectionSending, setSelectionSending] = useState(false);
   const [resizingPane, setResizingPane] = useState<"document-content" | "content-tree" | null>(null);
   const [paneWidths, setPaneWidths] = useState({ document: 360, content: 620 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
@@ -440,9 +438,10 @@ function ThreadDetailModal(props: {
   } = useMessageSelection({
     inspectorRef,
     canvasScaleRef: contentScaleRef,
-    selectedNodeId,
-    defaultRouteChoice
+    selectedNodeId
   });
+  const selectionPopoverRef = useRef(selectionPopover);
+  selectionPopoverRef.current = selectionPopover;
   inspectorOpenRef.current = inspectorOpen;
   selectionPopoverOpenRef.current = Boolean(selectionPopover);
   const knownNodeIdsRef = useRef(new Set(nodes.map((node) => node.id)));
@@ -489,9 +488,7 @@ function ThreadDetailModal(props: {
     knownNodeIdsRef.current = new Set(nodes.map((node) => node.id));
     if (addedNodes.length > 0) {
       const addedNode = addedNodes.at(-1) || null;
-      const route = addedNode ? defaultConversationRoute(addedNode) : null;
       setSelectedNodeId(addedNode?.id || null);
-      setInsertBeforeNodeId(route?.kind === "choose" ? ROUTE_CHOICE_REQUIRED : route?.insertBeforeNodeId || null);
       clearCapturedMessageSelection();
       setInspectorOpen(true);
       return;
@@ -536,8 +533,6 @@ function ThreadDetailModal(props: {
     if (props.permissionRequests.length === 0 || inspectorOpen) return;
     if (!selectedNodeId) {
       const node = nodes.at(-1) || null;
-      const route = node ? defaultConversationRoute(node) : null;
-      setInsertBeforeNodeId(route?.kind === "choose" ? ROUTE_CHOICE_REQUIRED : route?.insertBeforeNodeId || null);
       setSelectedNodeId(node?.id || null);
     }
     setInspectorOpen(true);
@@ -625,6 +620,9 @@ function ThreadDetailModal(props: {
   const messageCount = props.thread.messages.length;
   const nodeCount = nodes.length;
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
+  const nodeCreationMode: NodeCreationMode = selectedNode && conversationNodeCanBranch(selectedNode)
+    ? "branch"
+    : "child";
   const selectedNodeNavigation = useMemo(
     () => selectedNodeId ? conversationNavigation(tree, selectedNodeId) : { left: null, right: null, up: null, down: null },
     [selectedNodeId, tree]
@@ -639,35 +637,21 @@ function ThreadDetailModal(props: {
   const selectedNodeOrigin = selectedNode ? messageBranchSelection(selectedNode.question) : null;
   const selectedNodeKind = selectedNode ? conversationNodeKind(selectedNode) : "question";
   const semanticStats = useMemo(() => conversationSemanticStats(nodes), [nodes]);
-  const selectedInsertTarget = selectedNode?.children.find((node) => node.id === insertBeforeNodeId) || null;
-  const routeChoiceRequired = insertBeforeNodeId === ROUTE_CHOICE_REQUIRED;
   const lineLabel = lineStart
     ? `第 ${lineStart}${lineEnd && lineEnd !== lineStart ? `–${lineEnd}` : ""} 行`
     : "未锚定";
 
-  function defaultRouteChoice(nodeId: string, forceNewBranch = false): string | null {
-    if (forceNewBranch) return null;
-    const node = nodes.find((item) => item.id === nodeId);
-    if (!node) return null;
-    const route = defaultConversationRoute(node);
-    return route.kind === "choose" ? ROUTE_CHOICE_REQUIRED : route.insertBeforeNodeId;
-  }
-
-  function applyNodeQuickAction(actionId: NodeQuickActionId, forceNewBranch: boolean) {
+  function applyNodeQuickAction(actionId: NodeQuickActionId) {
     if (!selectedNode) return;
     clearCapturedMessageSelection();
-    setNodeCreationMode(forceNewBranch ? "branch" : "child");
-    setInsertBeforeNodeId(defaultRouteChoice(selectedNode.id, forceNewBranch));
     props.setMessageDraft(draftKey, promptForNodeQuickAction(actionId, selectedNode));
     window.getSelection()?.removeAllRanges();
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }
 
-  function openNode(nodeId: string, startComposer = false, forceNewBranch = false) {
+  function openNode(nodeId: string, startComposer = false) {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(nodeId);
-    setNodeCreationMode(forceNewBranch ? "branch" : "child");
-    setInsertBeforeNodeId(defaultRouteChoice(nodeId, forceNewBranch));
     clearCapturedMessageSelection();
     setInspectorOpen(true);
     window.getSelection()?.removeAllRanges();
@@ -677,22 +661,9 @@ function ThreadDetailModal(props: {
     });
   }
 
-  function openInsertBetween(parentNodeId: string, childNodeId: string) {
-    if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
-    setSelectedNodeId(parentNodeId);
-    setNodeCreationMode("child");
-    setInsertBeforeNodeId(childNodeId);
-    clearCapturedMessageSelection();
-    setInspectorOpen(true);
-    window.getSelection()?.removeAllRanges();
-    window.requestAnimationFrame(() => composerRef.current?.focus());
-  }
-
   function navigateToNode(nodeId: string | null | undefined) {
     if (!nodeId) return;
     setSelectedNodeId(nodeId);
-    setNodeCreationMode("child");
-    setInsertBeforeNodeId(defaultRouteChoice(nodeId));
     clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
     window.requestAnimationFrame(() => {
@@ -725,8 +696,6 @@ function ThreadDetailModal(props: {
   function closeFocusedNode() {
     setInspectorOpen(false);
     setSelectedNodeId(null);
-    setNodeCreationMode("child");
-    setInsertBeforeNodeId(null);
     clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
     if (overviewTransformRef.current) {
@@ -738,8 +707,6 @@ function ThreadDetailModal(props: {
   function openRootComposer() {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(null);
-    setNodeCreationMode("child");
-    setInsertBeforeNodeId(null);
     clearCapturedMessageSelection();
     setInspectorOpen(true);
     window.requestAnimationFrame(() => composerRef.current?.focus());
@@ -876,42 +843,48 @@ function ThreadDetailModal(props: {
     }, documentContextOpen));
   }
 
-  function sendQuestion(command: ThreadQuestionCommand) {
-    props.onSend({
+  function sendQuestion(command: ThreadQuestionCommand): Promise<boolean> {
+    return props.onSend({
       ...command,
       threadId: props.thread.id,
       askAgent: true
     });
   }
 
-  function submitSelectionQuestion() {
+  async function submitSelectionQuestion() {
     if (
       !selectionPopover
       || !selectedNode
       || !selectionPopover.prompt.trim()
-      || selectionPopover.insertBeforeNodeId === ROUTE_CHOICE_REQUIRED
+      || selectionSending
     ) return;
-    sendQuestion({
-      content: selectionPopover.prompt,
-      draftKey: null,
-      nodeId: null,
-      parentMessageId: selectedNode.id,
-      branchSelection: {
-        sourceMessageId: selectionPopover.sourceMessageId,
-        text: selectionPopover.text
-      },
-      adoptExistingChildren: false,
-      insertBeforeNodeId: selectionPopover.insertBeforeNodeId
-    });
-    clearCapturedMessageSelection();
-    window.getSelection()?.removeAllRanges();
+    const submittedSelection = selectionPopover;
+    setSelectionSending(true);
+    try {
+      const sent = await sendQuestion({
+        content: selectionPopover.prompt,
+        draftKey: null,
+        nodeId: null,
+        parentMessageId: selectedNode.id,
+        branchSelection: {
+          sourceMessageId: selectionPopover.sourceMessageId,
+          text: selectionPopover.text
+        }
+      });
+      if (!sent || selectionPopoverRef.current !== submittedSelection) return;
+      clearCapturedMessageSelection();
+      window.getSelection()?.removeAllRanges();
+    } finally {
+      setSelectionSending(false);
+    }
   }
 
   const selectedCanvasItem = selectedNodeId
     ? canvasLayout.nodes.find((item) => item.node.id === selectedNodeId) || null
     : null;
   const ghostNode = (() => {
-    if (!inspectorOpen || !messageDraft.trim() || routeChoiceRequired) return null;
+    if (!inspectorOpen || !messageDraft.trim()) return null;
+    if (nodeCreationMode === "branch") return null;
     if (!selectedCanvasItem) return { x: 0, y: 0 };
     return {
       x: selectedCanvasItem.x,
@@ -1073,7 +1046,6 @@ function ThreadDetailModal(props: {
                 return (
                   <path
                     key={connector.id}
-                    className={insertBeforeNodeId === connector.toNodeId ? "insertTarget" : ""}
                     d={`M ${connector.fromX} ${connector.fromY} C ${connector.fromX} ${middleY}, ${connector.toX} ${middleY}, ${connector.toX} ${connector.toY}`}
                   />
                 );
@@ -1086,23 +1058,6 @@ function ThreadDetailModal(props: {
               )}
             </svg>
 
-            {canvasLayout.connectors.map((connector) => (
-              <button
-                key={`insert:${connector.id}`}
-                type="button"
-                className={`threadCanvasEdgeInsert ${insertBeforeNodeId === connector.toNodeId ? "active" : ""}`}
-                style={{
-                  left: (connector.fromX + connector.toX) / 2,
-                  top: (connector.fromY + connector.toY) / 2
-                }}
-                aria-label={`在 ${questionSummary(nodes.find((node) => node.id === connector.fromNodeId)?.question.content || "")} 与 ${questionSummary(nodes.find((node) => node.id === connector.toNodeId)?.question.content || "")} 之间插入追问`}
-                title="在这条路径中插入追问"
-                onClick={() => openInsertBetween(connector.fromNodeId, connector.toNodeId)}
-              >
-                +
-              </button>
-            ))}
-
             {canvasLayout.nodes.map((item) => (
               <Fragment key={item.node.id}>
                 <ConversationCanvasNode
@@ -1112,8 +1067,7 @@ function ThreadDetailModal(props: {
                   x={item.x}
                   y={item.y}
                   onOpen={() => openNode(item.node.id)}
-                  onAskChild={() => openNode(item.node.id, true)}
-                  onAskBranch={() => openNode(item.node.id, true, true)}
+                  onCreate={() => openNode(item.node.id, true)}
                 />
                 {inspectorOpen && selectedNodeId === item.node.id && contentPaneElement && createPortal(
                 <article
@@ -1163,7 +1117,7 @@ function ThreadDetailModal(props: {
                               <button
                                 key={action.id}
                                 type="button"
-                                onClick={() => applyNodeQuickAction(action.id, action.forceNewBranch)}
+                                onClick={() => applyNodeQuickAction(action.id)}
                               >
                                 {action.label}
                               </button>
@@ -1191,13 +1145,14 @@ function ThreadDetailModal(props: {
                         onMouseDown={(event) => event.stopPropagation()}
                         onSubmit={(event) => {
                           event.preventDefault();
-                          submitSelectionQuestion();
+                          void submitSelectionQuestion();
                         }}
                       >
                         <div>
                           <input
                             ref={selectionComposerRef}
                             value={selectionPopover.prompt}
+                            disabled={selectionSending}
                             onChange={(event) => setSelectionPopover((current) => current ? { ...current, prompt: event.target.value } : null)}
                             onKeyDown={(event) => {
                               if (event.key === "Escape") {
@@ -1212,33 +1167,12 @@ function ThreadDetailModal(props: {
                           <button
                             type="submit"
                             className="primaryButton"
-                            disabled={!selectionPopover.prompt.trim() || selectionPopover.insertBeforeNodeId === ROUTE_CHOICE_REQUIRED}
+                            disabled={!selectionPopover.prompt.trim() || selectionSending}
                           >
-                            发送
+                            {selectionSending ? "发送中…" : "发送"}
                           </button>
                         </div>
-                        {selectedNode && selectedNode.children.length > 0 ? (
-                          <select
-                            aria-label="新节点位置"
-                            value={selectionPopover.insertBeforeNodeId || ""}
-                            onChange={(event) => setSelectionPopover((current) => current ? {
-                              ...current,
-                              insertBeforeNodeId: event.target.value || null
-                            } : null)}
-                          >
-                            {selectedNode.children.length > 1 && (
-                              <option value={ROUTE_CHOICE_REQUIRED} disabled>请选择新节点位置…</option>
-                            )}
-                            {selectedNode.children.map((child) => (
-                              <option key={child.id} value={child.id}>
-                                {selectedNode.children.length === 1 ? "继续当前路径" : "插入路径"} → {questionSummary(child.question.content)}
-                              </option>
-                            ))}
-                            <option value="">另建分支</option>
-                          </select>
-                        ) : (
-                          <small>创建子节点</small>
-                        )}
+                        <small>{nodeCreationMode === "branch" ? "创建分支" : "创建子节点"}</small>
                       </form>
                     </>
                   )}
@@ -1297,7 +1231,6 @@ function ThreadDetailModal(props: {
                     className="threadModalComposer threadFocusComposer"
                     onSubmit={(event) => {
                       event.preventDefault();
-                      if (routeChoiceRequired) return;
                       if (!selectedNode) {
                         sendQuestion({
                           content: messageDraft,
@@ -1311,76 +1244,27 @@ function ThreadDetailModal(props: {
                           draftKey,
                           nodeId: null,
                           parentMessageId: selectedNode.id,
-                          branchSelection: null,
-                          adoptExistingChildren: false,
-                          insertBeforeNodeId
+                          branchSelection: null
                         });
                       }
                       clearCapturedMessageSelection();
                     }}
                   >
                     <div className="threadFocusComposerTopline">
-                      <div className="threadCreationMode" role="group" aria-label="新节点创建方式">
-                        <button
-                          type="button"
-                          className={nodeCreationMode === "child" ? "active" : ""}
-                          aria-pressed={nodeCreationMode === "child"}
-                          onClick={() => {
-                            setNodeCreationMode("child");
-                            if (selectedNode) setInsertBeforeNodeId(defaultRouteChoice(selectedNode.id));
-                          }}
-                        >
-                          子节点
-                        </button>
-                        <button
-                          type="button"
-                          className={nodeCreationMode === "branch" ? "active" : ""}
-                          aria-pressed={nodeCreationMode === "branch"}
-                          onClick={() => {
-                            setNodeCreationMode("branch");
-                            setInsertBeforeNodeId(null);
-                          }}
-                        >
-                          分支
-                        </button>
+                      <div className="threadCreationMode" aria-label="新节点创建方式">
+                        <span>{nodeCreationMode === "branch" ? "分支" : "子节点"}</span>
                       </div>
                       <label htmlFor="thread-canvas-question">
                         {nodeCreationMode === "branch"
                           ? "从当前节点新建独立分支"
-                          : routeChoiceRequired
-                            ? "请选择子节点所在路径"
-                            : selectedInsertTarget
-                              ? <>{selectedNode?.children.length === 1 ? "继续当前路径" : "插入路径"} <strong>→ {questionSummary(selectedInsertTarget.question.content)}</strong></>
-                              : "创建子节点"}
+                          : "从当前叶子节点继续提问"}
                       </label>
-                      {nodeCreationMode === "child" && selectedNode && selectedNode.children.length > 0 && (
-                        <select
-                          aria-label="子节点位置"
-                          value={insertBeforeNodeId || ""}
-                          onChange={(event) => setInsertBeforeNodeId(event.target.value)}
-                        >
-                          {selectedNode.children.length > 1 && (
-                            <option value={ROUTE_CHOICE_REQUIRED} disabled>请选择新节点位置…</option>
-                          )}
-                          {selectedNode.children.map((child) => (
-                            <option key={child.id} value={child.id}>
-                              {selectedNode.children.length === 1 ? "继续当前路径" : "插入路径"} → {questionSummary(child.question.content)}
-                            </option>
-                          ))}
-                        </select>
-                      )}
                     </div>
                     {messageDraft.trim() && selectedNode && (
-                      <div className="threadFocusRoutePreview" aria-label="新节点位置预览">
+                      <div className="threadFocusRoutePreview" aria-label="新节点预览">
                         <span>{questionSummary(selectedNode.question.content)}</span>
                         <i aria-hidden="true">→</i>
                         <strong>{questionSummary(messageDraft)}</strong>
-                        {selectedInsertTarget && (
-                          <>
-                            <i aria-hidden="true">→</i>
-                            <span>{questionSummary(selectedInsertTarget.question.content)}</span>
-                          </>
-                        )}
                       </div>
                     )}
                     <textarea
@@ -1404,17 +1288,10 @@ function ThreadDetailModal(props: {
                         className="primaryButton"
                         disabled={
                           !messageDraft.trim()
-                          || routeChoiceRequired
                           || Boolean(selectedNode?.messages.some((message) => message.id.startsWith("pending-")))
                         }
                       >
-                        {routeChoiceRequired
-                          ? "选择位置"
-                          : nodeCreationMode === "branch"
-                            ? "创建分支"
-                            : selectedInsertTarget
-                              ? "继续当前路径"
-                              : "创建子节点"}
+                        {nodeCreationMode === "branch" ? "创建分支" : "创建子节点"}
                       </button>
                     </div>
                   </form>
@@ -1486,7 +1363,7 @@ function ThreadDetailModal(props: {
                 style={{ left: ghostNode.x - 105, top: ghostNode.y - 38 }}
                 aria-hidden="true"
               >
-                <small>{selectedInsertTarget ? "插入路径" : "新节点预览"}</small>
+                <small>新节点预览</small>
                 <strong>{questionSummary(messageDraft)}</strong>
               </div>
             )}
@@ -1506,12 +1383,12 @@ function ConversationCanvasNode(props: {
   x: number;
   y: number;
   onOpen: () => void;
-  onAskChild: () => void;
-  onAskBranch: () => void;
+  onCreate: () => void;
 }) {
   const userTurns = props.node.messages.filter((message) => message.role === "user").length;
   const status = conversationNodeStatus(props.node);
   const kind = conversationNodeKind(props.node);
+  const canCreateBranch = conversationNodeCanBranch(props.node);
   const hasSelectedOrigin = Boolean(messageBranchSelection(props.node.question));
   const statusLabel = {
     unanswered: "未回答",
@@ -1543,26 +1420,29 @@ function ConversationCanvasNode(props: {
         </span>
       </button>
       <div className="threadCanvasNodeActions" aria-label="创建后续节点">
-        <button
-          type="button"
-          className="threadCanvasNodeAdd"
-          aria-label={`从 ${questionSummary(props.node.question.content)} 创建子节点`}
-          title="创建子节点或继续当前路径"
-          onClick={props.onAskChild}
-        >
-          <span aria-hidden="true">+</span>
-          <small>子节点</small>
-        </button>
-        <button
-          type="button"
-          className="threadCanvasNodeAdd branch"
-          aria-label={`从 ${questionSummary(props.node.question.content)} 新建分支`}
-          title="从这里新建独立分支"
-          onClick={props.onAskBranch}
-        >
-          <span aria-hidden="true">⑂</span>
-          <small>分支</small>
-        </button>
+        {canCreateBranch ? (
+          <button
+            type="button"
+            className="threadCanvasNodeAdd branch"
+            aria-label={`从 ${questionSummary(props.node.question.content)} 新建分支`}
+            title="从这里新建独立分支"
+            onClick={props.onCreate}
+          >
+            <span aria-hidden="true">⑂</span>
+            <small>分支</small>
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="threadCanvasNodeAdd"
+            aria-label={`从 ${questionSummary(props.node.question.content)} 创建子节点`}
+            title="从当前叶子节点继续提问"
+            onClick={props.onCreate}
+          >
+            <span aria-hidden="true">+</span>
+            <small>子节点</small>
+          </button>
+        )}
       </div>
     </article>
   );

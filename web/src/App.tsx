@@ -45,15 +45,20 @@ export function App() {
   } | null>(null);
   const [selectionQuestion, setSelectionQuestion] = useState("");
   const [creatingSelectionThread, setCreatingSelectionThread] = useState(false);
+  const selectionAskRef = useRef(selectionAsk);
+  const selectionQuestionRef = useRef(selectionQuestion);
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MarkdownThreadEditor | null>(null);
   const previewRef = useRef<HTMLElement | null>(null);
   const scrollSyncFrameRef = useRef<number | null>(null);
   const explicitThreadActivationTimerRef = useRef<number | null>(null);
   const explicitlyActivatedThreadIdRef = useRef<string | null>(null);
+  const openDocumentRequestRef = useRef<AbortController | null>(null);
   const threadsRef = useRef<Thread[]>([]);
   const activeThreadIdRef = useRef<string | null>(null);
   const modeRef = useRef<Mode>("edit");
+  selectionAskRef.current = selectionAsk;
+  selectionQuestionRef.current = selectionQuestion;
   const { threadWidth, startResize } = useThreadPaneWidth();
   const documentSession = useDocumentSession({
     editorRef,
@@ -66,14 +71,16 @@ export function App() {
     permissionRequests,
     resolvingPermissionIds,
     resolvePermissionRequest
-  } = usePermissionInbox({ setStatus });
+  } = usePermissionInbox({ setStatus, sessionKey: documentData?.path ?? null });
   const conversation = useConversationCommands({
     threadsRef,
     setThreads,
     setActiveThreadId,
     setStatus,
     flushDocumentSave: documentSession.flushDocumentSave,
-    applyDocument: documentSession.applyServerDocument
+    applyDocument: documentSession.applyServerDocument,
+    captureDocumentSession: documentSession.captureDocumentSession,
+    isDocumentSessionCurrent: documentSession.isDocumentSessionCurrent
   });
 
   const activeThread = threads.find((thread) => thread.id === activeThreadId) || null;
@@ -100,6 +107,7 @@ export function App() {
     if (explicitThreadActivationTimerRef.current !== null) {
       window.clearTimeout(explicitThreadActivationTimerRef.current);
     }
+    openDocumentRequestRef.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -135,7 +143,7 @@ export function App() {
   async function loadAll() {
     try {
       const [doc, threadPayload, filePayload] = await Promise.all([api.document(), api.threads(), api.files()]);
-      documentSession.loadDocument(doc);
+      documentSession.loadDocument(doc, false, true);
       setThreads(threadPayload.threads);
       setActiveThreadId(threadPayload.threads[0]?.id || null);
       setWorkspaceRoot(filePayload.root);
@@ -252,23 +260,33 @@ export function App() {
   }
 
   async function openDocument(path: string) {
+    openDocumentRequestRef.current?.abort();
+    const controller = new AbortController();
+    openDocumentRequestRef.current = controller;
     setStatus("正在打开文档");
     try {
       if (documentData) {
         if (!await documentSession.flushDocumentSave()) return;
       }
-      const payload = await api.openDocument(path);
-      documentSession.loadDocument(payload.document, true);
+      if (openDocumentRequestRef.current !== controller) return;
+      const payload = await api.openDocument(path, controller.signal);
+      if (openDocumentRequestRef.current !== controller) return;
+      documentSession.loadDocument(payload.document, true, true);
       setThreads(payload.threads);
       setActiveThreadId(payload.threads[0]?.id || null);
       conversation.resetConversationEditor();
+      setSelectionAsk(null);
+      setSelectionQuestion("");
       setFilePickerOpen(false);
       setFileBrowserError("");
       setStatus("文档已打开");
     } catch (error) {
+      if (controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
       setFileBrowserError(message);
       setStatus(message);
+    } finally {
+      if (openDocumentRequestRef.current === controller) openDocumentRequestRef.current = null;
     }
   }
 
@@ -336,6 +354,7 @@ export function App() {
   }
 
   async function openOrCreateThread(selection = currentSelection()) {
+    const operation = documentSession.captureDocumentSession();
     if (!selection) {
       setStatus("请先选择一段文字");
       return null;
@@ -347,11 +366,23 @@ export function App() {
       return existing;
     }
 
+    if (!await documentSession.flushDocumentSave()) return null;
+    if (!documentSession.isDocumentSessionCurrent(operation)) return null;
+    const expectedRevision = documentSession.currentRevision();
+    const documentPath = documentSession.currentPath();
+    if (!expectedRevision || !documentPath) {
+      setStatus("文档身份或版本缺失，请重新加载文档");
+      return null;
+    }
+
     const created = await api.createThread({
+      documentPath,
       title: titleForSelection(selection.selectedText),
       selectedText: selection.selectedText,
-      anchor: selection.anchor
-    });
+      anchor: selection.anchor,
+      expectedRevision
+    }, operation.signal);
+    if (!documentSession.isDocumentSessionCurrent(operation)) return null;
     setThreads((current) => insertThreadOnce(current, created.thread));
     setActiveThreadId(created.thread.id);
     return created.thread;
@@ -370,20 +401,28 @@ export function App() {
 
   async function submitSelectionQuestion() {
     if (!selectionAsk || !selectionQuestion.trim() || creatingSelectionThread) return;
+    const submittedSelection = selectionAsk;
     setCreatingSelectionThread(true);
     try {
       const thread = await openOrCreateThread(selectionAsk.selection);
       if (!thread) return;
       const question = selectionQuestion;
-      setSelectionAsk(null);
-      setSelectionQuestion("");
-      void conversation.send({
+      const sent = await conversation.send({
         threadId: thread.id,
         content: question,
         draftKey: null,
         askAgent: true
       });
+      if (
+        sent &&
+        selectionAskRef.current === submittedSelection &&
+        selectionQuestionRef.current === question
+      ) {
+        setSelectionAsk(null);
+        setSelectionQuestion("");
+      }
     } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") return;
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
       setCreatingSelectionThread(false);
@@ -394,10 +433,12 @@ export function App() {
     const messageCount = thread.messages?.length || 0;
     const confirmed = window.confirm(`确定删除这个讨论${messageCount ? `及其中的 ${messageCount} 条消息` : ""}吗？`);
     if (!confirmed) return;
+    const operation = documentSession.captureDocumentSession();
 
     setStatus("正在删除讨论");
     try {
-      const payload = await api.deleteThread(thread.id);
+      const payload = await api.deleteThread(thread.id, operation.signal);
+      if (!documentSession.isDocumentSessionCurrent(operation)) return;
       const fallbackId = payload.threads[0]?.id || null;
       const nextActiveId = activeThreadId === thread.id ? fallbackId : activeThreadId;
       setThreads(payload.threads);
@@ -405,9 +446,11 @@ export function App() {
       conversation.cancelEdit();
       setStatus("讨论已删除");
     } catch (error) {
+      if (!documentSession.isDocumentSessionCurrent(operation)) return;
       setStatus(error instanceof Error ? error.message : String(error));
       try {
-        setThreads((await api.threads()).threads);
+        const payload = await api.threads(operation.signal);
+        if (documentSession.isDocumentSessionCurrent(operation)) setThreads(payload.threads);
       } catch {
         // Preserve the original delete error when recovery also fails.
       }
@@ -532,7 +575,6 @@ export function App() {
           creating={creatingSelectionThread}
           onQuestionChange={setSelectionQuestion}
           onCancel={() => {
-            if (creatingSelectionThread) return;
             setSelectionAsk(null);
             setSelectionQuestion("");
           }}

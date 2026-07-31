@@ -6,14 +6,17 @@ import test from "node:test";
 
 import { AgentDocumentMutationError, DocumentConflictError, DocumentWorkspace } from "./document-workspace.js";
 
-function threadStoreStub({ failUpdates = false } = {}) {
+function threadStoreStub({ failUpdates = false, failCompletion = false } = {}) {
   return {
-    async list() {
+    async reconcileAnchors(reconciler) {
+      if (failUpdates) throw new Error("anchor update failed");
+      await reconciler([]);
       return [];
     },
-    async updateAnchors() {
-      if (failUpdates) throw new Error("anchor update failed");
-      return [];
+    async completeAgentTurnWithAnchorReconciliation({ reconcile }) {
+      await reconcile([]);
+      if (failCompletion) throw new Error("agent turn commit failed");
+      return { assistantMessage: {}, threads: [] };
     }
   };
 }
@@ -37,6 +40,52 @@ test("document saves require the revision that was originally read", async () =>
       (error) => error instanceof DocumentConflictError && error.statusCode === 409
     );
     assert.equal(await readFile(documentPath, "utf8"), "# External change\n");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("thread creation validates the document revision and selected range", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-document-revision-"));
+  const documentPath = path.join(tempDir, "plan.md");
+  const created = [];
+  const store = {
+    async create(input) {
+      created.push(input);
+      return input;
+    }
+  };
+
+  try {
+    await writeFile(documentPath, "# Plan\nnext line\n", "utf8");
+    const workspace = new DocumentWorkspace(documentPath, store);
+    const document = await workspace.payload();
+    await workspace.createThread({
+      title: "Plan",
+      selectedText: "Plan",
+      anchor: { start: 2, end: 6 },
+      expectedRevision: document.revision
+    });
+    assert.equal(created.length, 1);
+
+    await workspace.createThread({
+      title: "Multiline",
+      selectedText: "Plan next",
+      anchor: { start: 2, end: 11 },
+      expectedRevision: document.revision
+    });
+    assert.equal(created[1].selectedText, "Plan\nnext");
+
+    await assert.rejects(
+      workspace.createThread({
+        title: "Stale",
+        selectedText: "wrong",
+        anchor: { start: 2, end: 6 },
+        expectedRevision: document.revision
+      }),
+      (error) => error instanceof DocumentConflictError && error.statusCode === 409
+    );
+    assert.equal(created.length, 2);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -87,6 +136,44 @@ test("document content rolls back when anchor persistence fails", async () => {
   }
 });
 
+test("selection replacement rolls back when the coordinated agent turn cannot commit", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-replacement-rollback-"));
+  const documentPath = path.join(tempDir, "plan.md");
+  const thread = {
+    id: "thread-1",
+    selectedText: "selected",
+    anchor: { start: 7, end: 15, lineStart: 1, lineEnd: 1, blockId: null }
+  };
+
+  try {
+    await writeFile(documentPath, "before selected after", "utf8");
+    const workspace = new DocumentWorkspace(
+      documentPath,
+      threadStoreStub({ failCompletion: true })
+    );
+    const original = await workspace.payload();
+
+    await assert.rejects(
+      workspace.applySelectionReplacement({
+        expectedRevision: original.revision,
+        thread,
+        replacement: "changed",
+        threadId: thread.id,
+        agentTurn: {
+          userMessageId: "question-1",
+          message: { role: "assistant", content: "answer" },
+          agentSession: null,
+          expectedBranchRevision: "branch-revision"
+        }
+      }),
+      /agent turn commit failed/
+    );
+    assert.equal(await readFile(documentPath, "utf8"), "before selected after");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("document saves canonicalize client anchor proposals against saved content", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-document-anchors-"));
   const documentPath = path.join(tempDir, "plan.md");
@@ -103,12 +190,10 @@ test("document saves canonicalize client anchor proposals against saved content"
   };
   let savedPatches = [];
   const store = {
-    async list() {
-      return [thread];
-    },
-    async updateAnchors(patches) {
-      savedPatches = patches;
-      return patches;
+    async reconcileAnchors(reconciler) {
+      const update = await reconciler([thread]);
+      savedPatches = update.patches;
+      return update.patches;
     }
   };
 
@@ -143,7 +228,7 @@ test("document saves canonicalize client anchor proposals against saved content"
   }
 });
 
-test("agent snapshots restore direct writes to the protected document", async () => {
+test("agent snapshots preserve unclassified external writes and report a conflict", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-agent-document-guard-"));
   const documentPath = path.join(tempDir, "plan.md");
 
@@ -155,15 +240,19 @@ test("agent snapshots restore direct writes to the protected document", async ()
 
     await assert.rejects(
       workspace.verifyAgentSnapshot(snapshot),
-      (error) => error instanceof AgentDocumentMutationError && error.code === "AGENT_DOCUMENT_MUTATION"
+      (error) => (
+        error instanceof AgentDocumentMutationError &&
+        error.code === "AGENT_DOCUMENT_MUTATION" &&
+        error.document.content === "agent overwrite"
+      )
     );
-    assert.equal(await readFile(documentPath, "utf8"), "protected");
+    assert.equal(await readFile(documentPath, "utf8"), "agent overwrite");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
 
-test("agent snapshots preserve the latest controlled save before restoring a direct write", async () => {
+test("agent snapshots never overwrite an unknown write after a controlled save", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-agent-document-race-"));
   const documentPath = path.join(tempDir, "plan.md");
 
@@ -182,7 +271,7 @@ test("agent snapshots preserve the latest controlled save before restoring a dir
       workspace.verifyAgentSnapshot(snapshot),
       (error) => error instanceof AgentDocumentMutationError
     );
-    assert.equal(await readFile(documentPath, "utf8"), "user save");
+    assert.equal(await readFile(documentPath, "utf8"), "agent overwrite");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

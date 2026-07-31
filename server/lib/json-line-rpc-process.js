@@ -2,6 +2,16 @@ import { spawn } from "node:child_process";
 
 import { parseCommandLine } from "./agent-config.js";
 
+export class RpcRequestTimeoutError extends Error {
+  constructor(label, method, timeoutMs) {
+    super(`${label} request timed out after ${timeoutMs} ms without activity: ${method}`);
+    this.name = "RpcRequestTimeoutError";
+    this.code = "RPC_REQUEST_TIMEOUT";
+    this.method = method;
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 export class JsonLineRpcProcess {
   constructor({
     label,
@@ -87,12 +97,28 @@ export class JsonLineRpcProcess {
     const id = ++this.protocolId;
     const payload = this.formatRequest({ id, method, params });
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      let timer = null;
+      const timeout = () => {
         this.pending.delete(id);
-        reject(new Error(`${this.label} request timed out: ${method}`));
-      }, timeoutMs);
-      this.pending.set(id, {
+        reject(new RpcRequestTimeoutError(this.label, method, timeoutMs));
+      };
+      const pending = {
         method,
+        pauseDepth: 0,
+        touch: () => {
+          if (pending.pauseDepth > 0) return;
+          clearTimeout(timer);
+          timer = setTimeout(timeout, timeoutMs);
+        },
+        pause: () => {
+          pending.pauseDepth += 1;
+          if (pending.pauseDepth === 1) clearTimeout(timer);
+        },
+        resume: () => {
+          if (pending.pauseDepth === 0) return;
+          pending.pauseDepth -= 1;
+          if (pending.pauseDepth === 0) pending.touch();
+        },
         resolve: (value) => {
           clearTimeout(timer);
           resolve(value);
@@ -101,7 +127,9 @@ export class JsonLineRpcProcess {
           clearTimeout(timer);
           reject(error);
         }
-      });
+      };
+      this.pending.set(id, pending);
+      pending.touch();
       try {
         this.write(payload);
       } catch (error) {
@@ -110,6 +138,24 @@ export class JsonLineRpcProcess {
         reject(error);
       }
     });
+  }
+
+  touchRequests(method) {
+    for (const pending of this.pending.values()) {
+      if (pending.method === method) pending.touch();
+    }
+  }
+
+  pauseRequests(method) {
+    for (const pending of this.pending.values()) {
+      if (pending.method === method) pending.pause();
+    }
+  }
+
+  resumeRequests(method) {
+    for (const pending of this.pending.values()) {
+      if (pending.method === method) pending.resume();
+    }
   }
 
   write(payload) {

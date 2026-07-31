@@ -5,12 +5,10 @@ import {
   buildConversationTree,
   conversationBreadcrumb,
   conversationNavigation,
+  conversationNodeCanBranch,
   conversationNodeKind,
   conversationNodeStatus,
-  defaultConversationRoute,
-  flattenConversationTree,
-  reparentConversationNode,
-  reparentDirectChildNodes
+  flattenConversationTree
 } from "./thread-tree.ts";
 import type { Message } from "./types.ts";
 
@@ -54,20 +52,14 @@ test("keeps sibling follow-up questions as separate child branches", () => {
   assert.deepEqual(flattenConversationTree(roots).map((node) => node.id), ["q1", "q2", "q3"]);
 });
 
-test("inserts a continued node before the selected node's existing children", () => {
-  const messages: Message[] = [
-    { id: "a", role: "user", content: "A", nodeId: "a", parentId: null, createdAt: at },
-    { id: "b", role: "user", content: "B", nodeId: "b", parentId: "a", createdAt: at },
-    { id: "c", role: "user", content: "C", nodeId: "c", parentId: "b", createdAt: at },
-    { id: "c1", role: "user", content: "C1", nodeId: "c1", parentId: "c", createdAt: at }
-  ];
-  const inserted: Message = { id: "d", role: "user", content: "D", nodeId: "d", parentId: "b", createdAt: at };
+test("only nodes with an existing child path can create a separate branch", () => {
   const roots = buildConversationTree([
-    ...reparentDirectChildNodes(messages, "b", "d"),
-    inserted
+    { id: "root", role: "user", content: "Root", parentId: null, createdAt: at },
+    { id: "leaf", role: "user", content: "Leaf", parentId: "root", createdAt: at }
   ]);
 
-  assert.deepEqual(flattenConversationTree(roots).map((node) => node.id), ["a", "b", "d", "c", "c1"]);
+  assert.equal(conversationNodeCanBranch(roots[0]), true);
+  assert.equal(conversationNodeCanBranch(roots[0].children[0]), false);
 });
 
 test("leaves existing children in place when creating a sibling child branch", () => {
@@ -79,22 +71,6 @@ test("leaves existing children in place when creating a sibling child branch", (
   ];
 
   assert.deepEqual(buildConversationTree(messages)[0].children[0].children.map((node) => node.id), ["c", "d"]);
-});
-
-test("inserts a node into one selected path without moving sibling branches", () => {
-  const messages: Message[] = [
-    { id: "a", role: "user", content: "A", nodeId: "a", parentId: null, createdAt: at },
-    { id: "b", role: "user", content: "B", nodeId: "b", parentId: "a", createdAt: at },
-    { id: "c", role: "user", content: "C", nodeId: "c", parentId: "b", createdAt: at },
-    { id: "sibling", role: "user", content: "Sibling", nodeId: "sibling", parentId: "b", createdAt: at },
-    { id: "d", role: "user", content: "D", nodeId: "d", parentId: "b", createdAt: at }
-  ];
-  const roots = buildConversationTree(reparentConversationNode(messages, "c", "d"));
-  const b = flattenConversationTree(roots).find((node) => node.id === "b")!;
-  const d = flattenConversationTree(roots).find((node) => node.id === "d")!;
-
-  assert.deepEqual(b.children.map((node) => node.id), ["sibling", "d"]);
-  assert.deepEqual(d.children.map((node) => node.id), ["c"]);
 });
 
 test("maps four-way navigation to parent, first child, and adjacent siblings", () => {
@@ -128,21 +104,6 @@ test("builds a root-to-current breadcrumb without sibling nodes", () => {
   ];
 
   assert.deepEqual(conversationBreadcrumb(buildConversationTree(messages), "c").map((node) => node.id), ["a", "b", "c"]);
-});
-
-test("continues a single existing path by default and requires a choice for branches", () => {
-  const singlePath = buildConversationTree([
-    { id: "a", role: "user", content: "A", nodeId: "a", parentId: null, createdAt: at },
-    { id: "b", role: "user", content: "B", nodeId: "b", parentId: "a", createdAt: at }
-  ])[0];
-  assert.deepEqual(defaultConversationRoute(singlePath), { kind: "insert", insertBeforeNodeId: "b" });
-
-  const branched = buildConversationTree([
-    { id: "a", role: "user", content: "A", nodeId: "a", parentId: null, createdAt: at },
-    { id: "b", role: "user", content: "B", nodeId: "b", parentId: "a", createdAt: at },
-    { id: "c", role: "user", content: "C", nodeId: "c", parentId: "a", createdAt: at }
-  ])[0];
-  assert.deepEqual(defaultConversationRoute(branched), { kind: "choose", insertBeforeNodeId: null });
 });
 
 test("reports honest node answer states", () => {

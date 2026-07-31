@@ -1,8 +1,19 @@
 import { branchRevisionForQuestion, conversationNode, parentQuestion, selectionComesFromNode } from "./thread-tree.js";
 
+export const CONVERSATION_NODE_KINDS = new Set([
+  "question",
+  "idea",
+  "assumption",
+  "evidence",
+  "risk",
+  "decision",
+  "task"
+]);
+
 export function planConversationQuestion(thread, command) {
   const content = String(command.content || "").trim();
   if (!content) throw new ConversationRuleError("message content is required");
+  assertAppendOnlyPlacement(command);
 
   const requestedNodeId = optionalId(command.nodeId);
   const existingNode = requestedNodeId ? conversationNode(thread, requestedNodeId) : null;
@@ -19,17 +30,6 @@ export function planConversationQuestion(thread, command) {
     }
   }
 
-  const placement = normalizePlacement(command);
-  if (placement.kind !== "append" && (existingNode || !parentMessageId)) {
-    throw new ConversationRuleError("continuing a branch must create a new node after an existing node");
-  }
-  if (placement.kind === "insert") {
-    const insertBeforeNode = conversationNode(thread, placement.insertBeforeNodeId);
-    if (!insertBeforeNode || insertBeforeNode.parentId !== parentMessageId) {
-      throw new ConversationRuleError("insert target must be a direct child of the parent node");
-    }
-  }
-
   const branchSelection = normalizeBranchSelection(command.branchSelection);
   if (branchSelection) {
     const sourceNodeId = existingNode ? requestedNodeId : parentMessageId;
@@ -43,7 +43,6 @@ export function planConversationQuestion(thread, command) {
 
   return {
     askAgent: command.askAgent !== false,
-    placement,
     message: {
       role: "user",
       content,
@@ -60,31 +59,6 @@ export function appendConversationMessage(thread, message, { id, now }) {
   if (saved.role === "user" && saved.nodeId !== saved.id) {
     invalidateDescendantSessions(thread.messages, saved.nodeId);
   }
-  thread.updatedAt = now;
-  return saved;
-}
-
-export function insertConversationNode(thread, parentNodeId, message, insertBeforeNodeId, { id, now }) {
-  const parent = thread.messages.find(
-    (item) => item.role === "user" && item.id === parentNodeId && (item.nodeId || item.id) === parentNodeId
-  );
-  if (!parent) throw new Error(`parent question not found: ${parentNodeId}`);
-
-  const saved = createConversationMessage({ ...message, nodeId: null, parentId: parentNodeId }, { id, now });
-  const reparentedNodeIds = new Set();
-  for (const existing of thread.messages) {
-    if (
-      existing.role === "user" &&
-      existing.id === (existing.nodeId || existing.id) &&
-      existing.parentId === parentNodeId &&
-      (!insertBeforeNodeId || existing.nodeId === insertBeforeNodeId)
-    ) {
-      existing.parentId = saved.nodeId;
-      reparentedNodeIds.add(existing.nodeId || existing.id);
-    }
-  }
-  invalidateNodeSessions(thread.messages, descendantNodeIdsForRoots(thread.messages, reparentedNodeIds));
-  thread.messages.push(saved);
   thread.updatedAt = now;
   return saved;
 }
@@ -134,10 +108,22 @@ export function updateConversationMessage(thread, messageId, patch, now) {
 export function updateConversationMessageMeta(thread, messageId, metaPatch, now) {
   const message = requireMessage(thread, messageId);
   if (message.role !== "user") throw new Error("only user questions can store planning metadata");
-  message.meta = { ...(message.meta || {}), ...metaPatch };
+  message.meta = { ...(message.meta || {}), ...normalizeConversationMetaPatch(metaPatch) };
   message.updatedAt = now;
   thread.updatedAt = now;
   return message;
+}
+
+export function normalizeConversationMetaPatch(value) {
+  const patch = value && typeof value === "object" ? value : {};
+  const meta = {};
+  if (Object.hasOwn(patch, "nodeKind")) {
+    if (!CONVERSATION_NODE_KINDS.has(patch.nodeKind)) {
+      throw new ConversationRuleError("unsupported node kind");
+    }
+    meta.nodeKind = patch.nodeKind;
+  }
+  return meta;
 }
 
 export function deleteConversationMessage(thread, messageId, now) {
@@ -225,11 +211,12 @@ export class ConversationConflictError extends Error {
   }
 }
 
-function normalizePlacement(command) {
-  const insertBeforeNodeId = optionalId(command.insertBeforeNodeId);
-  if (insertBeforeNodeId) return { kind: "insert", insertBeforeNodeId };
-  if (command.adoptExistingChildren === true) return { kind: "adopt-children", insertBeforeNodeId: null };
-  return { kind: "append", insertBeforeNodeId: null };
+function assertAppendOnlyPlacement(command) {
+  if (Object.hasOwn(command, "adoptExistingChildren") || Object.hasOwn(command, "insertBeforeNodeId")) {
+    throw new ConversationRuleError(
+      "custom node placement is no longer supported; new nodes are always appended directly to their parent"
+    );
+  }
 }
 
 function normalizeBranchSelection(value) {
@@ -294,14 +281,6 @@ function descendantNodeIds(messages, rootNodeId) {
     }
   }
   return ids;
-}
-
-function descendantNodeIdsForRoots(messages, roots) {
-  const descendants = new Set();
-  for (const root of roots) {
-    for (const nodeId of descendantNodeIds(messages, root)) descendants.add(nodeId);
-  }
-  return descendants;
 }
 
 function invalidateNodeAndDescendants(messages, nodeId) {

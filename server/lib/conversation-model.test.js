@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   ConversationRuleError,
   appendConversationMessage,
+  normalizeConversationMetaPatch,
   planConversationQuestion
 } from "./conversation-model.js";
 
@@ -21,19 +22,17 @@ function rootThread() {
   };
 }
 
-test("question planning owns branch placement and selection validation", () => {
+test("question planning appends directly to the parent and validates selections", () => {
   const thread = rootThread();
   const planned = planConversationQuestion(thread, {
     content: "follow up",
     parentMessageId: "root",
-    adoptExistingChildren: true,
     branchSelection: {
       sourceMessageId: "root",
       text: "root"
     }
   });
 
-  assert.equal(planned.placement.kind, "adopt-children");
   assert.equal(planned.message.parentId, "root");
   assert.deepEqual(planned.message.meta.branchSelection, {
     sourceMessageId: "root",
@@ -41,16 +40,32 @@ test("question planning owns branch placement and selection validation", () => {
   });
 });
 
-test("question planning rejects invalid insertion targets at the domain boundary", () => {
+test("planning metadata is validated by the domain model", () => {
+  assert.deepEqual(normalizeConversationMetaPatch({ nodeKind: "decision" }), {
+    nodeKind: "decision"
+  });
   assert.throws(
-    () =>
-      planConversationQuestion(rootThread(), {
-        content: "invalid",
-        parentMessageId: "root",
-        insertBeforeNodeId: "missing"
-      }),
+    () => normalizeConversationMetaPatch({ nodeKind: "unsupported" }),
     (error) => error instanceof ConversationRuleError && error.statusCode === 400
   );
+});
+
+test("question planning rejects obsolete placement controls at the domain boundary", () => {
+  for (const legacyPlacement of [
+    { adoptExistingChildren: false },
+    { adoptExistingChildren: true },
+    { insertBeforeNodeId: null },
+    { insertBeforeNodeId: "child" }
+  ]) {
+    assert.throws(
+      () => planConversationQuestion(rootThread(), {
+        content: "invalid",
+        parentMessageId: "root",
+        ...legacyPlacement
+      }),
+      (error) => error instanceof ConversationRuleError && error.statusCode === 400
+    );
+  }
 });
 
 test("continuing a node invalidates descendant sessions", () => {

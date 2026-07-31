@@ -1,34 +1,54 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api } from "../api.ts";
+import { DocumentSessionScope } from "../document-session-scope.ts";
+import type { DocumentSessionOperation } from "../document-session-scope.ts";
 import type { PermissionRequest } from "../types";
 
 type PermissionInboxOptions = {
   setStatus: (status: string) => void;
+  sessionKey: string | null;
   pollIntervalMs?: number;
 };
 
 export function usePermissionInbox({
   setStatus,
+  sessionKey,
   pollIntervalMs = 900
 }: PermissionInboxOptions) {
   const [requests, setRequests] = useState<PermissionRequest[]>([]);
   const [resolvingIds, setResolvingIds] = useState<Set<string>>(() => new Set());
+  const sessionScopeRef = useRef(new DocumentSessionScope());
+  const sessionKeyRef = useRef(sessionKey);
+  sessionKeyRef.current = sessionKey;
 
   const replaceRequests = useCallback((next: PermissionRequest[]) => {
     setRequests((current) => samePermissionRequests(current, next) ? current : next);
   }, []);
 
   useEffect(() => {
+    sessionScopeRef.current.advance();
+    replaceRequests([]);
+    setResolvingIds(new Set());
+  }, [sessionKey, replaceRequests]);
+
+  useEffect(() => () => sessionScopeRef.current.dispose(), []);
+
+  useEffect(() => {
     let stopped = false;
     let timer: number | null = null;
 
     async function poll() {
+      const operation = capturePermissionOperation(sessionKey, sessionScopeRef.current);
       try {
-        const payload = await api.permissions();
-        if (!stopped) replaceRequests(payload.requests);
+        const payload = await api.permissions(operation.signal);
+        if (!stopped && isPermissionOperationCurrent(operation, sessionKeyRef.current, sessionScopeRef.current)) {
+          replaceRequests(payload.requests);
+        }
       } catch {
-        if (!stopped) replaceRequests([]);
+        if (!stopped && isPermissionOperationCurrent(operation, sessionKeyRef.current, sessionScopeRef.current)) {
+          replaceRequests([]);
+        }
       } finally {
         if (!stopped) timer = window.setTimeout(poll, pollIntervalMs);
       }
@@ -39,31 +59,42 @@ export function usePermissionInbox({
       stopped = true;
       if (timer !== null) window.clearTimeout(timer);
     };
-  }, [pollIntervalMs, replaceRequests]);
+  }, [pollIntervalMs, replaceRequests, sessionKey]);
 
   async function resolve(requestId: string, optionId: string | null) {
+    const operation = capturePermissionOperation(sessionKey, sessionScopeRef.current);
     setResolvingIds((current) => new Set(current).add(requestId));
     setStatus(optionId ? "正在发送权限决定" : "正在取消权限请求");
     try {
       const payload = await api.resolvePermission(
         requestId,
-        optionId ? { optionId } : { cancelled: true }
+        optionId ? { optionId } : { cancelled: true },
+        operation.signal
       );
+      if (!isPermissionOperationCurrent(operation, sessionKeyRef.current, sessionScopeRef.current)) return;
       replaceRequests(payload.requests);
       setStatus("权限决定已发送");
     } catch (error) {
+      if (!isPermissionOperationCurrent(operation, sessionKeyRef.current, sessionScopeRef.current)) return;
       setStatus(error instanceof Error ? error.message : String(error));
       try {
-        replaceRequests((await api.permissions()).requests);
+        const payload = await api.permissions(operation.signal);
+        if (isPermissionOperationCurrent(operation, sessionKeyRef.current, sessionScopeRef.current)) {
+          replaceRequests(payload.requests);
+        }
       } catch {
-        replaceRequests([]);
+        if (isPermissionOperationCurrent(operation, sessionKeyRef.current, sessionScopeRef.current)) {
+          replaceRequests([]);
+        }
       }
     } finally {
-      setResolvingIds((current) => {
-        const next = new Set(current);
-        next.delete(requestId);
-        return next;
-      });
+      if (isPermissionOperationCurrent(operation, sessionKeyRef.current, sessionScopeRef.current)) {
+        setResolvingIds((current) => {
+          const next = new Set(current);
+          next.delete(requestId);
+          return next;
+        });
+      }
     }
   }
 
@@ -72,6 +103,25 @@ export function usePermissionInbox({
     resolvingPermissionIds: resolvingIds,
     resolvePermissionRequest: resolve
   };
+}
+
+type PermissionSessionOperation = DocumentSessionOperation & {
+  sessionKey: string | null;
+};
+
+function capturePermissionOperation(
+  sessionKey: string | null,
+  scope: DocumentSessionScope
+): PermissionSessionOperation {
+  return { ...scope.capture(), sessionKey };
+}
+
+export function isPermissionOperationCurrent(
+  operation: PermissionSessionOperation,
+  currentSessionKey: string | null,
+  scope: DocumentSessionScope
+): boolean {
+  return operation.sessionKey === currentSessionKey && scope.isCurrent(operation);
 }
 
 export function samePermissionRequests(left: PermissionRequest[], right: PermissionRequest[]): boolean {

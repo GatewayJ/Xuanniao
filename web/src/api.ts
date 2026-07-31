@@ -25,59 +25,80 @@ export const api = {
   files: () => request<{ root: string; currentPath: string; files: MarkdownFile[] }>("/api/files"),
   browseFiles: (targetPath: string) => request<FileBrowserPayload>(`/api/files/browse?path=${encodeURIComponent(targetPath)}`),
   document: () => request<DocumentPayload>("/api/document"),
-  openDocument: (path: string) => request<{ document: DocumentPayload; threads: Thread[]; files: MarkdownFile[] }>("/api/document/open", {
+  openDocument: (path: string, signal?: AbortSignal) => request<{ document: DocumentPayload; threads: Thread[]; files: MarkdownFile[] }>("/api/document/open", {
     method: "POST",
-    body: { path }
+    body: { path },
+    signal
   }),
-  saveDocument: (content: string, expectedRevision: string, threads?: Array<{ id: string; selectedText: string; anchor: Anchor }>, deletedThreadIds: string[] = []) => request<{ document: DocumentPayload; threads: Thread[] }>("/api/document", {
+  saveDocument: (
+    documentPath: string,
+    content: string,
+    expectedRevision: string,
+    threads?: Array<{ id: string; selectedText: string; anchor: Anchor }>,
+    deletedThreadIds: string[] = [],
+    signal?: AbortSignal
+  ) => request<{ document: DocumentPayload; threads: Thread[] }>("/api/document", {
     method: "PUT",
-    body: { content, expectedRevision, threads, deletedThreadIds }
+    body: { documentPath, content, expectedRevision, threads, deletedThreadIds },
+    signal
   }),
-  threads: () => request<{ threads: Thread[] }>("/api/threads"),
-  createThread: (body: { title: string; selectedText: string; anchor: unknown }) =>
+  threads: (signal?: AbortSignal) => request<{ threads: Thread[] }>("/api/threads", { signal }),
+  createThread: (body: { documentPath: string; title: string; selectedText: string; anchor: unknown; expectedRevision: string }, signal?: AbortSignal) =>
     request<{ thread: Thread }>("/api/threads", {
       method: "POST",
-      body
+      body,
+      signal
     }),
-  deleteThread: (threadId: string) =>
+  deleteThread: (threadId: string, signal?: AbortSignal) =>
     request<{ threads: Thread[] }>(`/api/threads/${encodeURIComponent(threadId)}`, {
-      method: "DELETE"
+      method: "DELETE",
+      signal
     }),
-  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null; adoptExistingChildren?: boolean; insertBeforeNodeId?: string | null }) =>
+  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null }, signal?: AbortSignal) =>
     request<{ userMessage: Message; assistantMessage: Message | null; agentOutcome: AgentOutcome; threads: Thread[]; document?: DocumentPayload | null }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages`,
       {
         method: "POST",
-        body
+        body,
+        signal
       }
     ),
-  updateMessage: (threadId: string, messageId: string, body: { content: string; rerunAgent?: boolean }) =>
+  updateMessage: (threadId: string, messageId: string, body: { content: string; rerunAgent?: boolean }, signal?: AbortSignal) =>
     request<{ message: Message; assistantMessage: Message | null; agentOutcome: AgentOutcome; threads: Thread[]; document?: DocumentPayload | null }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,
       {
         method: "PUT",
-        body
+        body,
+        signal
       }
     ),
-  updateMessageMeta: (threadId: string, messageId: string, body: { nodeKind: ConversationNodeKind }) =>
+  updateMessageMeta: (threadId: string, messageId: string, body: { nodeKind: ConversationNodeKind }, signal?: AbortSignal) =>
     request<{ message: Message; threads: Thread[] }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/meta`,
       {
         method: "PATCH",
-        body
+        body,
+        signal
       }
     ),
-  deleteMessage: (threadId: string, messageId: string) =>
+  deleteMessage: (threadId: string, messageId: string, signal?: AbortSignal) =>
     request<{ threads: Thread[] }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,
       {
-        method: "DELETE"
+        method: "DELETE",
+        signal
       }
     ),
-  permissions: () => request<{ requests: PermissionRequest[] }>("/api/permissions"),
-  resolvePermission: (requestId: string, body: { optionId?: string; cancelled?: boolean }) =>
+  permissions: (signal?: AbortSignal) =>
+    request<{ requests: PermissionRequest[] }>("/api/permissions", { signal }),
+  resolvePermission: (
+    requestId: string,
+    body: { optionId?: string; cancelled?: boolean },
+    signal?: AbortSignal
+  ) =>
     request<{ requests: PermissionRequest[] }>(`/api/permissions/${encodeURIComponent(requestId)}/resolve`, {
       method: "POST",
-      body
+      body,
+      signal
     })
 };

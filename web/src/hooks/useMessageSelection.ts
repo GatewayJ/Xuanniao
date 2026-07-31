@@ -13,21 +13,18 @@ export type MessageSelectionPopover = BranchSelection & {
   top: number;
   highlightRects: Array<{ left: number; top: number; width: number; height: number }>;
   prompt: string;
-  insertBeforeNodeId: string | null;
 };
 
 type MessageSelectionOptions = {
   inspectorRef: { current: HTMLElement | null };
   canvasScaleRef: { current: { scale: number } };
   selectedNodeId: string | null;
-  defaultRouteChoice: (nodeId: string) => string | null;
 };
 
 export function useMessageSelection({
   inspectorRef,
   canvasScaleRef,
-  selectedNodeId,
-  defaultRouteChoice
+  selectedNodeId
 }: MessageSelectionOptions) {
   const selectionComposerRef = useRef<HTMLInputElement | null>(null);
   const selectingMessageRef = useRef<HTMLElement | null>(null);
@@ -37,10 +34,8 @@ export function useMessageSelection({
   const captureSelectionRef = useRef<() => void>(() => undefined);
   const selectionActiveRef = useRef(false);
   const selectedNodeIdRef = useRef(selectedNodeId);
-  const defaultRouteChoiceRef = useRef(defaultRouteChoice);
   const [selectionPopover, setSelectionPopover] = useState<MessageSelectionPopover | null>(null);
   selectedNodeIdRef.current = selectedNodeId;
-  defaultRouteChoiceRef.current = defaultRouteChoice;
 
   useEffect(() => {
     function keepSelectionInsideMessage(event: PointerEvent) {
@@ -191,8 +186,7 @@ export function useMessageSelection({
         ),
         top: clamp(preferredTop, 58, inspectorHeight - 112),
         highlightRects,
-        prompt: "",
-        insertBeforeNodeId: defaultRouteChoiceRef.current(nodeId)
+        prompt: ""
       });
     });
   }

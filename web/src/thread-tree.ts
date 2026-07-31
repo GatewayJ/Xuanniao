@@ -15,11 +15,6 @@ export type ConversationNavigation = {
   down: ConversationNode | null;
 };
 
-export type ConversationRoute = {
-  kind: "new-child" | "insert" | "choose";
-  insertBeforeNodeId: string | null;
-};
-
 export type ConversationNodeStatus = "unanswered" | "thinking" | "answered" | "failed";
 
 export const CONVERSATION_NODE_KINDS: ConversationNodeKind[] = [
@@ -78,24 +73,8 @@ export function flattenConversationTree(roots: ConversationNode[]): Conversation
   return flattened;
 }
 
-export function reparentDirectChildNodes(messages: Message[], parentNodeId: string, nextParentNodeId: string): Message[] {
-  return messages.map((message) => (
-    message.role === "user"
-    && message.id === (message.nodeId || message.id)
-    && message.parentId === parentNodeId
-      ? { ...message, parentId: nextParentNodeId }
-      : message
-  ));
-}
-
-export function reparentConversationNode(messages: Message[], nodeId: string, nextParentNodeId: string): Message[] {
-  return messages.map((message) => (
-    message.role === "user"
-    && message.id === (message.nodeId || message.id)
-    && (message.nodeId || message.id) === nodeId
-      ? { ...message, parentId: nextParentNodeId }
-      : message
-  ));
+export function conversationNodeCanBranch(node: ConversationNode): boolean {
+  return node.children.length > 0;
 }
 
 export function conversationNavigation(roots: ConversationNode[], nodeId: string): ConversationNavigation {
@@ -126,16 +105,6 @@ export function conversationBreadcrumb(roots: ConversationNode[], nodeId: string
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
   return path.reverse();
-}
-
-export function defaultConversationRoute(node: ConversationNode): ConversationRoute {
-  if (node.children.length === 0) {
-    return { kind: "new-child", insertBeforeNodeId: null };
-  }
-  if (node.children.length === 1) {
-    return { kind: "insert", insertBeforeNodeId: node.children[0].id };
-  }
-  return { kind: "choose", insertBeforeNodeId: null };
 }
 
 export function conversationNodeStatus(node: ConversationNode): ConversationNodeStatus {
