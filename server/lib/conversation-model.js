@@ -103,7 +103,7 @@ export function completeConversationAgentTurn(
     throw new Error(`assistant reply already exists for question: ${userMessageId}`);
   }
   if (expectedBranchRevision && branchRevisionForQuestion(thread, userMessageId) !== expectedBranchRevision) {
-    throw new Error("conversation branch changed while the agent was working; retry the question");
+    throw new ConversationConflictError("conversation branch changed while the agent was working; retry the question");
   }
 
   const question = thread.messages[questionIndex];
@@ -213,6 +213,15 @@ export class ConversationRuleError extends Error {
     this.name = "ConversationRuleError";
     this.code = "CONVERSATION_RULE";
     this.statusCode = 400;
+  }
+}
+
+export class ConversationConflictError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ConversationConflictError";
+    this.code = "CONVERSATION_CONFLICT";
+    this.statusCode = 409;
   }
 }
 

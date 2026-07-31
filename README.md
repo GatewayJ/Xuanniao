@@ -25,15 +25,13 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 
 ### 讨论树总览
 
-点击 Thread 进入全屏画布。节点底部的 `＋ 分支` 创建新的子分支，连线上的 `＋` 在指定路径中插入节点。
+点击 Thread 进入全屏画布。tree 总览和节点 content 都提供“子节点 / 分支”入口，连线上的 `＋` 可以直接在指定路径中插入节点。
 
 [![多叉讨论树](docs/images/xuanniao-thread-tree.png)](docs/images/xuanniao-thread-tree.png)
 
-### 节点焦点与路径预览
+### 文档、节点内容与 Tree 联动
 
-点击节点后，节点在同一画布中进入焦点模式。输入问题时会同时显示路线预览和幽灵节点；可以选择新建分支，或插入某条既有路径。
-
-[![节点焦点、缩略图与路径插入预览](docs/images/xuanniao-node-focus.png)](docs/images/xuanniao-node-focus.png)
+Thread 工作区采用三栏布局：左侧预览锚定文档，中间显示当前节点的问题、回答和输入区，右侧展示完整 Tree。点击 Tree 节点会同步中间内容和高亮状态；两条分隔线都可以拖动调整栏宽。输入问题时会显示路线预览和幽灵节点，可以选择新建分支或插入某条既有路径。
 
 ## 交互语义
 
@@ -55,12 +53,15 @@ A → B → C
 A → B → D → C
 ```
 
-- 点击节点：进入该节点的阅读与追问焦点。
-- 点击节点底部 `＋ 分支`：创建新的子分支，不移动既有子节点。
+- 点击节点：在中间 content 栏打开该节点，并在右侧 Tree 中保持高亮。
+- 点击节点底部 `＋ 子节点`：创建子节点；存在既有路径时继续或选择要插入的路径。
+- 点击节点底部 `⑂ 分支`：创建新的独立分支，不移动既有子节点。
+- 节点 content 输入区也可随时切换“子节点 / 分支”。
 - 点击连线 `＋`：在父子节点之间插入新节点。
 - 节点没有子节点时直接创建子节点；只有一个子节点时默认继续当前路径；存在多个子节点时必须选择插入路径或另建分支。
 - 划选问题或回答中的文字：出现带引用的内联提问框。
-- `Esc`：从节点焦点返回树总览，再次按下关闭 Thread 工作区。
+- `Esc`：先关闭当前节点 content，再次按下关闭 Thread 工作区。
+- 拖动栏间分隔线：调整文档、content 与 Tree 的宽度。
 - 拖动背景：平移画布。
 - 普通滚轮：移动画布。
 - `Command/Ctrl + 滚轮`：缩放画布。
@@ -183,7 +184,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 - 浏览器锚点只作为候选位置，服务端根据保存后的正文重新校验并生成 canonical anchor。
 - 活动 Markdown 文档是受保护资源：ACP 文件写直接拒绝；所有 Agent 回合结束后还会校验 revision，并恢复绕过文档事务的直接写入。
 - 文档切换采用请求级上下文快照，旧请求不会写入新文档；Thread metadata 通过临时文件和原子 rename 落盘。
-- 原生 turn 超时后先发送 `turn/interrupt`；若 Codex 未在宽限期内停止，会重启 Runtime，避免后台操作继续执行。
+- 原生 turn 使用活动空闲超时：输出、工具事件等活动会自动续期，等待用户审批时暂停计时；连续无活动超时后先发送 `turn/interrupt`，若 Codex 未在宽限期内停止，会重启 Runtime，避免后台操作继续执行。
 
 ACP 仍作为兼容传输保留，但不支持原生 thread fork，且同一 adapter 进程内的请求会串行执行。Local-first 表示文档和玄鸟元数据保存在本机；模型与网络行为取决于 Codex CLI 或所选 adapter 的配置。
 
@@ -232,7 +233,7 @@ XUANNIAO_ACP_SKIP_AUTH=1 \
 npm start -- prd.md
 ```
 
-调整通用请求超时；ACP 也可以单独覆盖：
+调整活动空闲超时（默认 10 分钟）；ACP 兼容模式仍将其作为请求总超时，也可以单独覆盖：
 
 ```bash
 XUANNIAO_AGENT_TIMEOUT_MS=300000 npm start -- prd.md

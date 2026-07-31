@@ -505,6 +505,7 @@ export function App() {
           onSaveEdit={conversation.saveEditedMessage}
           onUpdateMessageMeta={conversation.updateMessageMeta}
           onRetryAssistant={conversation.retryAssistantReply}
+          onRequestAssistant={conversation.requestAssistantReply}
           onDeleteMessage={conversation.deleteMessage}
           onResolvePermission={resolvePermissionRequest}
           onSpatialScroll={syncDocumentScrollFromThreadRail}

@@ -82,19 +82,18 @@ export function useConversationCommands({
   async function saveEditedMessage(threadId: string, messageId: string) {
     const content = editText.trim();
     if (!content) return;
-    const rerunAgent = hasAssistantReplyAfter(threadsRef.current, threadId, messageId);
     setThreads((current) =>
-      updateMessageWithPendingReply(current, threadId, messageId, content, rerunAgent)
+      updateMessageWithPendingReply(current, threadId, messageId, content, true)
     );
     setEditingMessage(null);
     setEditText("");
-    setStatus(rerunAgent ? "正在更新 Codex 回答" : "评论已更新");
+    setStatus("正在更新 Codex 回答");
     try {
-      const payload = await api.updateMessage(threadId, messageId, { content, rerunAgent });
+      const payload = await api.updateMessage(threadId, messageId, { content, rerunAgent: true });
       setThreads(payload.threads);
       const documentApplied = payload.document ? applyDocument(payload.document) : true;
       if (documentApplied) {
-        setStatus(statusForOutcome(payload.agentOutcome, payload.assistantMessage ? "Codex 已回答" : "评论已更新"));
+        setStatus(statusForOutcome(payload.agentOutcome, "Codex 已回答"));
       }
     } catch (error) {
       await recoverThreads(error);
@@ -135,7 +134,24 @@ export function useConversationCommands({
       return;
     }
 
-    setStatus("正在重试 Codex");
+    await requestAssistantReply(threadId, userMessage.id, "正在重试 Codex");
+  }
+
+  async function requestAssistantReply(
+    threadId: string,
+    userMessageId: string,
+    pendingStatus = "正在询问 Codex"
+  ) {
+    const thread = threadsRef.current.find((item) => item.id === threadId);
+    const userMessage = thread?.messages.find(
+      (message) => message.id === userMessageId && message.role === "user"
+    );
+    if (!userMessage) {
+      setStatus("没有找到需要 Codex 回答的问题");
+      return;
+    }
+
+    setStatus(pendingStatus);
     setThreads((current) =>
       updateMessageWithPendingReply(current, threadId, userMessage.id, userMessage.content, true)
     );
@@ -231,6 +247,7 @@ export function useConversationCommands({
     saveEditedMessage,
     updateMessageMeta,
     retryAssistantReply,
+    requestAssistantReply,
     deleteMessage
   };
 }

@@ -17,7 +17,7 @@ export function createAgentRuntime({ documentPath, cwd, env = process.env }) {
     documentPath,
     cwd,
     accessMode: normalizeAgentMode(env.XUANNIAO_AGENT_MODE),
-    timeoutMs: numberFromEnv(env.XUANNIAO_AGENT_TIMEOUT_MS, 180_000),
+    timeoutMs: numberFromEnv(env.XUANNIAO_AGENT_TIMEOUT_MS, 600_000),
     contextMaxChars: integerFromEnv(env.XUANNIAO_AGENT_CONTEXT_MAX_CHARS, 1_500_000),
     snapshotCacheEntries: integerFromEnv(env.XUANNIAO_AGENT_SNAPSHOT_CACHE_ENTRIES, 32),
     env

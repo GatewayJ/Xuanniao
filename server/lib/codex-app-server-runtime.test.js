@@ -247,6 +247,98 @@ test("native turn timeout interrupts the remote turn before releasing it", async
   runtime.dispose();
 });
 
+test("native turn inactivity timeout is refreshed by Codex activity", async () => {
+  const runtime = new CodexAppServerRuntime({
+    documentPath: "/tmp/plan.md",
+    cwd: "/tmp",
+    timeoutMs: 50,
+    interruptGraceMs: 100
+  });
+  const writes = [];
+  runtime.process = {
+    killed: false,
+    stdin: {
+      writable: true,
+      write: (line) => writes.push(JSON.parse(line))
+    },
+    kill() {
+      this.killed = true;
+    }
+  };
+
+  const completed = runtime.waitForTurn("thread-1", "turn-active");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  runtime.handleNotification({
+    method: "item/agentMessage/delta",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-active",
+      delta: "Still working"
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(writes, []);
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-1",
+      turn: { id: "turn-active", status: "completed" }
+    }
+  });
+
+  const result = await completed;
+  assert.equal(result.content, "Still working");
+  runtime.dispose();
+});
+
+test("native turn inactivity timeout pauses for an approval with a stale turn id", async () => {
+  const runtime = new CodexAppServerRuntime({
+    documentPath: "/tmp/plan.md",
+    cwd: "/tmp",
+    timeoutMs: 20,
+    interruptGraceMs: 100
+  });
+  const writes = [];
+  runtime.process = {
+    killed: false,
+    stdin: {
+      writable: true,
+      write: (line) => writes.push(JSON.parse(line))
+    },
+    kill() {
+      this.killed = true;
+    }
+  };
+
+  const completed = runtime.waitForTurn("thread-approval", "turn-approval");
+  runtime.handleServerRequest({
+    id: 42,
+    method: "execCommandApproval",
+    params: {
+      conversationId: "thread-approval",
+      turnId: "stale-turn-id",
+      callId: "call-1",
+      command: ["npm", "test"]
+    }
+  });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.deepEqual(writes, []);
+
+  const [request] = runtime.listPermissionRequests();
+  runtime.resolvePermissionRequest(request.id, { optionId: "accept" });
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-approval",
+      turn: { id: "turn-approval", status: "completed" }
+    }
+  });
+
+  await completed;
+  assert.deepEqual(writes, [{ id: 42, result: { decision: "approved" } }]);
+  runtime.dispose();
+});
+
 test("native runtime restarts after an interrupted turn never reaches a terminal state", async () => {
   const runtime = new CodexAppServerRuntime({
     documentPath: "/tmp/plan.md",

@@ -1,4 +1,4 @@
-import { planConversationQuestion } from "./conversation-model.js";
+import { ConversationConflictError, planConversationQuestion } from "./conversation-model.js";
 import { branchThreadForQuestion } from "./thread-tree.js";
 
 export class ConversationService {
@@ -14,6 +14,7 @@ export class ConversationService {
     this.agent = agent;
     this.controlledReplacement = controlledReplacement;
     this.onAgentError = onAgentError;
+    this.activeReplies = new Map();
   }
 
   async addQuestion(threadId, command) {
@@ -54,6 +55,22 @@ export class ConversationService {
       throw error;
     }
 
+    const replyKey = activeReplyKey(threadId, messageId);
+    const activeReply = this.activeReplies.get(replyKey);
+    if (activeReply) {
+      const reply = await activeReply.promise;
+      if (rerunAgent && activeReply.content === normalizedContent) {
+        const thread = await this.threadStore.get(threadId);
+        const message = thread.messages.find((item) => item.id === messageId && item.role === "user");
+        if (!message) throw new Error(`question message not found: ${messageId}`);
+        return {
+          message,
+          ...reply,
+          threads: await this.threadStore.list()
+        };
+      }
+    }
+
     const shouldRerunAgent = rerunAgent || (await this.threadStore.hasAssistantAfter(threadId, messageId));
     const message = await this.threadStore.updateMessage(threadId, messageId, {
       content: normalizedContent
@@ -74,7 +91,24 @@ export class ConversationService {
     };
   }
 
-  async createAssistantReply(threadId, content, questionMessageId) {
+  createAssistantReply(threadId, content, questionMessageId) {
+    const key = activeReplyKey(threadId, questionMessageId);
+    const activeReply = this.activeReplies.get(key);
+    if (activeReply?.content === content) return activeReply.promise;
+
+    const task = activeReply
+      ? activeReply.promise.catch(() => {}).then(() => this.runAssistantReply(threadId, content, questionMessageId))
+      : this.runAssistantReply(threadId, content, questionMessageId);
+    const trackedTask = task.finally(() => {
+      if (this.activeReplies.get(key)?.promise === trackedTask) {
+        this.activeReplies.delete(key);
+      }
+    });
+    this.activeReplies.set(key, { content, promise: trackedTask });
+    return trackedTask;
+  }
+
+  async runAssistantReply(threadId, content, questionMessageId) {
     let updatedDocument = null;
     let assistantMessage;
     let agentOutcome = "completed";
@@ -142,6 +176,7 @@ export class ConversationService {
         thread.revision
       );
     } catch (initialError) {
+      if (initialError instanceof ConversationConflictError) throw initialError;
       let error = initialError;
       if (agentSnapshot && !snapshotVerified) {
         try {
@@ -176,6 +211,10 @@ export class ConversationService {
       document: updatedDocument
     };
   }
+}
+
+function activeReplyKey(threadId, questionMessageId) {
+  return `${threadId}:${questionMessageId}`;
 }
 
 function agentFailureContent(errorMessage) {

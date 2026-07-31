@@ -90,8 +90,10 @@ flowchart LR
 - 按文档位置排列评论卡片。
 - 与 Edit/Preview 的滚动位置同步。
 - 点击 thread 跳到对应文本，双击展开或折叠消息。
+- Thread 工作区按“文档预览 / 节点 content / Tree”三栏联动展示，两条分隔线支持拖动或键盘调整宽度。
+- Tree 总览和节点 content 都提供创建子节点与独立分支的入口。
 - 上一个/下一个 thread 导航。
-- 编辑用户消息；如果其后已有 Codex 回复，则删除旧回复并重新询问。
+- 编辑用户问题并保存时始终重新询问 Codex；刷新后未回答的节点可显式恢复请求。
 - 重试或删除 Codex 回复。
 - 删除完整 thread。
 
@@ -319,7 +321,7 @@ Codex 的 command、file change 和 additional permissions 请求会转成统一
 
 Runtime 保留 agent message delta 和 item 生命周期更新；当前 HTTP API 在 turn 完成后一次性返回正文，前端流式展示仍是后续工作。
 
-turn 超时后 Runtime 会发送 `turn/interrupt` 并继续持有当前 session lock；若宽限期内仍收不到终态，则重启 app-server 并失败掉其它在途 turn，确保超时任务不能在后台继续修改工作区。迟到事件和抢跑事件均有数量边界。
+原生 turn 使用 10 分钟活动空闲超时，Agent 输出和工具事件会自动续期，等待用户审批时暂停计时。连续无活动超时后 Runtime 会发送 `turn/interrupt` 并继续持有当前 session lock；若宽限期内仍收不到终态，则重启 app-server 并失败掉其它在途 turn，确保超时任务不能在后台继续修改工作区。迟到事件和抢跑事件均有数量边界。
 
 ### 6.6 ACP 兼容模式
 
@@ -510,7 +512,7 @@ Node Server 检测到 `web/dist/index.html` 时会提供构建后的静态资源
 | `PORT` | `4173` | Node Server 端口 |
 | `XUANNIAO_AGENT_TRANSPORT` | `codex` | `codex` 原生模式或 `acp` 兼容模式 |
 | `XUANNIAO_AGENT_MODE` | `full-access` | `full-access` 或 `read-only` |
-| `XUANNIAO_AGENT_TIMEOUT_MS` | `180000` | 通用 Runtime request/turn 超时 |
+| `XUANNIAO_AGENT_TIMEOUT_MS` | `600000` | 原生 turn 活动空闲超时；ACP request 总超时 |
 | `XUANNIAO_CODEX_CMD` | `codex app-server` | 原生 Codex app-server 命令 |
 | `XUANNIAO_CODEX_MODEL` | 未设置 | 可选模型覆盖；默认使用 Codex 配置 |
 | `XUANNIAO_CODEX_REASONING_EFFORT` | 未设置 | 可选推理强度覆盖；默认使用 Codex 配置 |
@@ -539,7 +541,7 @@ npm run check
 - 源码换行、缩进与尾随空白检查
 - Node test runner 单元测试
 
-截至当前代码，97 个测试全部通过。覆盖范围包括：
+截至当前代码，102 个测试全部通过。覆盖范围包括：
 
 - 原生 Codex session start/resume/fork、事件归并、审批挂起和上下文去重
 - ACP 模式映射、文件写权限、session new/load/fallback、审批和启动失败
@@ -607,7 +609,7 @@ load current revision
 2. 已为 Document 增加 revision/hash，保存时检测外部冲突。
 3. 增加文件 watcher；检测外部修改后 reload 或提示冲突，而不是静默覆盖。
 4. 已将 Agent Runtime 改为按需初始化：Runtime 失败时仍能编辑文档，只影响 AI 请求。
-5. Runtime 超时已发送 `turn/interrupt` 并在失败时重启；用户主动取消和更明确的风险说明仍待实现。
+5. Runtime 使用活动空闲超时，等待审批时暂停计时；超时后发送 `turn/interrupt` 并在失败时重启。用户主动取消仍待实现。
 6. 已把 `App.tsx` 中的文档、会话、权限和选区流程拆成面向业务用例的 hooks；服务端会话用例下沉到 ConversationService。
 
 ### Phase 2：实现受控 AI 修改

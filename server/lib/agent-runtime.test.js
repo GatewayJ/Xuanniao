@@ -18,8 +18,10 @@ test("native Codex is the default transport and ACP remains explicit", () => {
 
   assert.ok(native instanceof CodexAppServerRuntime);
   assert.equal(native.commandLine, "codex app-server");
+  assert.equal(native.timeoutMs, 600_000);
   assert.ok(acp instanceof AcpDocumentAgent);
   assert.equal(acp.commandLine, "codex-acp");
+  assert.equal(acp.timeoutMs, 600_000);
 });
 
 test("transport and timeout configuration fails fast on invalid values", () => {

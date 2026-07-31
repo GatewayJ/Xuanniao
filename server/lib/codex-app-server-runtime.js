@@ -17,7 +17,7 @@ export class CodexAppServerRuntime {
     cwd,
     commandLine = "codex app-server",
     accessMode = "full-access",
-    timeoutMs = 180_000,
+    timeoutMs = 600_000,
     interruptGraceMs = 5_000,
     model = null,
     reasoningEffort = null,
@@ -114,6 +114,11 @@ export class CodexAppServerRuntime {
     }
     this.pendingPermissions.delete(id);
     this.writeMessage({ id: permission.requestId, result: selected });
+    const turn = (permission.turnId ? this.turns.get(permission.turnId) : null)
+      || [...this.turns.values()].find((candidate) => candidate.threadId === permission.sessionId);
+    if (turn && !this.hasPendingPermissionsForTurn(turn)) {
+      this.refreshTurnTimeout(turn);
+    }
   }
 
   async runTurn({ question, document, thread, mode = "chat" }) {
@@ -331,11 +336,14 @@ export class CodexAppServerRuntime {
   queueApproval(message, approval) {
     const id = randomUUID();
     const sessionId = message.params?.threadId || message.params?.conversationId || message.params?.sessionId || "";
-    const activeTurn = [...this.turns.values()].find((turn) => turn.threadId === sessionId);
-    const turnId = message.params?.turnId || activeTurn?.turnId || null;
+    const requestedTurnId = message.params?.turnId || null;
+    const activeTurn = (requestedTurnId ? this.turns.get(requestedTurnId) : null)
+      || [...this.turns.values()].find((turn) => turn.threadId === sessionId);
+    const turnId = activeTurn?.turnId || requestedTurnId || null;
     const owner = this.threadOwners.get(sessionId) || sessionId;
     this.pendingPermissions.set(id, {
       requestId: message.id,
+      sessionId,
       turnId,
       options: new Map(approval.options.map((option) => [option.optionId, option.result])),
       cancelOption: approval.cancelResult,
@@ -352,6 +360,7 @@ export class CodexAppServerRuntime {
         createdAt: new Date().toISOString()
       }
     });
+    if (activeTurn) this.pauseTurnTimeout(activeTurn);
   }
 
   handleNotification(message) {
@@ -403,8 +412,8 @@ export class CodexAppServerRuntime {
           reject(error);
         }
       };
-      state.timer = setTimeout(() => this.timeoutTurn(state), this.timeoutMs);
       this.turns.set(turnId, state);
+      this.refreshTurnTimeout(state);
       for (const event of this.earlyTurnEvents.get(turnId) || []) {
         this.applyTurnEvent(state, event);
       }
@@ -412,9 +421,35 @@ export class CodexAppServerRuntime {
     });
   }
 
+  refreshTurnTimeout(state) {
+    if (
+      state.settled
+      || state.timeoutError
+      || this.turns.get(state.turnId) !== state
+      || this.hasPendingPermissionsForTurn(state)
+    ) return;
+    clearTimeout(state.timer);
+    state.timer = setTimeout(() => this.timeoutTurn(state), this.timeoutMs);
+  }
+
+  pauseTurnTimeout(state) {
+    if (!state || state.settled || this.turns.get(state.turnId) !== state) return;
+    clearTimeout(state.timer);
+    state.timer = null;
+  }
+
+  hasPendingPermissionsForTurn(state) {
+    return [...this.pendingPermissions.values()].some((permission) => (
+      permission.turnId === state.turnId
+      || (!permission.turnId && permission.sessionId === state.threadId)
+    ));
+  }
+
   timeoutTurn(state) {
     if (state.settled || this.turns.get(state.turnId) !== state || state.timeoutError) return;
-    state.timeoutError = new Error(`Codex turn timed out and was interrupted: ${state.turnId}`);
+    state.timeoutError = new Error(
+      `Codex turn timed out and was interrupted after ${this.timeoutMs} ms without activity: ${state.turnId}`
+    );
     this.cancelPendingPermissionsForTurn(state.turnId);
     const interruptTimeoutMs = Math.max(10, Math.min(this.interruptGraceMs, this.timeoutMs));
     void this.request(
@@ -450,6 +485,7 @@ export class CodexAppServerRuntime {
   }
 
   applyTurnEvent(state, { method, params }) {
+    if (method !== "turn/completed") this.refreshTurnTimeout(state);
     if (method === "item/agentMessage/delta") {
       state.chunks.push(params.delta || "");
       return;

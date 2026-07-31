@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -28,8 +29,7 @@ import {
 } from "../thread-tree";
 import type { BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
 
-const THREAD_FOCUS_NODE_WIDTH = 920;
-const THREAD_FOCUS_NODE_HEIGHT = 720;
+const THREAD_PANE_DIVIDER_WIDTH = 6;
 const ROUTE_CHOICE_REQUIRED = "__route_choice_required__";
 
 const NODE_KIND_META: Record<ConversationNodeKind, { label: string; shortLabel: string }> = {
@@ -50,6 +50,7 @@ const NODE_QUICK_ACTIONS = [
 ] as const;
 
 type NodeQuickActionId = typeof NODE_QUICK_ACTIONS[number]["id"];
+type NodeCreationMode = "child" | "branch";
 type ThreadQuestionCommand = Omit<ConversationMessageCommand, "threadId" | "askAgent">;
 
 type ThreadRailProps = {
@@ -70,6 +71,7 @@ type ThreadRailProps = {
   onSaveEdit: (threadId: string, messageId: string) => void;
   onUpdateMessageMeta: (threadId: string, messageId: string, nodeKind: ConversationNodeKind) => void;
   onRetryAssistant: (threadId: string, messageId: string) => void;
+  onRequestAssistant: (threadId: string, messageId: string) => void;
   onDeleteMessage: (threadId: string, messageId: string) => void;
   onResolvePermission: (requestId: string, optionId: string | null) => void;
   onSpatialScroll: (scrollTop: number) => void;
@@ -353,6 +355,7 @@ export function ThreadRail(props: ThreadRailProps) {
           onSaveEdit={props.onSaveEdit}
           onUpdateMessageMeta={props.onUpdateMessageMeta}
           onRetryAssistant={props.onRetryAssistant}
+          onRequestAssistant={props.onRequestAssistant}
           onDeleteMessage={props.onDeleteMessage}
           onResolvePermission={props.onResolvePermission}
           setEditText={props.setEditText}
@@ -380,6 +383,7 @@ function ThreadDetailModal(props: {
   onSaveEdit: (threadId: string, messageId: string) => void;
   onUpdateMessageMeta: (threadId: string, messageId: string, nodeKind: ConversationNodeKind) => void;
   onRetryAssistant: (threadId: string, messageId: string) => void;
+  onRequestAssistant: (threadId: string, messageId: string) => void;
   onDeleteMessage: (threadId: string, messageId: string) => void;
   onResolvePermission: (requestId: string, optionId: string | null) => void;
   setEditText: (value: string) => void;
@@ -390,6 +394,7 @@ function ThreadDetailModal(props: {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const modalBodyRef = useRef<HTMLDivElement | null>(null);
   const documentContextRef = useRef<HTMLElement | null>(null);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const messageSelectionSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -403,25 +408,25 @@ function ThreadDetailModal(props: {
     originX: number;
     originY: number;
   } | null>(null);
+  const paneResizeRef = useRef<{
+    divider: "document-content" | "content-tree";
+    pointerId: number;
+  } | null>(null);
   const tree = useMemo(() => buildConversationTree(props.thread.messages), [props.thread.messages]);
   const nodes = useMemo(() => flattenConversationTree(tree), [tree]);
   const canvasLayout = useMemo(() => layoutConversationTree(tree), [tree]);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [insertBeforeNodeId, setInsertBeforeNodeId] = useState<string | null>(null);
+  const [nodeCreationMode, setNodeCreationMode] = useState<NodeCreationMode>("child");
   const [inspectorOpen, setInspectorOpen] = useState(false);
-  const [minimapCollapsed, setMinimapCollapsed] = useState(true);
+  const [contentPaneElement, setContentPaneElement] = useState<HTMLElement | null>(null);
   const [documentContextOpen, setDocumentContextOpen] = useState(true);
   const [isPanning, setIsPanning] = useState(false);
+  const [resizingPane, setResizingPane] = useState<"document-content" | "content-tree" | null>(null);
+  const [paneWidths, setPaneWidths] = useState({ document: 360, content: 620 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
-  const compactFocusLayout = canvasSize.width > 0 && canvasSize.width <= 700;
-  const focusNodeWidth = compactFocusLayout
-    ? Math.max(320, canvasSize.width - 28)
-    : THREAD_FOCUS_NODE_WIDTH;
-  const focusNodeHeight = compactFocusLayout
-    ? Math.max(520, canvasSize.height - 28)
-    : THREAD_FOCUS_NODE_HEIGHT;
-  const canvasTransformRef = useRef(canvasTransform);
+  const contentScaleRef = useRef({ scale: 1 });
   const {
     selectionPopover,
     setSelectionPopover,
@@ -431,13 +436,12 @@ function ThreadDetailModal(props: {
     clearCapturedMessageSelection
   } = useMessageSelection({
     inspectorRef,
-    canvasScaleRef: canvasTransformRef,
+    canvasScaleRef: contentScaleRef,
     selectedNodeId,
     defaultRouteChoice
   });
   inspectorOpenRef.current = inspectorOpen;
   selectionPopoverOpenRef.current = Boolean(selectionPopover);
-  canvasTransformRef.current = canvasTransform;
   const knownNodeIdsRef = useRef(new Set(nodes.map((node) => node.id)));
   const centeredThreadRef = useRef<string | null>(null);
   const overviewTransformRef = useRef<{ x: number; y: number; scale: number } | null>(null);
@@ -513,6 +517,18 @@ function ThreadDetailModal(props: {
     return () => observer.disconnect();
   }, []);
 
+  useLayoutEffect(() => {
+    const body = modalBodyRef.current;
+    if (!body) return;
+    const updateWidths = () => {
+      setPaneWidths((current) => fitThreadPaneWidths(body.clientWidth, current, documentContextOpen));
+    };
+    updateWidths();
+    const observer = new ResizeObserver(updateWidths);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [documentContextOpen]);
+
   useEffect(() => {
     if (!canvasSize.width || !canvasSize.height) return;
     const isNewThread = centeredThreadRef.current !== props.thread.id;
@@ -536,23 +552,17 @@ function ThreadDetailModal(props: {
   }, [inspectorOpen, nodes, props.permissionRequests.length, selectedNodeId]);
 
   useEffect(() => {
-    if (!inspectorOpen || !canvasSize.width || !canvasSize.height) return;
+    if (!selectedNodeId || !canvasSize.width || !canvasSize.height) return;
     const selectedLayout = selectedNodeId
       ? canvasLayout.nodes.find((item) => item.node.id === selectedNodeId)
       : null;
-    const focusX = selectedLayout?.x || 0;
-    const focusY = selectedLayout?.y || 0;
-    const scale = clamp(Math.min(
-      (canvasSize.width - (compactFocusLayout ? 24 : 56)) / focusNodeWidth,
-      (canvasSize.height - (compactFocusLayout ? 32 : 48)) / focusNodeHeight,
-      1
-    ), 0.35, 1);
-    setCanvasTransform({
-      x: canvasSize.width / 2 - focusX * scale,
-      y: canvasSize.height / 2 - focusY * scale,
-      scale
-    });
-  }, [canvasLayout.nodes, canvasSize, compactFocusLayout, focusNodeHeight, focusNodeWidth, inspectorOpen, selectedNodeId]);
+    if (!selectedLayout) return;
+    setCanvasTransform((current) => ({
+      x: canvasSize.width / 2 - selectedLayout.x * current.scale,
+      y: canvasSize.height / 2 - selectedLayout.y * current.scale,
+      scale: current.scale
+    }));
+  }, [canvasLayout.nodes, canvasSize.height, canvasSize.width, selectedNodeId]);
 
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -656,6 +666,7 @@ function ThreadDetailModal(props: {
   function applyNodeQuickAction(actionId: NodeQuickActionId, forceNewBranch: boolean) {
     if (!selectedNode) return;
     clearCapturedMessageSelection();
+    setNodeCreationMode(forceNewBranch ? "branch" : "child");
     setInsertBeforeNodeId(defaultRouteChoice(selectedNode.id, forceNewBranch));
     props.setMessageDraft(draftKey, promptForNodeQuickAction(actionId, selectedNode));
     window.getSelection()?.removeAllRanges();
@@ -665,6 +676,7 @@ function ThreadDetailModal(props: {
   function openNode(nodeId: string, startComposer = false, forceNewBranch = false) {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(nodeId);
+    setNodeCreationMode(forceNewBranch ? "branch" : "child");
     setInsertBeforeNodeId(defaultRouteChoice(nodeId, forceNewBranch));
     clearCapturedMessageSelection();
     setInspectorOpen(true);
@@ -675,6 +687,7 @@ function ThreadDetailModal(props: {
   function openInsertBetween(parentNodeId: string, childNodeId: string) {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(parentNodeId);
+    setNodeCreationMode("child");
     setInsertBeforeNodeId(childNodeId);
     clearCapturedMessageSelection();
     setInspectorOpen(true);
@@ -685,6 +698,7 @@ function ThreadDetailModal(props: {
   function navigateToNode(nodeId: string | null | undefined) {
     if (!nodeId) return;
     setSelectedNodeId(nodeId);
+    setNodeCreationMode("child");
     setInsertBeforeNodeId(defaultRouteChoice(nodeId));
     clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
@@ -700,6 +714,7 @@ function ThreadDetailModal(props: {
   function closeFocusedNode() {
     setInspectorOpen(false);
     setSelectedNodeId(null);
+    setNodeCreationMode("child");
     setInsertBeforeNodeId(null);
     clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
@@ -712,6 +727,7 @@ function ThreadDetailModal(props: {
   function openRootComposer() {
     if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
     setSelectedNodeId(null);
+    setNodeCreationMode("child");
     setInsertBeforeNodeId(null);
     clearCapturedMessageSelection();
     setInspectorOpen(true);
@@ -804,6 +820,51 @@ function ThreadDetailModal(props: {
     setIsPanning(false);
   }
 
+  function beginPaneResize(
+    event: ReactPointerEvent<HTMLDivElement>,
+    divider: "document-content" | "content-tree"
+  ) {
+    if (event.button !== 0) return;
+    paneResizeRef.current = { divider, pointerId: event.pointerId };
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setResizingPane(divider);
+  }
+
+  function handlePaneResize(event: ReactPointerEvent<HTMLDivElement>) {
+    const resize = paneResizeRef.current;
+    const body = modalBodyRef.current;
+    if (!resize || !body || resize.pointerId !== event.pointerId) return;
+    const rect = body.getBoundingClientRect();
+    const pointerX = clamp(event.clientX - rect.left, 0, rect.width);
+    setPaneWidths((current) => {
+      const next = { ...current };
+      if (resize.divider === "document-content") {
+        next.document = pointerX;
+      } else {
+        next.content = pointerX
+          - (documentContextOpen ? current.document + THREAD_PANE_DIVIDER_WIDTH : 0);
+      }
+      return fitThreadPaneWidths(rect.width, next, documentContextOpen);
+    });
+  }
+
+  function finishPaneResize(event: ReactPointerEvent<HTMLDivElement>) {
+    if (paneResizeRef.current?.pointerId !== event.pointerId) return;
+    paneResizeRef.current = null;
+    setResizingPane(null);
+  }
+
+  function resizePaneWithKeyboard(
+    divider: "document-content" | "content-tree",
+    delta: number
+  ) {
+    const width = modalBodyRef.current?.clientWidth || 0;
+    setPaneWidths((current) => fitThreadPaneWidths(width, {
+      document: current.document + (divider === "document-content" ? delta : 0),
+      content: current.content + (divider === "content-tree" ? delta : 0)
+    }, documentContextOpen));
+  }
+
   function sendQuestion(command: ThreadQuestionCommand) {
     props.onSend({
       ...command,
@@ -842,8 +903,8 @@ function ThreadDetailModal(props: {
     if (!inspectorOpen || !messageDraft.trim() || routeChoiceRequired) return null;
     if (!selectedCanvasItem) return { x: 0, y: 0 };
     return {
-      x: selectedCanvasItem.x + focusNodeWidth / 2 + 132,
-      y: selectedCanvasItem.y
+      x: selectedCanvasItem.x,
+      y: selectedCanvasItem.y + THREAD_CANVAS_NODE_HEIGHT + 92
     };
   })();
 
@@ -883,7 +944,18 @@ function ThreadDetailModal(props: {
           </div>
         </header>
 
-        <div className={`threadModalBody ${documentContextOpen ? "" : "contextCollapsed"}`}>
+        <div
+          ref={modalBodyRef}
+          className={`threadModalBody ${documentContextOpen ? "" : "contextCollapsed"} ${resizingPane ? "resizing" : ""}`}
+          style={{
+            gridTemplateColumns: documentContextOpen
+              ? `${paneWidths.document}px ${THREAD_PANE_DIVIDER_WIDTH}px ${paneWidths.content}px ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 1fr)`
+              : `${paneWidths.content}px ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 1fr)`
+          }}
+          onPointerMove={handlePaneResize}
+          onPointerUp={finishPaneResize}
+          onPointerCancel={finishPaneResize}
+        >
           {documentContextOpen && (
             <aside className="threadDocumentContext" aria-label="文章上下文">
               <header className="threadDocumentContextHeader">
@@ -911,9 +983,50 @@ function ThreadDetailModal(props: {
               )}
             </aside>
           )}
+          {documentContextOpen && (
+            <div
+              className={`threadPaneDivider ${resizingPane === "document-content" ? "active" : ""}`}
+              role="separator"
+              aria-label="调整文档预览与节点内容宽度"
+              aria-orientation="vertical"
+              tabIndex={0}
+              onPointerDown={(event) => beginPaneResize(event, "document-content")}
+              onKeyDown={(event) => {
+                if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                event.preventDefault();
+                resizePaneWithKeyboard("document-content", event.key === "ArrowLeft" ? -24 : 24);
+              }}
+            />
+          )}
+          <main
+            ref={setContentPaneElement}
+            className="threadContentPane"
+            aria-label="节点内容"
+          >
+            {!inspectorOpen && (
+              <div className="threadContentEmpty">
+                <span>节点内容</span>
+                <strong>{nodes.length > 0 ? "从右侧 tree 选择一个节点" : "从右侧创建根问题"}</strong>
+                <p>当前节点的问题、回答和后续输入会显示在这里。</p>
+              </div>
+            )}
+          </main>
+          <div
+            className={`threadPaneDivider ${resizingPane === "content-tree" ? "active" : ""}`}
+            role="separator"
+            aria-label="调整节点内容与讨论树宽度"
+            aria-orientation="vertical"
+            tabIndex={0}
+            onPointerDown={(event) => beginPaneResize(event, "content-tree")}
+            onKeyDown={(event) => {
+              if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+              event.preventDefault();
+              resizePaneWithKeyboard("content-tree", event.key === "ArrowLeft" ? -24 : 24);
+            }}
+          />
           <div
             ref={canvasRef}
-            className={`threadModalWorkspace threadCanvasViewport ${isPanning ? "panning" : ""} ${inspectorOpen ? "focusMode" : ""}`}
+            className={`threadModalWorkspace threadCanvasViewport ${isPanning ? "panning" : ""}`}
             aria-label="讨论树画布"
             onWheel={handleCanvasWheel}
             onPointerDown={handleCanvasPointerDown}
@@ -921,6 +1034,10 @@ function ThreadDetailModal(props: {
             onPointerUp={finishCanvasPan}
             onPointerCancel={finishCanvasPan}
           >
+          <div className="threadTreePaneLabel">
+            <span>Tree</span>
+            <strong>讨论结构</strong>
+          </div>
           <div className="threadCanvasHint">拖动画布 · 滚轮移动 · ⌘/Ctrl + 滚轮缩放</div>
           <div className="threadCanvasInsightStrip" aria-label="讨论计划摘要">
             <span>任务 {semanticStats.task}</span>
@@ -954,7 +1071,7 @@ function ThreadDetailModal(props: {
               {ghostNode && selectedCanvasItem && (
                 <path
                   className="ghostConnector"
-                  d={`M ${selectedCanvasItem.x + focusNodeWidth / 2} ${selectedCanvasItem.y} C ${selectedCanvasItem.x + focusNodeWidth / 2 + 48} ${selectedCanvasItem.y}, ${ghostNode.x - 150} ${ghostNode.y}, ${ghostNode.x - 105} ${ghostNode.y}`}
+                  d={`M ${selectedCanvasItem.x} ${selectedCanvasItem.y + THREAD_CANVAS_NODE_HEIGHT / 2} C ${selectedCanvasItem.x} ${selectedCanvasItem.y + THREAD_CANVAS_NODE_HEIGHT}, ${ghostNode.x} ${ghostNode.y - 76}, ${ghostNode.x} ${ghostNode.y - 38}`}
                 />
               )}
             </svg>
@@ -977,18 +1094,22 @@ function ThreadDetailModal(props: {
             ))}
 
             {canvasLayout.nodes.map((item) => (
-              inspectorOpen && selectedNodeId === item.node.id ? (
+              <Fragment key={item.node.id}>
+                <ConversationCanvasNode
+                  node={item.node}
+                  root={item.depth === 0}
+                  active={selectedNodeId === item.node.id}
+                  x={item.x}
+                  y={item.y}
+                  onOpen={() => openNode(item.node.id)}
+                  onAskChild={() => openNode(item.node.id, true)}
+                  onAskBranch={() => openNode(item.node.id, true, true)}
+                />
+                {inspectorOpen && selectedNodeId === item.node.id && contentPaneElement && createPortal(
                 <article
-                  key={item.node.id}
                   ref={inspectorRef}
                   className="threadCanvasFocusNode"
                   aria-label="当前节点详情"
-                  style={{
-                    left: item.x - focusNodeWidth / 2,
-                    top: item.y - focusNodeHeight / 2,
-                    width: focusNodeWidth,
-                    height: focusNodeHeight
-                  }}
                 >
                   <header className="threadCanvasFocusHeader">
                     <div className="threadCanvasInspectorTitle">
@@ -1041,7 +1162,7 @@ function ThreadDetailModal(props: {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="threadCanvasInspectorClose" aria-label="返回树总览" title="返回树总览 (Esc)" onClick={closeFocusedNode}>×</button>
+                    <button type="button" className="threadCanvasInspectorClose" aria-label="关闭节点内容" title="关闭节点内容 (Esc)" onClick={closeFocusedNode}>×</button>
                   </header>
 
                   {selectionPopover && (
@@ -1141,7 +1262,16 @@ function ThreadDetailModal(props: {
                       />
                     ))}
                     {selectedNode && !selectedNode.messages.some((message) => message.role === "assistant") && (
-                      <div className="threadNodeAnswerEmpty">此节点尚未获得 Codex 回答。</div>
+                      <div className="threadNodeAnswerEmpty">
+                        <span>此节点尚未获得 Codex 回答。</span>
+                        <button
+                          type="button"
+                          className="primaryButton"
+                          onClick={() => props.onRequestAssistant(props.thread.id, selectedNode.question.id)}
+                        >
+                          让 Codex 回答
+                        </button>
+                      </div>
                     )}
                     {props.permissionRequests.map((request) => (
                       <PermissionRequestPanel
@@ -1180,20 +1310,44 @@ function ThreadDetailModal(props: {
                     }}
                   >
                     <div className="threadFocusComposerTopline">
+                      <div className="threadCreationMode" role="group" aria-label="新节点创建方式">
+                        <button
+                          type="button"
+                          className={nodeCreationMode === "child" ? "active" : ""}
+                          aria-pressed={nodeCreationMode === "child"}
+                          onClick={() => {
+                            setNodeCreationMode("child");
+                            if (selectedNode) setInsertBeforeNodeId(defaultRouteChoice(selectedNode.id));
+                          }}
+                        >
+                          子节点
+                        </button>
+                        <button
+                          type="button"
+                          className={nodeCreationMode === "branch" ? "active" : ""}
+                          aria-pressed={nodeCreationMode === "branch"}
+                          onClick={() => {
+                            setNodeCreationMode("branch");
+                            setInsertBeforeNodeId(null);
+                          }}
+                        >
+                          分支
+                        </button>
+                      </div>
                       <label htmlFor="thread-canvas-question">
-                        {routeChoiceRequired
-                          ? "请选择新节点位置"
-                          : selectedInsertTarget
-                            ? <>{selectedNode?.children.length === 1 ? "继续当前路径" : "插入路径"} <strong>→ {questionSummary(selectedInsertTarget.question.content)}</strong></>
-                            : selectedNode?.children.length
-                              ? "从当前节点新建分支"
+                        {nodeCreationMode === "branch"
+                          ? "从当前节点新建独立分支"
+                          : routeChoiceRequired
+                            ? "请选择子节点所在路径"
+                            : selectedInsertTarget
+                              ? <>{selectedNode?.children.length === 1 ? "继续当前路径" : "插入路径"} <strong>→ {questionSummary(selectedInsertTarget.question.content)}</strong></>
                               : "创建子节点"}
                       </label>
-                      {selectedNode && selectedNode.children.length > 0 && (
+                      {nodeCreationMode === "child" && selectedNode && selectedNode.children.length > 0 && (
                         <select
-                          aria-label="追问位置"
+                          aria-label="子节点位置"
                           value={insertBeforeNodeId || ""}
-                          onChange={(event) => setInsertBeforeNodeId(event.target.value || null)}
+                          onChange={(event) => setInsertBeforeNodeId(event.target.value)}
                         >
                           {selectedNode.children.length > 1 && (
                             <option value={ROUTE_CHOICE_REQUIRED} disabled>请选择新节点位置…</option>
@@ -1203,7 +1357,6 @@ function ThreadDetailModal(props: {
                               {selectedNode.children.length === 1 ? "继续当前路径" : "插入路径"} → {questionSummary(child.question.content)}
                             </option>
                           ))}
-                          <option value="">另建分支</option>
                         </select>
                       )}
                     </div>
@@ -1247,48 +1400,34 @@ function ThreadDetailModal(props: {
                       >
                         {routeChoiceRequired
                           ? "选择位置"
-                          : selectedInsertTarget
-                            ? "继续当前路径"
-                            : selectedNode?.children.length
-                              ? "创建分支"
+                          : nodeCreationMode === "branch"
+                            ? "创建分支"
+                            : selectedInsertTarget
+                              ? "继续当前路径"
                               : "创建子节点"}
                       </button>
                     </div>
                   </form>
-                </article>
-              ) : (
-                <ConversationCanvasNode
-                  key={item.node.id}
-                  node={item.node}
-                  root={item.depth === 0}
-                  active={false}
-                  x={item.x}
-                  y={item.y}
-                  onOpen={() => openNode(item.node.id)}
-                  onAskChild={() => openNode(item.node.id, true, true)}
-                />
-              )
+                </article>,
+                contentPaneElement
+              )}
+              </Fragment>
             ))}
 
             {canvasLayout.nodes.length === 0 && (
-              inspectorOpen ? (
+              <>
+              {inspectorOpen && contentPaneElement && createPortal(
                 <article
                   ref={inspectorRef}
                   className="threadCanvasFocusNode rootComposer"
                   aria-label="创建根问题"
-                  style={{
-                    left: -focusNodeWidth / 2,
-                    top: -focusNodeHeight / 2,
-                    width: focusNodeWidth,
-                    height: focusNodeHeight
-                  }}
                 >
                   <header className="threadCanvasFocusHeader">
                     <div className="threadCanvasInspectorTitle">
                       <span>根节点</span>
                       <strong>开始新的讨论树</strong>
                     </div>
-                    <button type="button" className="threadCanvasInspectorClose" aria-label="返回树总览" onClick={closeFocusedNode}>×</button>
+                    <button type="button" className="threadCanvasInspectorClose" aria-label="关闭根节点输入" onClick={closeFocusedNode}>×</button>
                   </header>
                   <form
                     className="threadModalComposer threadRootComposer"
@@ -1321,13 +1460,14 @@ function ThreadDetailModal(props: {
                       <button type="submit" className="primaryButton" disabled={!messageDraft.trim()}>询问 Codex</button>
                     </div>
                   </form>
-                </article>
-              ) : (
-                <button type="button" className="threadCanvasRootPlaceholder" onClick={openRootComposer}>
-                  <span>+</span>
-                  创建根问题
-                </button>
-              )
+                </article>,
+                contentPaneElement
+              )}
+              <button type="button" className="threadCanvasRootPlaceholder" onClick={openRootComposer}>
+                <span>+</span>
+                创建根问题
+              </button>
+              </>
             )}
 
             {ghostNode && (
@@ -1342,109 +1482,10 @@ function ThreadDetailModal(props: {
             )}
           </div>
 
-          {inspectorOpen && selectedNode && (
-            <div className="threadCanvasMinimapDock">
-              <ConversationTreeMinimap
-                layout={canvasLayout}
-                path={selectedNodeBreadcrumb}
-                selectedNodeId={selectedNode.id}
-                collapsed={minimapCollapsed}
-                onToggle={() => setMinimapCollapsed((current) => !current)}
-                onNavigate={navigateToNode}
-              />
-            </div>
-          )}
           </div>
         </div>
       </section>
     </div>
-  );
-}
-
-function ConversationTreeMinimap(props: {
-  layout: ReturnType<typeof layoutConversationTree>;
-  path: ReturnType<typeof conversationBreadcrumb>;
-  selectedNodeId: string;
-  collapsed: boolean;
-  onToggle: () => void;
-  onNavigate: (nodeId: string) => void;
-}) {
-  const padding = 54;
-  const bounds = props.layout.bounds;
-  const viewBox = {
-    x: bounds.left - padding,
-    y: bounds.top - padding,
-    width: Math.max(1, bounds.right - bounds.left + padding * 2),
-    height: Math.max(1, bounds.bottom - bounds.top + padding * 2)
-  };
-  const unitsPerPixel = Math.max(viewBox.width / 204, viewBox.height / 72);
-  const markerRadius = clamp(unitsPerPixel * 3.2, 11, 52);
-  const selectedRadius = markerRadius * 1.42;
-  const pathIds = new Set(props.path.map((node) => node.id));
-  const pathConnectors = new Set(props.path.slice(1).map((node, index) => `${props.path[index].id}:${node.id}`));
-  const selectedLayout = props.layout.nodes.find((item) => item.node.id === props.selectedNodeId);
-
-  return (
-    <aside
-      className={`threadNodeMinimap ${props.collapsed ? "collapsed" : ""}`}
-      aria-label="讨论树位置"
-      onPointerDown={(event) => event.stopPropagation()}
-      onPointerUp={(event) => event.stopPropagation()}
-      onWheel={(event) => event.stopPropagation()}
-    >
-      <button
-        type="button"
-        className="threadNodeMinimapToggle"
-        aria-expanded={!props.collapsed}
-        aria-label={props.collapsed ? "展开树形位置" : "收起树形位置"}
-        onClick={props.onToggle}
-      >
-        <span>树形位置</span>
-        <small>{selectedLayout ? `第 ${selectedLayout.depth + 1} 层` : ""}</small>
-        <i aria-hidden="true">{props.collapsed ? "⌄" : "⌃"}</i>
-      </button>
-      {!props.collapsed && (
-        <svg
-          viewBox={`${viewBox.x} ${viewBox.y} ${viewBox.width} ${viewBox.height}`}
-          role="img"
-          aria-label="讨论树总览，蓝色节点为当前位置"
-        >
-          {props.layout.connectors.map((connector) => (
-            <path
-              key={connector.id}
-              className={pathConnectors.has(connector.id) ? "activePath" : ""}
-              d={`M ${connector.fromX} ${connector.fromY} C ${connector.fromX} ${(connector.fromY + connector.toY) / 2}, ${connector.toX} ${(connector.fromY + connector.toY) / 2}, ${connector.toX} ${connector.toY}`}
-              vectorEffect="non-scaling-stroke"
-            />
-          ))}
-          {props.layout.nodes.map((item) => {
-            const selected = item.node.id === props.selectedNodeId;
-            const onPath = pathIds.has(item.node.id);
-            return (
-              <g
-                key={item.node.id}
-                className={`${selected ? "current" : ""} ${onPath ? "onPath" : ""}`}
-                role="button"
-                tabIndex={0}
-                aria-label={`${selected ? "当前节点：" : "打开节点："}${questionSummary(item.node.question.content)}`}
-                onClick={() => props.onNavigate(item.node.id)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    props.onNavigate(item.node.id);
-                  }
-                }}
-              >
-                <title>{questionSummary(item.node.question.content)}</title>
-                <circle className="hitArea" r={Math.max(markerRadius * 2.5, selectedRadius * 1.8)} cx={item.x} cy={item.y} />
-                {selected && <circle className="currentRing" r={selectedRadius * 1.65} cx={item.x} cy={item.y} vectorEffect="non-scaling-stroke" />}
-                <circle className="nodeMarker" r={selected ? selectedRadius : markerRadius} cx={item.x} cy={item.y} vectorEffect="non-scaling-stroke" />
-              </g>
-            );
-          })}
-        </svg>
-      )}
-    </aside>
   );
 }
 
@@ -1456,6 +1497,7 @@ function ConversationCanvasNode(props: {
   y: number;
   onOpen: () => void;
   onAskChild: () => void;
+  onAskBranch: () => void;
 }) {
   const userTurns = props.node.messages.filter((message) => message.role === "user").length;
   const status = conversationNodeStatus(props.node);
@@ -1490,18 +1532,70 @@ function ConversationCanvasNode(props: {
           {hasSelectedOrigin ? " · 包含引用" : ""}
         </span>
       </button>
-      <button
-        type="button"
-        className="threadCanvasNodeAdd"
-        aria-label={`从 ${questionSummary(props.node.question.content)} 新建分支`}
-        title="从这里新建分支"
-        onClick={props.onAskChild}
-      >
-        <span aria-hidden="true">+</span>
-        <small>分支</small>
-      </button>
+      <div className="threadCanvasNodeActions" aria-label="创建后续节点">
+        <button
+          type="button"
+          className="threadCanvasNodeAdd"
+          aria-label={`从 ${questionSummary(props.node.question.content)} 创建子节点`}
+          title="创建子节点或继续当前路径"
+          onClick={props.onAskChild}
+        >
+          <span aria-hidden="true">+</span>
+          <small>子节点</small>
+        </button>
+        <button
+          type="button"
+          className="threadCanvasNodeAdd branch"
+          aria-label={`从 ${questionSummary(props.node.question.content)} 新建分支`}
+          title="从这里新建独立分支"
+          onClick={props.onAskBranch}
+        >
+          <span aria-hidden="true">⑂</span>
+          <small>分支</small>
+        </button>
+      </div>
     </article>
   );
+}
+
+function fitThreadPaneWidths(
+  containerWidth: number,
+  desired: { document: number; content: number },
+  documentOpen: boolean
+): { document: number; content: number } {
+  if (!Number.isFinite(containerWidth) || containerWidth <= 0) return desired;
+  const dividerCount = documentOpen ? 2 : 1;
+  const available = Math.max(1, containerWidth - dividerCount * THREAD_PANE_DIVIDER_WIDTH);
+  const baseMinimums = documentOpen
+    ? { document: 240, content: 360, tree: 260 }
+    : { document: 0, content: 360, tree: 260 };
+  const minimumTotal = baseMinimums.document + baseMinimums.content + baseMinimums.tree;
+  const minimumScale = Math.min(1, available / minimumTotal);
+  const minimumDocument = baseMinimums.document * minimumScale;
+  const minimumContent = baseMinimums.content * minimumScale;
+  const minimumTree = baseMinimums.tree * minimumScale;
+
+  if (!documentOpen) {
+    return {
+      document: desired.document,
+      content: Math.round(clamp(desired.content, minimumContent, available - minimumTree))
+    };
+  }
+
+  const documentWidth = clamp(
+    desired.document,
+    minimumDocument,
+    available - minimumContent - minimumTree
+  );
+  const contentWidth = clamp(
+    desired.content,
+    minimumContent,
+    available - documentWidth - minimumTree
+  );
+  return {
+    document: Math.round(documentWidth),
+    content: Math.round(contentWidth)
+  };
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

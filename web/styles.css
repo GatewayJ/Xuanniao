@@ -1314,18 +1314,19 @@ body.resizing .splitter::before {
 
 .threadModalBody {
   display: grid;
-  grid-template-columns: clamp(340px, 30vw, 500px) minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   min-height: 0;
   overflow: hidden;
 }
 
-.threadModalBody.contextCollapsed {
-  grid-template-columns: minmax(0, 1fr);
+.threadModalBody.resizing {
+  cursor: col-resize;
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .threadDocumentContext {
   background: #ffffff;
-  border-right: 1px solid #dfe5ed;
   display: grid;
   grid-template-rows: auto auto minmax(0, 1fr);
   min-height: 0;
@@ -1333,6 +1334,76 @@ body.resizing .splitter::before {
   overflow: hidden;
   position: relative;
   z-index: 11;
+}
+
+.threadContentPane {
+  background: #ffffff;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  position: relative;
+}
+
+.threadContentEmpty {
+  align-content: center;
+  color: #7b8798;
+  display: grid;
+  gap: 8px;
+  height: 100%;
+  justify-items: center;
+  padding: 32px;
+  text-align: center;
+}
+
+.threadContentEmpty span {
+  color: #8a96a7;
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.threadContentEmpty strong {
+  color: #344054;
+  font-size: 16px;
+}
+
+.threadContentEmpty p {
+  font-size: 12px;
+  margin: 0;
+}
+
+.threadPaneDivider {
+  background: #edf1f6;
+  cursor: col-resize;
+  min-height: 0;
+  outline: none;
+  position: relative;
+  touch-action: none;
+  z-index: 18;
+}
+
+.threadPaneDivider::after {
+  background: #a9b5c5;
+  border-radius: 999px;
+  content: "";
+  height: 44px;
+  left: 50%;
+  opacity: 0.52;
+  position: absolute;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  transition: background 140ms ease, height 140ms ease, opacity 140ms ease, width 140ms ease;
+  width: 2px;
+}
+
+.threadPaneDivider:hover::after,
+.threadPaneDivider:focus-visible::after,
+.threadPaneDivider.active::after {
+  background: var(--accent);
+  height: 68px;
+  opacity: 1;
+  width: 3px;
 }
 
 .threadDocumentContextHeader {
@@ -1796,13 +1867,23 @@ body.resizing .splitter::before {
 }
 
 .threadNodeAnswerEmpty {
+  align-items: center;
   background: #f8fafc;
   border: 1px dashed #d9e0e9;
   border-radius: 8px;
   color: var(--muted);
+  display: flex;
   font-size: 12px;
+  gap: 12px;
+  justify-content: space-between;
   margin: 14px 0 8px 46px;
   padding: 14px;
+}
+
+.threadNodeAnswerEmpty button {
+  flex: 0 0 auto;
+  font-size: 11px;
+  min-height: 30px;
 }
 
 .threadNodeChildrenSummary {
@@ -1967,6 +2048,34 @@ body.resizing .splitter::before {
   transition: none;
 }
 
+.threadTreePaneLabel {
+  background: rgba(255, 255, 255, 0.94);
+  border: 1px solid #d9e0e9;
+  border-radius: 9px;
+  box-shadow: 0 5px 16px rgba(15, 23, 42, 0.08);
+  display: grid;
+  gap: 1px;
+  left: 14px;
+  padding: 6px 10px;
+  pointer-events: none;
+  position: absolute;
+  top: 14px;
+  z-index: 9;
+}
+
+.threadTreePaneLabel span {
+  color: #7b8798;
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.threadTreePaneLabel strong {
+  color: #344054;
+  font-size: 11px;
+}
+
 .threadCanvasViewport.focusMode .threadCanvasNode {
   filter: saturate(0.72);
   opacity: 0.32;
@@ -2000,7 +2109,7 @@ body.resizing .splitter::before {
   padding: 0 10px;
   pointer-events: none;
   position: absolute;
-  top: 14px;
+  top: 70px;
   z-index: 8;
   transition: opacity 160ms ease;
 }
@@ -2018,7 +2127,7 @@ body.resizing .splitter::before {
   line-height: 22px;
   padding: 0 10px;
   position: absolute;
-  top: 44px;
+  top: 100px;
   z-index: 8;
   transition: opacity 160ms ease;
 }
@@ -2257,31 +2366,44 @@ body.resizing .splitter::before {
   line-height: 13px;
 }
 
-.threadCanvasNodeAdd {
+.threadCanvasNodeActions {
   align-items: center;
-  background: #ffffff;
-  border: 1px solid #cbd5e1;
-  border-radius: 999px;
   bottom: -16px;
-  box-shadow: 0 4px 10px rgba(30, 41, 59, 0.12);
-  color: #52657c;
-  display: inline-flex;
-  gap: 4px;
-  height: 28px;
+  display: flex;
+  gap: 6px;
   justify-content: center;
   left: 50%;
-  min-height: 28px;
-  padding: 0 9px;
   position: absolute;
   transform: translateX(-50%);
   white-space: nowrap;
   z-index: 3;
 }
 
+.threadCanvasNodeAdd {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  box-shadow: 0 4px 10px rgba(30, 41, 59, 0.12);
+  color: #52657c;
+  display: inline-flex;
+  gap: 4px;
+  height: 28px;
+  justify-content: center;
+  min-height: 28px;
+  padding: 0 9px;
+  white-space: nowrap;
+}
+
 .threadCanvasNodeAdd:hover {
   background: var(--accent);
   border-color: var(--accent);
   color: #ffffff;
+}
+
+.threadCanvasNodeAdd.branch:hover {
+  background: #6557c8;
+  border-color: #6557c8;
 }
 
 .threadCanvasNodeAdd > span {
@@ -2367,20 +2489,16 @@ body.resizing .splitter::before {
 .threadCanvasFocusNode {
   animation: threadFocusNodeIn 240ms cubic-bezier(0.22, 1, 0.36, 1);
   background: rgba(255, 255, 255, 0.99);
-  border: 1px solid #bdcbe0;
-  border-radius: 18px;
-  box-shadow:
-    0 0 0 1px rgba(255, 255, 255, 0.75),
-    0 26px 70px rgba(30, 41, 59, 0.24);
   cursor: default;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto;
+  height: 100%;
   overflow: hidden;
-  position: absolute;
-  transform-origin: center;
+  position: relative;
   user-select: text;
+  width: 100%;
   -webkit-user-select: text;
-  z-index: 20;
+  z-index: 1;
 }
 
 @keyframes threadFocusNodeIn {
@@ -2528,9 +2646,44 @@ body.resizing .splitter::before {
   min-width: 0;
 }
 
+.threadCreationMode {
+  align-items: center;
+  background: #edf1f7;
+  border: 1px solid #d7deea;
+  border-radius: 8px;
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 2px;
+}
+
+.threadCreationMode button {
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  color: #66758a;
+  font-size: 10px;
+  font-weight: 650;
+  height: 26px;
+  min-height: 26px;
+  padding: 0 10px;
+}
+
+.threadCreationMode button:hover {
+  background: rgba(255, 255, 255, 0.68);
+  border-color: transparent;
+}
+
+.threadCreationMode button.active {
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(30, 41, 59, 0.12);
+  color: var(--accent-strong);
+}
+
 .threadFocusComposerTopline label {
   align-items: center;
   display: flex;
+  flex: 1 1 auto;
   min-width: 0;
 }
 
@@ -3461,17 +3614,11 @@ body.resizing .splitter::before {
   }
 
   .threadModalBody {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(170px, 30vh) minmax(0, 1fr);
-  }
-
-  .threadModalBody.contextCollapsed {
     grid-template-rows: minmax(0, 1fr);
   }
 
   .threadDocumentContext {
-    border-bottom: 1px solid #dfe5ed;
-    border-right: 0;
+    border: 0;
   }
 
   .threadContextQuote {
@@ -3607,6 +3754,16 @@ body.resizing .splitter::before {
 
   .threadFocusComposer {
     padding: 11px 16px 13px;
+  }
+
+  .threadFocusComposerTopline {
+    flex-wrap: wrap;
+    gap: 7px;
+  }
+
+  .threadFocusComposerTopline select {
+    max-width: none;
+    width: 100%;
   }
 
   .threadFocusComposer textarea {
