@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { AcpDocumentAgent } from "./acp-client.js";
-import { assertAgentRuntime, createAgentRuntime, normalizeAgentTransport } from "./agent-runtime.js";
+import { assertAgentRuntime, createAgentRuntime, normalizeAgentTransport, runtimeAgentSettingsFromEnv } from "./agent-runtime.js";
 import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
 
 test("native Codex is the default transport and ACP remains explicit", () => {
@@ -49,4 +49,27 @@ test("transport and timeout configuration fails fast on invalid values", () => {
 
 test("runtime contract fails at the composition root when an adapter is incomplete", () => {
   assert.throws(() => assertAgentRuntime({ status() {} }), /missing required method: start/);
+});
+
+test("persisted runtime settings override environment values including explicit defaults", () => {
+  assert.deepEqual(runtimeAgentSettingsFromEnv({
+    XUANNIAO_CODEX_MODEL: "env-model",
+    XUANNIAO_CODEX_REASONING_EFFORT: "high"
+  }), {
+    version: 1,
+    model: "env-model",
+    reasoningEffort: "high"
+  });
+
+  const runtime = createAgentRuntime({
+    documentPath: "/tmp/plan.md",
+    cwd: "/tmp",
+    env: {
+      XUANNIAO_CODEX_MODEL: "env-model",
+      XUANNIAO_CODEX_REASONING_EFFORT: "high"
+    },
+    settings: { model: null, reasoningEffort: null }
+  });
+  assert.equal(runtime.status().model, null);
+  assert.equal(runtime.status().reasoningEffort, null);
 });

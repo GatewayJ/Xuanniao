@@ -37,6 +37,12 @@ test("HTTP server starts without Agent availability and reports failed turns exp
     assert.equal(health.payload.agent.initialized, false);
     assert.equal(health.payload.agent.running, false);
 
+    const settings = await jsonRequest(`${baseUrl}/api/settings`);
+    assert.equal(settings.response.status, 200);
+    assert.equal(settings.payload.modelSelectionSupported, true);
+    assert.deepEqual(settings.payload.models, []);
+    assert.match(settings.payload.catalogError, /xuanniao-missing-codex-command/);
+
     const document = await jsonRequest(`${baseUrl}/api/document`);
     assert.equal(document.payload.content, "# Plan\n");
 

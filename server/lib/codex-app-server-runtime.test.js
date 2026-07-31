@@ -139,6 +139,64 @@ test("native resumed turns inject local-only messages missing from agent history
   assert.match(prompt, /Local-only note/);
 });
 
+test("native runtime lists paginated models and applies settings to the next turn", async () => {
+  const runtime = new StubRuntime();
+  const modelResponses = [
+    {
+      data: [{
+        id: "gpt-fast",
+        model: "gpt-fast",
+        displayName: "Fast",
+        isDefault: true,
+        supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }]
+      }],
+      nextCursor: "page-2"
+    },
+    {
+      data: [{
+        id: "gpt-deep",
+        model: "gpt-deep",
+        displayName: "Deep",
+        supportedReasoningEfforts: [{ reasoningEffort: "high", description: "Deep" }]
+      }],
+      nextCursor: null
+    }
+  ];
+  const baseRequest = runtime.request.bind(runtime);
+  runtime.request = async (method, params) => {
+    if (method === "model/list") {
+      runtime.calls.push({ method, params });
+      return modelResponses.shift();
+    }
+    return baseRequest(method, params);
+  };
+
+  const models = await runtime.listModels();
+  assert.deepEqual(models.map((model) => model.model), ["gpt-fast", "gpt-deep"]);
+  assert.deepEqual(runtime.calls.filter(({ method }) => method === "model/list").map(({ params }) => params), [
+    { limit: 100, includeHidden: false },
+    { cursor: "page-2", limit: 100, includeHidden: false }
+  ]);
+
+  runtime.configure({ model: "gpt-deep", reasoningEffort: "high" });
+  await runtime.runTurn({
+    question: "Think deeply",
+    document,
+    thread: {
+      id: "settings-thread",
+      sessionKey: "settings-thread:root",
+      agentSession: null,
+      parentAgentSession: null,
+      selectedText: "Details.",
+      anchor: {},
+      messages: []
+    }
+  });
+  const turnStart = runtime.calls.find(({ method }) => method === "turn/start");
+  assert.equal(turnStart.params.model, "gpt-deep");
+  assert.equal(turnStart.params.effort, "high");
+});
+
 test("native approvals remain pending until the user resolves them", () => {
   const runtime = new CodexAppServerRuntime({
     documentPath: "/tmp/plan.md",

@@ -5,14 +5,16 @@ import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createAgentRuntime, runtimeCommand } from "./lib/agent-runtime.js";
+import { createAgentRuntime, runtimeAgentSettingsFromEnv, runtimeCommand } from "./lib/agent-runtime.js";
+import { validateAgentSettingsSelection } from "./lib/agent-settings.js";
+import { AgentSettingsStore } from "./lib/agent-settings-store.js";
 import { atomicWriteText } from "./lib/atomic-file.js";
 import { ConversationService } from "./lib/conversation-service.js";
 import { normalizeConversationMetaPatch } from "./lib/conversation-model.js";
 import { DocumentWorkspace } from "./lib/document-workspace.js";
 import { browseMarkdownDirectory } from "./lib/file-browser.js";
 import { HttpRequestError, assertSafeHostBinding, assertTrustedRequest, setSecurityHeaders } from "./lib/http-security.js";
-import { legacyThreadStorePathFor, threadStorePathFor } from "./lib/metadata-paths.js";
+import { agentSettingsPath, legacyThreadStorePathFor, threadStorePathFor } from "./lib/metadata-paths.js";
 import { ThreadStore } from "./lib/thread-store.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -31,6 +33,9 @@ const ignoredFileManagerDirs = new Set([".git", "node_modules", "dist", ".xuanni
 
 assertSafeHostBinding(host, allowRemote);
 const initialDocumentPath = path.resolve(workspaceRoot, args.file ?? "prd.md");
+const settingsStore = new AgentSettingsStore(agentSettingsPath());
+const environmentAgentSettings = runtimeAgentSettingsFromEnv(process.env);
+let agentSettings = await loadAgentSettings();
 await ensureDocument(initialDocumentPath);
 let activeDocument = await createDocumentContext(initialDocumentPath);
 let documentSwitchLock = Promise.resolve();
@@ -50,6 +55,35 @@ const server = createServer(async (req, res) => {
         workspaceRoot,
         agent: context.agent.status()
       });
+    }
+
+    if (url.pathname === "/api/settings" && req.method === "GET") {
+      return sendJson(res, 200, await agentSettingsPayload(context.agent));
+    }
+
+    if (url.pathname === "/api/settings" && req.method === "PUT") {
+      if (context.agent.status().capabilities.modelSelection !== true) {
+        throw new HttpRequestError(
+          409,
+          "模型和推理深度设置仅支持原生 Codex transport。",
+          "MODEL_SELECTION_UNSUPPORTED"
+        );
+      }
+      const body = await readJson(req);
+      let models;
+      try {
+        models = await context.agent.listModels();
+      } catch (error) {
+        throw new HttpRequestError(
+          503,
+          `暂时无法读取 Codex 模型列表：${error instanceof Error ? error.message : String(error)}`,
+          "MODEL_CATALOG_UNAVAILABLE"
+        );
+      }
+      const nextSettings = validateAgentSettingsSelection(body, models);
+      agentSettings = await settingsStore.save(nextSettings);
+      activeDocument.agent.configure(agentSettings);
+      return sendJson(res, 200, settingsPayload(activeDocument.agent, models, null));
     }
 
     if (url.pathname === "/api/files" && req.method === "GET") {
@@ -243,8 +277,47 @@ function createAgentFor(filePath) {
   return createAgentRuntime({
     documentPath: filePath,
     cwd: workspaceRoot,
-    env: process.env
+    env: process.env,
+    settings: agentSettings
   });
+}
+
+async function loadAgentSettings() {
+  try {
+    return await settingsStore.load(environmentAgentSettings);
+  } catch (error) {
+    console.error(JSON.stringify({
+      level: "warn",
+      event: "agent_settings_load_failed",
+      path: settingsStore.filePath,
+      message: error instanceof Error ? error.message : String(error)
+    }));
+    return environmentAgentSettings;
+  }
+}
+
+async function agentSettingsPayload(agent) {
+  const status = agent.status();
+  if (status.capabilities.modelSelection !== true) {
+    return settingsPayload(agent, [], null);
+  }
+  try {
+    return settingsPayload(agent, await agent.listModels(), null);
+  } catch (error) {
+    return settingsPayload(agent, [], error instanceof Error ? error.message : String(error));
+  }
+}
+
+function settingsPayload(agent, models, catalogError) {
+  const status = agent.status();
+  return {
+    transport: status.transport,
+    modelSelectionSupported: status.capabilities.modelSelection === true,
+    model: agentSettings.model,
+    reasoningEffort: agentSettings.reasoningEffort,
+    models,
+    catalogError
+  };
 }
 
 async function createDocumentContext(filePath) {

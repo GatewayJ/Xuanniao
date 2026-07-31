@@ -58,6 +58,7 @@
 | Thread/文档联动 | 已实现 | 标记选区、激活跳转、侧栏与文档滚动位置同步 |
 | Mermaid 查看 | 已实现 | Preview 本地渲染、横向查看、全屏缩放 |
 | Agent 访问模式 | 已实现 | 默认 `full-access`，可切换为 `read-only`；命令、文件和额外权限请求进入浏览器审批 |
+| Codex 模型设置 | 已实现 | 设置页动态读取 `model/list`；模型与推理深度持久化，并从下一轮提问生效 |
 | Agent session 恢复 | 已实现 | 原生模式保存 thread/turn ID 并调用 `thread/resume`；ACP 兼容模式使用 `session/load` |
 | Agent 直接修改文件 | 已实现 | Runtime 可按沙箱和审批策略修改文件；返回后重新读取当前文档并校准 thread |
 | 受控选区替换 | 实验性、默认关闭 | `XUANNIAO_CONTROLLED_REPLACEMENT=1` 时按意图识别并替换当前选区 |
@@ -164,6 +165,7 @@ flowchart LR
 | 文档用例 | `web/src/hooks/useDocumentSession.ts` | revision、保存队列、自动保存与 compare-and-swap |
 | 会话用例 | `web/src/hooks/useConversationCommands.ts` | 消息草稿、发送、编辑、重试、删除与显式 Agent 结果 |
 | 权限收件箱 | `web/src/hooks/usePermissionInbox.ts` | 权限轮询、稳定状态比较与决定提交 |
+| Agent 设置 | `web/src/hooks/useAgentSettings.ts` | 模型目录加载、设置保存与请求生命周期 |
 | 消息选区 | `web/src/hooks/useMessageSelection.ts` | 选区生命周期、引用捕获与提问浮层 |
 | Anchor 定位 | `web/src/thread-anchors.ts` | 精确位置校验、文本恢复、context 匹配、排序 |
 | Anchor remap | `web/src/thread-anchor-remap.ts` | CodeMirror change set 到 thread range 的映射 |
@@ -183,6 +185,8 @@ flowchart LR
 | 会话领域模型 | `server/lib/conversation-model.js` | 问题放置、状态迁移、分支校验和 session 失效 |
 | 文档事务 | `server/lib/document-workspace.js` | revision、原子保存、canonical anchor 与活动文档保护 |
 | Runtime 组合 | `server/lib/agent-runtime.js` | 传输选择、公共配置归一化和应用边界 |
+| Agent 设置 | `server/lib/agent-settings.js` | 模型目录归一化、模型与推理深度能力校验 |
+| 设置存储 | `server/lib/agent-settings-store.js` | 全局 Codex 偏好的原子持久化 |
 | JSONL 进程 | `server/lib/json-line-rpc-process.js` | 子进程、请求关联、超时、退出处理和 stderr 诊断 |
 | Codex Runtime | `server/lib/codex-app-server-runtime.js` | app-server 子进程、thread/turn、fork/resume、事件和审批 |
 | Context Policy | `server/lib/agent-context.js` | 文档快照、增量变更、分支历史和受控替换规则 |
@@ -284,7 +288,7 @@ spawn codex app-server
   → turn/completed
 ```
 
-原生 Runtime 不覆盖 Codex 的 approval policy，继续使用 Codex CLI 和组织策略；玄鸟只根据访问模式设置 `read-only` 或 `danger-full-access` sandbox。模型和推理强度没有配置时也交给 Codex CLI 默认值。
+原生 Runtime 不覆盖 Codex 的 approval policy，继续使用 Codex CLI 和组织策略；玄鸟只根据访问模式设置 `read-only` 或 `danger-full-access` sandbox。设置页通过 `model/list` 获取当前目录，并在后续 `thread/start` / `turn/start` 传递已保存的模型与推理深度；没有覆盖时交给 Codex 默认值。修改设置只更新 Runtime 的后续回合参数，不销毁活动 session，也不中断正在运行的 turn。
 
 ### 6.3 Session 与树一致性
 
@@ -507,6 +511,8 @@ Node Server 检测到 `web/dist/index.html` 时会提供构建后的静态资源
 
 ### 11.4 环境变量
 
+模型和推理深度也可以在应用设置页中选择，持久化路径为 `~/xuanniao/settings.json`。环境变量仅作为设置文件不存在时的初始默认值；保存设置后，本机设置优先。
+
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | Node Server 地址 |
@@ -543,9 +549,10 @@ npm run check
 - Node test runner 单元测试
 - Vite production build
 
-截至当前代码，118 个测试全部通过。覆盖范围包括：
+截至当前代码，125 个测试全部通过。覆盖范围包括：
 
 - 原生 Codex session start/resume/fork、事件归并、审批挂起和上下文去重
+- Codex 模型目录分页、设置能力校验、环境变量回退和原子持久化
 - ACP 模式映射、文件写权限、session new/load/fallback、审批和启动失败
 - ThreadStore 路径、AgentSession 迁移、树变更失效规则和 anchor 删除同步
 - 增量文档 splice、branch-only 上下文和文档 hash

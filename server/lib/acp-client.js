@@ -70,6 +70,8 @@ export class AcpDocumentAgent {
       running: this.rpc.running,
       stderrTail: this.rpc.stderrTail,
       pendingPermissions: this.listPermissionRequests().length,
+      model: null,
+      reasoningEffort: null,
       capabilities: {
         resume: this.agentCapabilities.loadSession === true,
         fork: false,
@@ -79,9 +81,22 @@ export class AcpDocumentAgent {
         eventStream: true,
         structuredUserInput: false,
         mcpElicitation: false,
-        dynamicClientTools: false
+        dynamicClientTools: false,
+        modelSelection: false
       }
     };
+  }
+
+  listModels() {
+    return Promise.resolve([]);
+  }
+
+  configure({ model = null, reasoningEffort = null } = {}) {
+    if (model || reasoningEffort) {
+      const error = new Error("Model selection is only available with the native Codex transport.");
+      error.statusCode = 409;
+      throw error;
+    }
   }
 
   dispose() {

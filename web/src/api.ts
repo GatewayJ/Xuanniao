@@ -1,4 +1,4 @@
-import type { AgentOutcome, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
+import type { AgentOutcome, AgentSettingsPayload, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
 
 type JsonRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
 
@@ -91,6 +91,14 @@ export const api = {
     ),
   permissions: (signal?: AbortSignal) =>
     request<{ requests: PermissionRequest[] }>("/api/permissions", { signal }),
+  settings: (signal?: AbortSignal) =>
+    request<AgentSettingsPayload>("/api/settings", { signal }),
+  updateSettings: (body: { model: string | null; reasoningEffort: string | null }, signal?: AbortSignal) =>
+    request<AgentSettingsPayload>("/api/settings", {
+      method: "PUT",
+      body,
+      signal
+    }),
   resolvePermission: (
     requestId: string,
     body: { optionId?: string; cancelled?: boolean },

@@ -1,5 +1,6 @@
 import { AcpDocumentAgent } from "./acp-client.js";
 import { normalizeAgentMode } from "./agent-config.js";
+import { normalizeAgentSettings } from "./agent-settings.js";
 import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
 
 const requiredRuntimeMethods = [
@@ -7,12 +8,17 @@ const requiredRuntimeMethods = [
   "start",
   "dispose",
   "runTurn",
+  "listModels",
+  "configure",
   "listPermissionRequests",
   "resolvePermissionRequest"
 ];
 
-export function createAgentRuntime({ documentPath, cwd, env = process.env }) {
+export function createAgentRuntime({ documentPath, cwd, env = process.env, settings }) {
   const transport = normalizeAgentTransport(env.XUANNIAO_AGENT_TRANSPORT);
+  const agentSettings = settings === undefined
+    ? runtimeAgentSettingsFromEnv(env)
+    : normalizeAgentSettings(settings);
   const common = {
     documentPath,
     cwd,
@@ -34,11 +40,18 @@ export function createAgentRuntime({ documentPath, cwd, env = process.env }) {
     runtime = new CodexAppServerRuntime({
       ...common,
       commandLine: env.XUANNIAO_CODEX_CMD ?? "codex app-server",
-      model: optionalString(env.XUANNIAO_CODEX_MODEL),
-      reasoningEffort: optionalString(env.XUANNIAO_CODEX_REASONING_EFFORT)
+      model: agentSettings.model,
+      reasoningEffort: agentSettings.reasoningEffort
     });
   }
   return assertAgentRuntime(runtime);
+}
+
+export function runtimeAgentSettingsFromEnv(env = process.env) {
+  return normalizeAgentSettings({
+    model: optionalString(env.XUANNIAO_CODEX_MODEL),
+    reasoningEffort: optionalString(env.XUANNIAO_CODEX_REASONING_EFFORT)
+  });
 }
 
 export function normalizeAgentTransport(value) {

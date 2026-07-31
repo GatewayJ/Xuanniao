@@ -6,9 +6,11 @@ import { DiagramViewer } from "./components/DiagramViewer";
 import { DocumentPane, type Mode } from "./components/DocumentPane";
 import { FilePickerModal } from "./components/FilePickerModal";
 import { SelectionAskPopover } from "./components/SelectionAskPopover";
+import { SettingsModal } from "./components/SettingsModal";
 import { ThreadRail } from "./components/ThreadRail";
 import { TopBar } from "./components/TopBar";
 import { useRenderedPreview } from "./hooks/useRenderedPreview";
+import { useAgentSettings } from "./hooks/useAgentSettings";
 import { useConversationCommands } from "./hooks/useConversationCommands";
 import { useDocumentSession } from "./hooks/useDocumentSession";
 import { usePermissionInbox } from "./hooks/usePermissionInbox";
@@ -82,6 +84,7 @@ export function App() {
     captureDocumentSession: documentSession.captureDocumentSession,
     isDocumentSessionCurrent: documentSession.isDocumentSessionCurrent
   });
+  const agentSettings = useAgentSettings({ setStatus });
 
   const activeThread = threads.find((thread) => thread.id === activeThreadId) || null;
   const orderedThreads = useMemo(() => orderThreads(threads, documentData?.content), [threads, documentData?.content]);
@@ -516,6 +519,7 @@ export function App() {
         documentPath={documentData?.path || "正在加载…"}
         status={status}
         onOpenFileManager={() => void openFileManager()}
+        onOpenSettings={() => void agentSettings.openSettings()}
         onSave={() => void documentSession.saveDocument()}
       />
       <main className="workspace">
@@ -566,6 +570,15 @@ export function App() {
         onClose={() => setFilePickerOpen(false)}
         onBrowse={(path) => void browseFiles(path)}
         onOpenFile={(path) => void openDocument(path)}
+      />
+      <SettingsModal
+        open={agentSettings.settingsOpen}
+        data={agentSettings.settingsData}
+        loading={agentSettings.settingsLoading}
+        saving={agentSettings.settingsSaving}
+        error={agentSettings.settingsError}
+        onClose={agentSettings.closeSettings}
+        onSave={(model, reasoningEffort) => void agentSettings.saveSettings(model, reasoningEffort)}
       />
       {selectionAsk && (
         <SelectionAskPopover

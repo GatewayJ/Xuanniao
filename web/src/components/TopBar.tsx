@@ -4,10 +4,11 @@ type TopBarProps = {
   documentPath: string;
   status: string;
   onOpenFileManager: () => void;
+  onOpenSettings: () => void;
   onSave: () => void;
 };
 
-export function TopBar({ documentPath, status, onOpenFileManager, onSave }: TopBarProps) {
+export function TopBar({ documentPath, status, onOpenFileManager, onOpenSettings, onSave }: TopBarProps) {
   const fileName = documentPath.split(/[\\/]/).pop() || documentPath;
   const directory = documentPath.slice(0, Math.max(documentPath.length - fileName.length - 1, 0));
 
@@ -22,6 +23,9 @@ export function TopBar({ documentPath, status, onOpenFileManager, onSave }: TopB
       </div>
       <div className="actions">
         <span className="status">{status}</span>
+        <button type="button" className="settingsButton" onClick={onOpenSettings} aria-label="打开设置">
+          <span aria-hidden="true">⚙</span> 设置
+        </button>
         <button type="button" onClick={onSave}>保存</button>
       </div>
     </header>

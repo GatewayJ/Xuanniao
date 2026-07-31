@@ -16,6 +16,7 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 - **选区追问**：可以在节点的问题或回答中划选文字，直接创建带引用的追问。
 - **空间化导航**：支持无限画布、平移、缩放、节点焦点、面包屑和树形缩略图。
 - **受控文档修改**：Codex 可以返回限定范围的 replacement，由玄鸟应用并同步 Thread anchor。
+- **Codex 偏好**：设置页动态读取本机 Codex 模型，并按模型能力选择推理深度。
 
 ## 界面
 
@@ -208,6 +209,8 @@ Agent 默认使用 Codex app-server 与完全访问沙箱：
 make run
 ```
 
+应用顶栏的“设置”可以选择 Codex 模型和推理深度。模型目录来自当前 `codex app-server`，只显示每个模型实际支持的推理选项；保存后从下一轮提问生效，不会中断正在执行的任务。偏好保存在 `~/xuanniao/settings.json`，重启和切换文档后继续使用。
+
 只读模式：
 
 ```bash
@@ -222,6 +225,8 @@ XUANNIAO_CODEX_MODEL="<model-id>" \
 XUANNIAO_CODEX_REASONING_EFFORT="high" \
 npm start -- prd.md
 ```
+
+环境变量是首次启动且尚无设置文件时的默认值；一旦在设置页保存，以本机设置文件为准。选择“跟随 Codex 默认”会显式清除环境变量提供的模型或推理深度覆盖。
 
 切换到 ACP 兼容模式：
 

@@ -6,6 +6,10 @@ export function xuanniaoMetadataRoot() {
   return path.join(os.homedir(), "xuanniao");
 }
 
+export function agentSettingsPath(root = xuanniaoMetadataRoot()) {
+  return path.join(root, "settings.json");
+}
+
 export function documentMetadataKey(filePath) {
   return createHash("sha256").update(path.resolve(filePath)).digest("hex");
 }

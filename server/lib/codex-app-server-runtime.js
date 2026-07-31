@@ -8,6 +8,7 @@ import {
   documentHash
 } from "./agent-context.js";
 import { JsonLineRpcProcess } from "./json-line-rpc-process.js";
+import { normalizeModelCatalog } from "./agent-settings.js";
 
 const adapterName = "codex-app-server";
 
@@ -66,6 +67,8 @@ export class CodexAppServerRuntime {
       running: this.rpc.running,
       sessionCount: this.loadedThreads.size,
       pendingPermissions: this.pendingPermissions.size,
+      model: this.model,
+      reasoningEffort: this.reasoningEffort,
       stderrTail: this.rpc.stderrTail,
       capabilities: {
         resume: true,
@@ -76,9 +79,37 @@ export class CodexAppServerRuntime {
         eventStream: true,
         structuredUserInput: false,
         mcpElicitation: false,
-        dynamicClientTools: false
+        dynamicClientTools: false,
+        modelSelection: true
       }
     };
+  }
+
+  configure({ model = null, reasoningEffort = null } = {}) {
+    this.model = optionalString(model);
+    this.reasoningEffort = optionalString(reasoningEffort);
+  }
+
+  async listModels() {
+    await this.ensureInitialized();
+    const entries = [];
+    const seenCursors = new Set();
+    let cursor = null;
+
+    for (let page = 0; page < 20; page += 1) {
+      const response = await this.request("model/list", compactObject({
+        cursor,
+        limit: 100,
+        includeHidden: false
+      }));
+      if (Array.isArray(response?.data)) entries.push(...response.data);
+      const nextCursor = optionalString(response?.nextCursor);
+      if (!nextCursor || seenCursors.has(nextCursor)) break;
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    }
+
+    return normalizeModelCatalog(entries);
   }
 
   async start() {
@@ -731,4 +762,9 @@ function compactItemUpdate(method, item) {
 
 function compactObject(value) {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== null && entry !== undefined));
+}
+
+function optionalString(value) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  return normalized || null;
 }

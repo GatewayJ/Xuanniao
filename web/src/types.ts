@@ -132,6 +132,30 @@ export type AgentSession = {
   documentHash: string | null;
 };
 
+export type AgentReasoningOption = {
+  reasoningEffort: string;
+  description: string | null;
+};
+
+export type AgentModelOption = {
+  id: string;
+  model: string;
+  displayName: string;
+  description: string | null;
+  isDefault: boolean;
+  defaultReasoningEffort: string | null;
+  supportedReasoningEfforts: AgentReasoningOption[];
+};
+
+export type AgentSettingsPayload = {
+  transport: string;
+  modelSelectionSupported: boolean;
+  model: string | null;
+  reasoningEffort: string | null;
+  models: AgentModelOption[];
+  catalogError: string | null;
+};
+
 export type SelectionContext = {
   selectedText: string;
   anchor: Anchor;
