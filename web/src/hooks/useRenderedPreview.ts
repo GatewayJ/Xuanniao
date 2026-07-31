@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { RefObject } from "react";
 import { renderMarkdown, renderMermaidBlocks } from "../markdown";
-import { findPreviewBlockForThread } from "../thread-spatial";
+import { decoratePreviewThreadAnchors, updatePreviewActiveThread } from "../thread-preview";
 import type { Thread } from "../types";
 
 type UseRenderedPreviewOptions = {
@@ -77,22 +77,4 @@ export function useRenderedPreview({
     if (!root) return;
     updatePreviewActiveThread(root, activeThreadId);
   }, [previewRef, activeThreadId]);
-}
-
-function decoratePreviewThreadAnchors(root: HTMLElement, threads: Thread[], content: string) {
-  for (const thread of threads) {
-    const block = findPreviewBlockForThread(root, thread, content);
-    if (!block) continue;
-    const threadIds = new Set((block.dataset.previewThreadId || "").split(" ").filter(Boolean));
-    threadIds.add(thread.id);
-    block.dataset.previewThreadId = [...threadIds].join(" ");
-    block.classList.add("threadBlockMark");
-  }
-}
-
-function updatePreviewActiveThread(root: HTMLElement, activeThreadId: string | null) {
-  for (const marker of root.querySelectorAll<HTMLElement>("[data-preview-thread-id]")) {
-    const threadIds = (marker.dataset.previewThreadId || "").split(" ");
-    marker.classList.toggle("active", Boolean(activeThreadId && threadIds.includes(activeThreadId)));
-  }
 }

@@ -1534,12 +1534,8 @@ body.resizing .splitter::before {
   margin-top: 22px;
 }
 
-.threadContextDocument.preview .threadContextAnchorBlock {
-  background: linear-gradient(90deg, rgba(255, 244, 191, 0.82), rgba(255, 250, 232, 0.5));
-  border-radius: 0 6px 6px 0;
-  box-shadow: -4px 0 0 #e8b51c;
-  margin-left: -12px;
-  padding-left: 12px;
+.threadContextDocument.preview .threadBlockMark {
+  cursor: default;
   scroll-margin-top: 84px;
 }
 

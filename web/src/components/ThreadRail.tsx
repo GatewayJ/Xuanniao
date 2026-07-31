@@ -10,13 +10,16 @@ import {
 } from "react";
 import { createPortal } from "react-dom";
 import { useMessageSelection } from "../hooks/useMessageSelection";
-import { renderMarkdown, renderMermaidBlocks, renderMessageMarkdown } from "../markdown";
+import { useRenderedPreview } from "../hooks/useRenderedPreview";
+import { renderMessageMarkdown } from "../markdown";
+import { resolveThreadAnchor } from "../thread-anchors";
 import {
   THREAD_CANVAS_NODE_HEIGHT,
   THREAD_CANVAS_NODE_WIDTH,
   layoutConversationTree
 } from "../thread-canvas";
 import { threadNodeDraftKey } from "../thread-drafts";
+import { findPreviewBlockForThread } from "../thread-spatial";
 import {
   buildConversationTree,
   CONVERSATION_NODE_KINDS,
@@ -445,51 +448,40 @@ function ThreadDetailModal(props: {
   const knownNodeIdsRef = useRef(new Set(nodes.map((node) => node.id)));
   const centeredThreadRef = useRef<string | null>(null);
   const overviewTransformRef = useRef<{ x: number; y: number; scale: number } | null>(null);
-  const documentAnchorOutdated = useMemo(() => {
-    const source = props.thread.selectedText.replace(/\s+/g, " ").trim();
-    const content = props.documentData?.content.replace(/\s+/g, " ").trim() || "";
-    return Boolean(source && content && !content.includes(source));
-  }, [props.documentData?.content, props.thread.selectedText]);
-  const documentHtml = useMemo(
+  const documentAnchorLocation = useMemo(
     () => props.documentData
-      ? renderDocumentContextMarkdown(
-        props.documentData.content,
-        documentAnchorOutdated ? null : props.thread.anchor.lineStart,
-        props.thread.anchor.lineEnd
-      )
-      : "",
-    [documentAnchorOutdated, props.documentData?.content, props.thread.anchor.lineEnd, props.thread.anchor.lineStart]
+      ? resolveThreadAnchor(props.documentData.content, props.thread)
+      : null,
+    [props.documentData?.content, props.thread]
   );
+  const documentAnchorOutdated = Boolean(
+    props.thread.selectedText.trim()
+    && props.documentData?.content
+    && !documentAnchorLocation
+  );
+  const lineStart = documentAnchorLocation?.lineStart ?? props.thread.anchor.lineStart;
+  const lineEnd = documentAnchorLocation?.lineEnd ?? props.thread.anchor.lineEnd;
+  const documentContent = props.documentData?.content ?? null;
+  const renderedDocumentContent = documentContextOpen ? documentContent : null;
+  const documentPreviewThreads = useMemo(() => [props.thread], [props.thread]);
+
+  useRenderedPreview({
+    previewRef: documentContextRef,
+    content: renderedDocumentContent,
+    threads: documentPreviewThreads,
+    activeThreadId: props.thread.id,
+    onActivateThread: () => undefined,
+    onOpenDiagram: () => undefined,
+    onRendered: scrollDocumentContextToAnchor
+  });
 
   useEffect(() => {
     const frame = window.requestAnimationFrame(() => {
-      const root = documentContextRef.current;
-      if (!root || !documentHtml) return;
-
-      const sourceBlocks = [...root.querySelectorAll<HTMLElement>("[data-source-line]")];
-      const start = props.thread.anchor.lineStart;
-      if (!start) return;
-
-      const target = root.querySelector<HTMLElement>(".threadContextAnchorBlock")
-        || sourceBlocks.find((element) => Number(element.dataset.sourceLine) >= start);
-      if (target) {
-        const rootRect = root.getBoundingClientRect();
-        const targetRect = target.getBoundingClientRect();
-        root.scrollTop = Math.max(
-          0,
-          root.scrollTop + targetRect.top - rootRect.top - root.clientHeight * 0.18
-        );
-      }
+      scrollDocumentContextToAnchor();
     });
 
     return () => window.cancelAnimationFrame(frame);
-  }, [documentHtml, documentContextOpen, props.thread.anchor.lineEnd, props.thread.anchor.lineStart]);
-
-  useEffect(() => {
-    const root = documentContextRef.current;
-    if (!root || !documentHtml) return;
-    void renderMermaidBlocks(root);
-  }, [documentHtml, documentContextOpen]);
+  }, [documentContent, documentContextOpen, selectedNodeId]);
 
   useEffect(() => {
     const knownIds = knownNodeIdsRef.current;
@@ -649,8 +641,6 @@ function ThreadDetailModal(props: {
   const semanticStats = useMemo(() => conversationSemanticStats(nodes), [nodes]);
   const selectedInsertTarget = selectedNode?.children.find((node) => node.id === insertBeforeNodeId) || null;
   const routeChoiceRequired = insertBeforeNodeId === ROUTE_CHOICE_REQUIRED;
-  const lineStart = props.thread.anchor.lineStart;
-  const lineEnd = props.thread.anchor.lineEnd;
   const lineLabel = lineStart
     ? `第 ${lineStart}${lineEnd && lineEnd !== lineStart ? `–${lineEnd}` : ""} 行`
     : "未锚定";
@@ -681,7 +671,10 @@ function ThreadDetailModal(props: {
     clearCapturedMessageSelection();
     setInspectorOpen(true);
     window.getSelection()?.removeAllRanges();
-    if (startComposer) window.requestAnimationFrame(() => composerRef.current?.focus());
+    window.requestAnimationFrame(() => {
+      scrollDocumentContextToAnchor();
+      if (startComposer) composerRef.current?.focus();
+    });
   }
 
   function openInsertBetween(parentNodeId: string, childNodeId: string) {
@@ -703,8 +696,26 @@ function ThreadDetailModal(props: {
     clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
     window.requestAnimationFrame(() => {
+      scrollDocumentContextToAnchor();
       if (messageSelectionSurfaceRef.current) messageSelectionSurfaceRef.current.scrollTop = 0;
     });
+  }
+
+  function scrollDocumentContextToAnchor() {
+    const root = documentContextRef.current;
+    if (!root || !props.documentData?.content) return;
+    const target = root.querySelector<HTMLElement>(
+      `[data-preview-thread-id~="${CSS.escape(props.thread.id)}"]`
+    )
+      || findPreviewBlockForThread(root, props.thread, props.documentData.content);
+    if (!target) return;
+
+    const rootRect = root.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    root.scrollTop = Math.max(
+      0,
+      root.scrollTop + targetRect.top - rootRect.top - root.clientHeight * 0.18
+    );
   }
 
   function navigateInDirection(direction: keyof typeof selectedNodeNavigation) {
@@ -972,11 +983,10 @@ function ThreadDetailModal(props: {
                 </div>
                 <blockquote>{props.thread.selectedText || "未保存引用内容"}</blockquote>
               </div>
-              {documentHtml ? (
+              {documentContent !== null ? (
                 <article
                   ref={documentContextRef}
                   className="threadContextDocument preview"
-                  dangerouslySetInnerHTML={{ __html: documentHtml }}
                 />
               ) : (
                 <div className="threadContextEmpty">文章内容暂不可用。</div>
@@ -1718,23 +1728,6 @@ function questionSummary(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
   if (!normalized) return "未命名问题";
   return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized;
-}
-
-function renderDocumentContextMarkdown(content: string, lineStart: number | null, lineEnd: number | null): string {
-  const html = renderMarkdown(content);
-  if (!lineStart || typeof DOMParser === "undefined") return html;
-
-  const parsed = new DOMParser().parseFromString(html, "text/html");
-  const end = lineEnd ?? lineStart;
-  const candidates = [...parsed.body.querySelectorAll<HTMLElement>("[data-source-line]")].filter((element) => {
-    const line = Number(element.dataset.sourceLine);
-    return Number.isInteger(line) && line >= lineStart && line <= end;
-  });
-  const candidateSet = new Set(candidates);
-  candidates
-    .filter((element) => ![...element.querySelectorAll<HTMLElement>("[data-source-line]")].some((child) => candidateSet.has(child)))
-    .forEach((element) => element.classList.add("threadContextAnchorBlock"));
-  return parsed.body.innerHTML;
 }
 
 function PermissionRequestPanel(props: {
