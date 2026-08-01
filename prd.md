@@ -63,8 +63,8 @@
 | Agent 直接修改文件 | 已实现 | Runtime 可按沙箱和审批策略修改文件；返回后重新读取当前文档并校准 thread |
 | 受控选区替换 | 实验性、默认关闭 | `XUANNIAO_CONTROLLED_REPLACEMENT=1` 时按意图识别并替换当前选区 |
 | Patch/Diff 审核 | 未实现 | 没有 patch 数据模型、diff preview、确认后 apply 流程 |
-| 实时流式回复 | 未实现 | 服务端保留原生事件与 ACP update，但浏览器等待完整 HTTP 响应 |
-| Tool Call 展示 | 未实现 | 仅把压缩后的 update 写入消息 meta，没有可见执行时间线 |
+| 实时流式回复 | 部分实现 | Agent 工具、计划和状态通过 SSE 实时传递；assistant 正文仍随最终 HTTP 响应返回 |
+| Tool Call 展示 | 已实现 | 执行中自动展开命令、文件、MCP、搜索和计划；正文返回后折叠，刷新后仍可展开 |
 | 人工权限弹窗 | 已实现 | 前端轮询并渲染权限卡片；服务端挂起 Runtime 请求，等待用户 Allow/Deny |
 | 外部文件监听 | 未实现 | 没有 chokidar/fs.watch；仅在保存或一次 Agent turn 结束后重新读取 |
 | Git/快照历史 | 未实现 | 没有 Git 集成、版本列表、文档快照或 patch 回滚 |
@@ -95,6 +95,7 @@ flowchart LR
 - Tree 总览和节点 content 使用互斥创建入口：叶子节点只创建子节点，已有子路径的节点只创建独立分支；新节点始终直接挂到当前节点，不重排既有路径，连接线不提供创建按钮。
 - 上一个/下一个 thread 导航。
 - 编辑用户问题并保存时始终重新询问 Codex；刷新后未回答的节点可显式恢复请求。
+- Codex 执行期间实时展开结构化过程；正文返回后显示“已处理 Ns”折叠行，点击可查看步骤和输出。
 - 重试或删除 Codex 回复。
 - 删除完整 thread。
 
@@ -109,7 +110,7 @@ flowchart LR
 | Diagram | Mermaid 11 | `securityLevel: strict`，浏览器本地渲染 |
 | Styling | 原生 CSS | 没有 Tailwind |
 | Server | Node.js 20.19.x / 22.12+，ESM JavaScript | 使用内置 `http` 和文件系统 API，没有 Web 框架 |
-| Browser/Server 通信 | REST + JSON | 没有 WebSocket 或 SSE |
+| Browser/Server 通信 | REST + JSON + SSE | 文档和消息使用 REST；Agent 运行事件使用单向 SSE |
 | Agent Runtime | stdio JSONL / JSON-RPC | 默认直连 `codex app-server`；可切换 ACP adapter |
 | Thread 持久化 | 本地 JSON | 每个文档一个 `threads.json` |
 | Markdown 索引 | 自定义轻量行解析器 | 识别 heading、paragraph、无序 list、反引号 fenced code |
@@ -144,7 +145,7 @@ flowchart LR
 一个 Server 进程只有一个活动文档：
 
 - 活动文档对应一个 Agent Runtime 句柄；`codex app-server` 或 ACP 子进程只在第一次 Agent 请求时按需启动。
-- 每个 conversation node 对应一个 Agent session；同一节点复用 session，子节点从父节点最后成功 turn fork。
+- 每个新问题形成独立 conversation node，并对应一个 Agent session；子节点从父节点最后成功 turn fork。
 - 切换文档时创建新的文档上下文并替换 ThreadStore，随后释放旧 Runtime；Agent CLI 不可用不会阻断文档打开与编辑。
 - 原生 Runtime 只串行化同一 session，不同分支可以并行；ACP 兼容 adapter 仍按进程串行。
 - ThreadStore 对 mutation 使用单实例串行队列，避免并行分支完成时相互覆盖 JSON 更新。
@@ -242,13 +243,14 @@ sequenceDiagram
   Runtime->>Codex: thread start/resume/fork
   Runtime->>Codex: turn/start 或 session/prompt
   Codex-->>Runtime: item/update events
+  Runtime-->>UI: SSE agent run updates
   Codex-->>Runtime: turn completed
   Runtime-->>API: answer + semantic session
   API->>Store: 保存 assistant message
   API-->>UI: threads + 可选 updated document
 ```
 
-这是同步 HTTP 请求。前端先显示临时 “Working with local Codex...” 消息，但只有 Agent turn 完成后才收到真实回复。
+消息命令仍是同步 HTTP 请求，但每轮同时携带独立 `agentRunId`。浏览器先通过 `POST /api/agent-runs/:id` 预留运行记录，再订阅 `/api/agent-runs/:id/events` 实时归并结构化步骤；Agent turn 完成后 HTTP 响应返回正文和持久化后的 thread。执行中过程默认展开，正文出现后自动折叠；最终步骤和耗时保存在 assistant message meta，因此刷新后仍可查看。
 
 ### 5.4 Agent 修改文档
 
@@ -267,7 +269,7 @@ sequenceDiagram
 
 ```text
 start / dispose / status
-runTurn(question, document, branch, mode) → answer + AgentSession
+runTurn(question, document, branch, mode, onUpdate) → answer + AgentSession
 listPermissionRequests / resolvePermissionRequest
 ```
 
@@ -303,7 +305,7 @@ type AgentSession = {
 }
 ```
 
-同一节点继续对话时复用其 session；新子节点从父节点最近成功 turn fork，因此 Agent 可见历史与 UI 路径一致。编辑或删除问题、删除回答、继续一个已有子分支的父节点时，ThreadStore 会清除受影响节点或后代的 session；下一次调用会从仍可信的父节点 fork，或根据本地分支历史重建。新节点只允许直接追加到指定父节点，旧的插入和子树重排参数会在领域边界被拒绝。
+每个新问题必须创建独立节点；新子节点从父节点最近成功 turn fork，因此 Agent 可见历史与 UI 路径一致。编辑或删除问题、删除回答时，ThreadStore 会清除受影响节点或后代的 session；下一次调用会从仍可信的父节点 fork，或根据本地分支历史重建。新节点只允许直接追加到指定父节点，同节点追加轮次、旧的插入参数和子树重排参数都会在领域边界被拒绝。旧数据中的同节点多轮仅保留兼容展示，不再产生新的写入。
 
 每次调用还会携带当前 lineage revision。Agent 完成时，ThreadStore 在写入回答与 AgentSession 的同一 mutation 中重新校验 revision；如果祖先路径在运行期间改变，旧回答不会提交，而是要求重试。
 
@@ -323,7 +325,7 @@ type AgentSession = {
 
 Codex 的 command、file change 和 additional permissions 请求会转成统一 PermissionRequest，挂起原协议请求并等待浏览器选择。Allow once、Allow for session、Reject 和 Cancel 会映射回协议原生 decision。ACP `session/request_permission` 使用同一个审批队列，不再根据访问模式自动代替用户选择。
 
-Runtime 保留 agent message delta 和 item 生命周期更新；当前 HTTP API 在 turn 完成后一次性返回正文，前端流式展示仍是后续工作。
+Runtime 把 command execution、file change、MCP/dynamic tool、web search、plan、协作调用和公开 reasoning summary 归一为展示事件，并交给有界 `AgentRunBroker` 通过 SSE 发布。命令输出 delta 会在执行中增量归并，终态步骤与耗时写入 assistant message meta。隐藏 reasoning 正文不会进入应用展示或持久化；assistant 正文仍在 turn 完成后一次性返回。
 
 原生 turn 使用 10 分钟活动空闲超时，Agent 输出和工具事件会自动续期，等待用户审批时暂停计时。连续无活动超时后 Runtime 会发送 `turn/interrupt` 并继续持有当前 session lock；若宽限期内仍收不到终态，则重启 app-server 并失败掉其它在途 turn，确保超时任务不能在后台继续修改工作区。迟到事件和抢跑事件均有数量边界。
 
@@ -437,6 +439,9 @@ ThreadStore 每次操作都读取并重写完整 JSON 文件；同一路径的�
 | POST | `/api/document/open` | 切换活动 Markdown 文档 |
 | PUT | `/api/document` | 保存完整文档和 thread anchors |
 | GET | `/api/threads` | 读取当前文档的 threads |
+| POST | `/api/agent-runs/:id` | 预留单轮 Agent 运行记录 |
+| GET | `/api/agent-runs/:id` | 查询运行快照或恢复服务重启后中断的运行状态 |
+| GET | `/api/agent-runs/:id/events` | 订阅单轮 Agent 的结构化步骤、输出和终态 |
 | POST | `/api/threads` | 创建或复用选区 thread |
 | DELETE | `/api/threads/:id` | 删除 thread |
 | POST | `/api/threads/:id/messages` | 保存消息并可选询问 Codex |
@@ -549,7 +554,7 @@ npm run check
 - Node test runner 单元测试
 - Vite production build
 
-截至当前代码，125 个测试全部通过。覆盖范围包括：
+截至当前代码，146 个测试全部通过。覆盖范围包括：
 
 - 原生 Codex session start/resume/fork、事件归并、审批挂起和上下文去重
 - Codex 模型目录分页、设置能力校验、环境变量回退和原子持久化
@@ -565,6 +570,7 @@ npm run check
 - JSONL 子进程请求关联、超时与退出诊断
 - HTTP Host/Origin/媒体类型安全边界与完整 Server 集成
 - 前端会话状态、权限收件箱和消息选区文本规则
+- Agent run 事件有界缓存、SSE 终态、工具生命周期归并和刷新后持久化展示
 
 尚缺少：
 
@@ -597,7 +603,7 @@ Runtime 已避免在未变化的连续 turn 重发完整文档和历史，并增
 
 ### 13.6 编排模块过重
 
-服务端领域、应用、事务和适配边界已拆分；前端文档、会话、权限与选区状态也已下沉。`ThreadRail.tsx` 仍同时编排评论栏、画布和节点详情，后续增加 streaming 或 diff 审核前仍有继续按视觉子区域拆分的空间。
+服务端领域、应用、事务和适配边界已拆分；前端文档、会话、权限、选区和 Agent 运行过程状态也已下沉。`ThreadRail.tsx` 仍同时编排评论栏、画布和节点详情，后续增加 diff 审核前仍有继续按视觉子区域拆分的空间。
 
 ## 14. 建议的演进架构
 
@@ -644,7 +650,7 @@ Ask Codex
 
 ### Phase 3：改善交互与可观测性
 
-- 使用 SSE 或 WebSocket 流式传递 assistant chunk、tool call、plan 和错误。
+- 已使用 SSE 流式传递 tool call、命令输出、plan、公开 reasoning summary 和错误；assistant 正文流式传输仍待实现。
 - 支持用户主动取消 turn，并补充更明确的 Agent 状态。
 - 完成用户可见的 permission flow。
 - 增加本地评论按钮，不必每条消息都调用 Codex。

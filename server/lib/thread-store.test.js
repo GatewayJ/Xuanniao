@@ -337,6 +337,65 @@ test("persists planning metadata on user questions", async () => {
   }
 });
 
+test("persists the active agent run on an unanswered question", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-agent-run-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({
+      title: "Active run",
+      selectedText: "selection",
+      anchor: {}
+    });
+    const question = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Keep working"
+    });
+
+    await store.setAgentRunId(thread.id, question.id, "run_12345678");
+    const restored = await new ThreadStore(storePath).get(thread.id);
+
+    assert.equal(restored.messages[0].meta.agentRunId, "run_12345678");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("rerun preparation does not partially persist when the atomic write fails", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-rerun-atomic-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({ title: "Atomic rerun", selectedText: "selection", anchor: {} });
+    const question = await store.addMessage(thread.id, { role: "user", content: "Original question" });
+    await store.completeAgentTurn(
+      thread.id,
+      question.id,
+      { role: "assistant", content: "Original answer" },
+      null
+    );
+    store.write = async () => {
+      throw new Error("simulated atomic write failure");
+    };
+
+    await assert.rejects(
+      store.prepareQuestionRerun(thread.id, question.id, {
+        content: "Edited question",
+        agentRunId: "rerun_12345678"
+      }),
+      /simulated atomic write failure/
+    );
+
+    const restored = await new ThreadStore(storePath).get(thread.id);
+    assert.equal(restored.messages.find((message) => message.id === question.id).content, "Original question");
+    assert.equal(restored.messages.find((message) => message.role === "assistant").content, "Original answer");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("editing a question invalidates its node session and every descendant session", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-invalidation-test-"));
   const storePath = path.join(tempDir, "threads.json");

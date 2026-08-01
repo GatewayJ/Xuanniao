@@ -10,6 +10,7 @@ import { validateAgentSettingsSelection } from "./lib/agent-settings.js";
 import { AgentSettingsStore } from "./lib/agent-settings-store.js";
 import { atomicWriteText } from "./lib/atomic-file.js";
 import { ConversationService } from "./lib/conversation-service.js";
+import { AgentRunBroker, interruptedAgentRunSnapshot, normalizeAgentRunId } from "./lib/agent-run-broker.js";
 import { normalizeConversationMetaPatch } from "./lib/conversation-model.js";
 import { DocumentWorkspace } from "./lib/document-workspace.js";
 import { browseMarkdownDirectory } from "./lib/file-browser.js";
@@ -34,6 +35,7 @@ const ignoredFileManagerDirs = new Set([".git", "node_modules", "dist", ".xuanni
 assertSafeHostBinding(host, allowRemote);
 const initialDocumentPath = path.resolve(workspaceRoot, args.file ?? "prd.md");
 const settingsStore = new AgentSettingsStore(agentSettingsPath());
+const agentRuns = new AgentRunBroker();
 const environmentAgentSettings = runtimeAgentSettingsFromEnv(process.env);
 let agentSettings = await loadAgentSettings();
 await ensureDocument(initialDocumentPath);
@@ -138,6 +140,29 @@ const server = createServer(async (req, res) => {
 
     if (url.pathname === "/api/threads" && req.method === "GET") {
       return sendJson(res, 200, { threads: await context.threadStore.list() });
+    }
+
+    const agentRunSnapshotMatch = url.pathname.match(/^\/api\/agent-runs\/([^/]+)$/);
+    if (agentRunSnapshotMatch && req.method === "POST") {
+      await readJson(req);
+      const agentRunId = normalizeAgentRunId(decodeURIComponent(agentRunSnapshotMatch[1]));
+      return sendJson(res, 201, agentRuns.reserve(agentRunId));
+    }
+    if (agentRunSnapshotMatch && req.method === "GET") {
+      const agentRunId = normalizeAgentRunId(decodeURIComponent(agentRunSnapshotMatch[1]));
+      const snapshot = agentRuns.snapshot(agentRunId) || interruptedAgentRunSnapshot(
+        agentRunId,
+        await context.threadStore.list()
+      );
+      return snapshot
+        ? sendJson(res, 200, snapshot)
+        : sendJson(res, 404, { error: `agent run not found: ${agentRunId}` });
+    }
+
+    const agentRunMatch = url.pathname.match(/^\/api\/agent-runs\/([^/]+)\/events$/);
+    if (agentRunMatch && req.method === "GET") {
+      const agentRunId = normalizeAgentRunId(decodeURIComponent(agentRunMatch[1]));
+      return streamAgentRun(req, res, agentRunId);
     }
 
     if (url.pathname === "/api/threads" && req.method === "POST") {
@@ -260,6 +285,7 @@ function shutdown(signal) {
   console.log(`Received ${signal}; closing Xuanniao.`);
   try {
     activeDocument.agent.dispose();
+    agentRuns.dispose();
   } catch (error) {
     console.error(error);
     process.exitCode = 1;
@@ -334,6 +360,7 @@ async function createDocumentContext(filePath) {
       threadStore,
       document,
       agent,
+      agentRuns,
       controlledReplacement: process.env.XUANNIAO_CONTROLLED_REPLACEMENT === "1",
       onAgentError: (event) => {
         console.error(JSON.stringify({
@@ -522,6 +549,86 @@ function sendJson(res, statusCode, payload) {
     "content-type": "application/json; charset=utf-8"
   });
   res.end(JSON.stringify(payload));
+}
+
+function streamAgentRun(req, res, agentRunId) {
+  if (!agentRuns.snapshot(agentRunId)) {
+    const error = new Error(`agent run not found: ${agentRunId}`);
+    error.statusCode = 404;
+    error.code = "AGENT_RUN_NOT_FOUND";
+    throw error;
+  }
+  res.writeHead(200, {
+    "content-type": "text/event-stream; charset=utf-8",
+    "cache-control": "no-cache, no-transform",
+    connection: "keep-alive",
+    "x-accel-buffering": "no"
+  });
+  const maxPendingEvents = 128;
+  let closed = false;
+  let terminal = false;
+  let draining = false;
+  let heartbeat = null;
+  let unsubscribe = () => {};
+  const pending = [];
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(heartbeat);
+    res.off("drain", onDrain);
+    unsubscribe();
+  };
+  const end = () => {
+    cleanup();
+    if (!res.writableEnded && !res.destroyed) res.end();
+  };
+  const flush = () => {
+    if (closed || draining) return;
+    while (pending.length > 0) {
+      const next = pending.shift();
+      if (!writeServerEvent(res, next.type, next.data)) {
+        draining = true;
+        res.once("drain", onDrain);
+        return;
+      }
+    }
+    if (terminal) end();
+  };
+  function onDrain() {
+    draining = false;
+    flush();
+  }
+  const enqueue = ({ type, data }) => {
+    if (closed) return;
+    if (pending.length >= maxPendingEvents) {
+      pending.length = 0;
+      const snapshot = agentRuns.snapshot(agentRunId);
+      if (snapshot) pending.push({ type: "snapshot", data: snapshot });
+    }
+    pending.push({ type, data });
+    if (type === "complete" || type === "shutdown") terminal = true;
+    flush();
+  };
+
+  if (!res.write("retry: 3000\n\n")) draining = true;
+  if (draining) res.once("drain", onDrain);
+  unsubscribe = agentRuns.subscribe(agentRunId, enqueue);
+  if (closed) {
+    unsubscribe();
+  } else {
+    heartbeat = setInterval(() => {
+      if (!closed && !draining && pending.length === 0) res.write(": heartbeat\n\n");
+    }, 15_000);
+    heartbeat.unref?.();
+  }
+
+  req.on("close", cleanup);
+  res.on("close", cleanup);
+}
+
+function writeServerEvent(res, event, payload) {
+  return res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
 }
 
 function parseArgs(argv) {

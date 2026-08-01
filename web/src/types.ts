@@ -73,6 +73,49 @@ export type BranchSelection = {
 
 export type AgentOutcome = "completed" | "failed" | "not-requested";
 
+export type AgentRunStatus = "waiting" | "running" | "completed" | "failed";
+
+export type AgentRunUpdate = {
+  seq?: number;
+  at?: string;
+  type: string;
+  status?: string;
+  itemId?: string | null;
+  command?: string;
+  cwd?: string;
+  output?: string;
+  outputDelta?: string;
+  exitCode?: number | null;
+  durationMs?: number | null;
+  title?: string;
+  kind?: string;
+  server?: string;
+  tool?: string;
+  result?: string;
+  error?: string;
+  query?: string;
+  action?: string;
+  summary?: string;
+  summaryDelta?: string;
+  message?: string;
+  path?: string;
+  changes?: Array<{ path?: string; kind?: string; diff?: string }>;
+  plan?: Array<{ step?: string; status?: string }>;
+  receiverThreadIds?: string[];
+};
+
+export type AgentRunSnapshot = {
+  id: string;
+  status: AgentRunStatus;
+  startedAt: string | null;
+  completedAt: string | null;
+  durationMs: number | null;
+  error: string | null;
+  events: AgentRunUpdate[];
+};
+
+export type AgentRunState = AgentRunSnapshot;
+
 export type ConversationMessageCommand = {
   threadId: string;
   content: string;
@@ -81,6 +124,7 @@ export type ConversationMessageCommand = {
   nodeId?: string | null;
   parentMessageId?: string | null;
   branchSelection?: BranchSelection | null;
+  agentRunId?: string | null;
 };
 
 export type PermissionOption = {

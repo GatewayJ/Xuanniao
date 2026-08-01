@@ -147,10 +147,10 @@ export function App() {
     try {
       const [doc, threadPayload, filePayload] = await Promise.all([api.document(), api.threads(), api.files()]);
       documentSession.loadDocument(doc, false, true);
-      setThreads(threadPayload.threads);
-      setActiveThreadId(threadPayload.threads[0]?.id || null);
       setWorkspaceRoot(filePayload.root);
       setStatus("就绪");
+      const loadedThreads = await conversation.resumeAgentRuns(threadPayload.threads);
+      setActiveThreadId(loadedThreads[0]?.id || null);
     } catch (error) {
       setStatus(error instanceof Error ? error.message : String(error));
     }
@@ -275,14 +275,15 @@ export function App() {
       const payload = await api.openDocument(path, controller.signal);
       if (openDocumentRequestRef.current !== controller) return;
       documentSession.loadDocument(payload.document, true, true);
-      setThreads(payload.threads);
-      setActiveThreadId(payload.threads[0]?.id || null);
       conversation.resetConversationEditor();
       setSelectionAsk(null);
       setSelectionQuestion("");
       setFilePickerOpen(false);
       setFileBrowserError("");
       setStatus("文档已打开");
+      const loadedThreads = await conversation.resumeAgentRuns(payload.threads);
+      if (openDocumentRequestRef.current !== controller) return;
+      setActiveThreadId(loadedThreads[0]?.id || null);
     } catch (error) {
       if (controller.signal.aborted) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -536,6 +537,7 @@ export function App() {
         <div className="splitter" role="separator" onPointerDown={startResize} />
         <ThreadRail
           documentData={documentData}
+          agentSettings={agentSettings.settingsData}
           threads={orderedThreads}
           activeThreadId={activeThreadId}
           spatialLayout={threadSpatialLayout}

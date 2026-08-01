@@ -1,4 +1,4 @@
-import type { AgentOutcome, AgentSettingsPayload, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
+import type { AgentOutcome, AgentRunSnapshot, AgentRunUpdate, AgentSettingsPayload, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
 
 type JsonRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
 
@@ -24,7 +24,7 @@ async function request<T>(url: string, options: JsonRequestInit = {}): Promise<T
 export const api = {
   files: () => request<{ root: string; currentPath: string; files: MarkdownFile[] }>("/api/files"),
   browseFiles: (targetPath: string) => request<FileBrowserPayload>(`/api/files/browse?path=${encodeURIComponent(targetPath)}`),
-  document: () => request<DocumentPayload>("/api/document"),
+  document: (signal?: AbortSignal) => request<DocumentPayload>("/api/document", { signal }),
   openDocument: (path: string, signal?: AbortSignal) => request<{ document: DocumentPayload; threads: Thread[]; files: MarkdownFile[] }>("/api/document/open", {
     method: "POST",
     body: { path },
@@ -43,6 +43,14 @@ export const api = {
     signal
   }),
   threads: (signal?: AbortSignal) => request<{ threads: Thread[] }>("/api/threads", { signal }),
+  reserveAgentRun: (runId: string, signal?: AbortSignal) =>
+    request<AgentRunSnapshot>(`/api/agent-runs/${encodeURIComponent(runId)}`, {
+      method: "POST",
+      body: {},
+      signal
+    }),
+  agentRun: (runId: string, signal?: AbortSignal) =>
+    request<AgentRunSnapshot>(`/api/agent-runs/${encodeURIComponent(runId)}`, { signal }),
   createThread: (body: { documentPath: string; title: string; selectedText: string; anchor: unknown; expectedRevision: string }, signal?: AbortSignal) =>
     request<{ thread: Thread }>("/api/threads", {
       method: "POST",
@@ -54,7 +62,7 @@ export const api = {
       method: "DELETE",
       signal
     }),
-  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null }, signal?: AbortSignal) =>
+  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null; agentRunId?: string | null }, signal?: AbortSignal) =>
     request<{ userMessage: Message; assistantMessage: Message | null; agentOutcome: AgentOutcome; threads: Thread[]; document?: DocumentPayload | null }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages`,
       {
@@ -63,7 +71,7 @@ export const api = {
         signal
       }
     ),
-  updateMessage: (threadId: string, messageId: string, body: { content: string; rerunAgent?: boolean }, signal?: AbortSignal) =>
+  updateMessage: (threadId: string, messageId: string, body: { content: string; rerunAgent?: boolean; agentRunId?: string | null }, signal?: AbortSignal) =>
     request<{ message: Message; assistantMessage: Message | null; agentOutcome: AgentOutcome; threads: Thread[]; document?: DocumentPayload | null }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,
       {
@@ -108,5 +116,52 @@ export const api = {
       method: "POST",
       body,
       signal
-    })
+    }),
+  subscribeAgentRun: (
+    runId: string,
+    handlers: {
+      onSnapshot: (snapshot: AgentRunSnapshot) => void;
+      onUpdate: (update: AgentRunUpdate) => void;
+      onComplete: (snapshot: AgentRunSnapshot) => void;
+    },
+    signal?: AbortSignal
+  ) => {
+    const source = new EventSource(`/api/agent-runs/${encodeURIComponent(runId)}/events`);
+    const parse = <T>(event: Event): T | null => {
+      try {
+        return JSON.parse((event as MessageEvent<string>).data) as T;
+      } catch {
+        return null;
+      }
+    };
+    const onSnapshot = (event: Event) => {
+      const snapshot = parse<AgentRunSnapshot>(event);
+      if (snapshot) handlers.onSnapshot(snapshot);
+    };
+    const onUpdate = (event: Event) => {
+      const update = parse<AgentRunUpdate>(event);
+      if (update) handlers.onUpdate(update);
+    };
+    const onComplete = (event: Event) => {
+      const snapshot = parse<AgentRunSnapshot>(event);
+      if (snapshot) handlers.onComplete(snapshot);
+      close();
+    };
+    const onShutdown = () => close();
+    source.addEventListener("snapshot", onSnapshot);
+    source.addEventListener("update", onUpdate);
+    source.addEventListener("complete", onComplete);
+    source.addEventListener("shutdown", onShutdown);
+
+    function close() {
+      source.removeEventListener("snapshot", onSnapshot);
+      source.removeEventListener("update", onUpdate);
+      source.removeEventListener("complete", onComplete);
+      source.removeEventListener("shutdown", onShutdown);
+      source.close();
+      signal?.removeEventListener("abort", close);
+    }
+    signal?.addEventListener("abort", close, { once: true });
+    return close;
+  }
 };

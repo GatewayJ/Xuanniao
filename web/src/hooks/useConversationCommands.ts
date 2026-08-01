@@ -2,6 +2,13 @@ import { useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 
 import { api } from "../api.ts";
+import {
+  applyAgentRunSnapshot,
+  applyAgentRunUpdate,
+  createAgentRunId,
+  restorePendingAgentRun,
+  resumableAgentRuns
+} from "../agent-run.ts";
 import type { DocumentSessionOperation } from "../document-session-scope.ts";
 import {
   appendPendingMessage,
@@ -61,16 +68,28 @@ export function useConversationCommands({
 
     try {
       if (!await flushDocumentSave() || !isDocumentSessionCurrent(operation)) return false;
-      const normalized = { ...command, content };
+      const agentRunId = command.askAgent ? createAgentRunId() : null;
+      const normalized = { ...command, content, agentRunId };
+      if (agentRunId) await api.reserveAgentRun(agentRunId, operation.signal);
+      if (!isDocumentSessionCurrent(operation)) return false;
       setStatus(command.askAgent ? "正在询问 Codex" : "正在添加评论");
       setThreads((current) => appendPendingMessage(current, normalized));
-      const payload = await api.sendMessage(command.threadId, {
-        content,
-        askAgent: command.askAgent,
-        nodeId: command.nodeId,
-        parentMessageId: command.parentMessageId,
-        branchSelection: command.branchSelection
-      }, operation.signal);
+      const closeAgentRun = agentRunId
+        ? subscribeToAgentRun(command.threadId, agentRunId, operation)
+        : () => {};
+      let payload;
+      try {
+        payload = await api.sendMessage(command.threadId, {
+          content,
+          askAgent: command.askAgent,
+          nodeId: command.nodeId,
+          parentMessageId: command.parentMessageId,
+          branchSelection: command.branchSelection,
+          agentRunId
+        }, operation.signal);
+      } finally {
+        closeAgentRun();
+      }
       if (!isDocumentSessionCurrent(operation)) return false;
       setThreads(payload.threads);
       const documentApplied = payload.document ? applyDocument(payload.document) : true;
@@ -92,15 +111,20 @@ export function useConversationCommands({
     const operation = captureDocumentSession();
     const content = editText.trim();
     if (!content) return;
-    setThreads((current) =>
-      updateMessageWithPendingReply(current, threadId, messageId, content, true)
-    );
+    const agentRunId = createAgentRunId();
     setStatus("正在更新 Codex 回答");
+    let closeAgentRun = () => {};
     try {
+      await api.reserveAgentRun(agentRunId, operation.signal);
+      if (!isDocumentSessionCurrent(operation)) return;
+      setThreads((current) =>
+        updateMessageWithPendingReply(current, threadId, messageId, content, true, agentRunId)
+      );
+      closeAgentRun = subscribeToAgentRun(threadId, agentRunId, operation);
       const payload = await api.updateMessage(
         threadId,
         messageId,
-        { content, rerunAgent: true },
+        { content, rerunAgent: true, agentRunId },
         operation.signal
       );
       if (!isDocumentSessionCurrent(operation)) return;
@@ -113,6 +137,8 @@ export function useConversationCommands({
       }
     } catch (error) {
       if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
+    } finally {
+      closeAgentRun();
     }
   }
 
@@ -171,14 +197,19 @@ export function useConversationCommands({
     }
 
     setStatus(pendingStatus);
-    setThreads((current) =>
-      updateMessageWithPendingReply(current, threadId, userMessage.id, userMessage.content, true)
-    );
+    const agentRunId = createAgentRunId();
+    let closeAgentRun = () => {};
     try {
+      await api.reserveAgentRun(agentRunId, operation.signal);
+      if (!isDocumentSessionCurrent(operation)) return;
+      setThreads((current) =>
+        updateMessageWithPendingReply(current, threadId, userMessage.id, userMessage.content, true, agentRunId)
+      );
+      closeAgentRun = subscribeToAgentRun(threadId, agentRunId, operation);
       const payload = await api.updateMessage(
         threadId,
         userMessage.id,
-        { content: userMessage.content, rerunAgent: true },
+        { content: userMessage.content, rerunAgent: true, agentRunId },
         operation.signal
       );
       if (!isDocumentSessionCurrent(operation)) return;
@@ -190,6 +221,8 @@ export function useConversationCommands({
       }
     } catch (error) {
       if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
+    } finally {
+      closeAgentRun();
     }
   }
 
@@ -268,6 +301,106 @@ export function useConversationCommands({
     }
   }
 
+  async function resumeAgentRuns(loadedThreads: Thread[]): Promise<Thread[]> {
+    const operation = captureDocumentSession();
+    const candidates = resumableAgentRuns(loadedThreads);
+    if (candidates.length === 0) {
+      setThreads(loadedThreads);
+      return loadedThreads;
+    }
+
+    const available = await Promise.all(candidates.map(async (candidate) => {
+      try {
+        return { candidate, snapshot: await api.agentRun(candidate.runId, operation.signal) };
+      } catch {
+        return null;
+      }
+    }));
+    if (!isDocumentSessionCurrent(operation)) return loadedThreads;
+
+    let restored = loadedThreads;
+    let terminalRun: { status: "completed" | "failed"; error: string | null } | null = null;
+    for (const entry of available) {
+      if (!entry) continue;
+      if (entry.snapshot.status === "waiting" || entry.snapshot.status === "running") {
+        restored = restorePendingAgentRun(restored, entry.candidate, entry.snapshot);
+      } else {
+        if (entry.snapshot.status === "failed" || !terminalRun) {
+          terminalRun = {
+            status: entry.snapshot.status === "failed" ? "failed" : "completed",
+            error: entry.snapshot.error
+          };
+        }
+      }
+    }
+    setThreads(restored);
+    for (const entry of available) {
+      if (!entry || (entry.snapshot.status !== "waiting" && entry.snapshot.status !== "running")) continue;
+      subscribeToAgentRun(entry.candidate.threadId, entry.candidate.runId, operation);
+    }
+    if (available.some((entry) => (
+      entry?.snapshot.status === "waiting" || entry?.snapshot.status === "running"
+    ))) {
+      setStatus("Codex 正在执行");
+    }
+    if (terminalRun) void refreshAfterAgentRun(operation, terminalRun.status, terminalRun.error);
+    return restored;
+  }
+
+  async function refreshAfterAgentRun(
+    operation: DocumentSessionOperation,
+    status: "completed" | "failed",
+    runError: string | null = null
+  ) {
+    try {
+      const [threadPayload, document] = await Promise.all([
+        api.threads(operation.signal),
+        api.document(operation.signal)
+      ]);
+      if (!isDocumentSessionCurrent(operation)) return;
+      setThreads(threadPayload.threads);
+      const documentApplied = applyDocument(document);
+      if (documentApplied) {
+        setStatus(status === "failed" ? runError || "Codex 请求失败，请查看错误回答" : "Codex 已回答");
+      }
+    } catch (error) {
+      if (isDocumentSessionCurrent(operation)) {
+        setStatus(error instanceof Error ? error.message : String(error));
+      }
+    }
+  }
+
+  function subscribeToAgentRun(
+    threadId: string,
+    agentRunId: string,
+    operation: DocumentSessionOperation
+  ): () => void {
+    try {
+      return api.subscribeAgentRun(agentRunId, {
+        onSnapshot: (snapshot) => {
+          if (!isDocumentSessionCurrent(operation)) return;
+          setThreads((current) => applyAgentRunSnapshot(current, threadId, agentRunId, snapshot));
+        },
+        onUpdate: (update) => {
+          if (!isDocumentSessionCurrent(operation)) return;
+          setThreads((current) => applyAgentRunUpdate(current, threadId, agentRunId, update));
+        },
+        onComplete: (snapshot) => {
+          if (!isDocumentSessionCurrent(operation)) return;
+          setThreads((current) => applyAgentRunSnapshot(current, threadId, agentRunId, snapshot));
+          void refreshAfterAgentRun(
+            operation,
+            snapshot.status === "failed" ? "failed" : "completed",
+            snapshot.error
+          );
+        }
+      }, operation.signal);
+    } catch {
+      // The final HTTP response still supplies the persisted answer and process metadata.
+      return () => {};
+    }
+  }
+
   return {
     messageDrafts,
     editingMessage,
@@ -282,7 +415,8 @@ export function useConversationCommands({
     updateMessageMeta,
     retryAssistantReply,
     requestAssistantReply,
-    deleteMessage
+    deleteMessage,
+    resumeAgentRuns
   };
 }
 

@@ -28,6 +28,7 @@ test("HTTP server starts without Agent availability and reports failed turns exp
       XUANNIAO_CODEX_CMD: "xuanniao-missing-codex-command"
     }
   });
+  let childStopped = false;
 
   try {
     await waitForOutput(child, /Open http:\/\/127\.0\.0\.1:/);
@@ -107,6 +108,15 @@ test("HTTP server starts without Agent availability and reports failed turns exp
       ["Root question"]
     );
 
+    const agentRunId = "integration_run_12345678";
+    const reservedAgentRun = await jsonRequest(`${baseUrl}/api/agent-runs/${agentRunId}`, {
+      method: "POST",
+      body: {}
+    });
+    assert.equal(reservedAgentRun.response.status, 201);
+    const agentRunEvents = readAgentRunEvents(
+      `${baseUrl}/api/agent-runs/${agentRunId}/events`
+    );
     const reply = await jsonRequest(
       `${baseUrl}/api/threads/${encodeURIComponent(created.payload.thread.id)}/messages`,
       {
@@ -114,16 +124,39 @@ test("HTTP server starts without Agent availability and reports failed turns exp
         body: {
           content: "Review this",
           askAgent: true,
-          parentMessageId: rootQuestion.payload.userMessage.id
+          parentMessageId: rootQuestion.payload.userMessage.id,
+          agentRunId
         }
       }
     );
     assert.equal(reply.response.status, 200);
     assert.equal(reply.payload.agentOutcome, "failed");
     assert.equal(reply.payload.assistantMessage.error, true);
+    const streamed = await agentRunEvents;
+    assert.equal(streamed[0].type, "snapshot");
+    assert.equal(streamed.at(-1).type, "complete");
+    assert.equal(streamed.at(-1).data.status, "failed");
+    const runSnapshot = await jsonRequest(`${baseUrl}/api/agent-runs/${agentRunId}`);
+    assert.equal(runSnapshot.response.status, 200);
+    assert.equal(runSnapshot.payload.status, "failed");
+
+    const waitingAgentRunId = "integration_waiting_12345678";
+    const reservedWaitingRun = await jsonRequest(`${baseUrl}/api/agent-runs/${waitingAgentRunId}`, {
+      method: "POST",
+      body: {}
+    });
+    assert.equal(reservedWaitingRun.response.status, 201);
+    const activeStream = await fetch(`${baseUrl}/api/agent-runs/${waitingAgentRunId}/events`);
+    assert.equal(activeStream.status, 200);
+    await activeStream.body.getReader().read();
+    child.kill("SIGTERM");
+    await assertProcessExit(child, 2_000);
+    childStopped = true;
   } finally {
-    child.kill();
-    await waitForExit(child);
+    if (!childStopped) {
+      child.kill();
+      await waitForExit(child);
+    }
     await rm(tempDir, { recursive: true, force: true });
     await rm(metadataDir, { recursive: true, force: true });
   }
@@ -150,6 +183,33 @@ function jsonRequest(url, { method = "GET", body } = {}) {
     response,
     payload: await response.json()
   }));
+}
+
+async function readAgentRunEvents(url) {
+  const response = await fetch(url, { headers: { accept: "text/event-stream" } });
+  assert.equal(response.status, 200);
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const events = [];
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const blocks = buffer.split("\n\n");
+    buffer = blocks.pop() || "";
+    for (const block of blocks) {
+      const event = block.match(/^event: (.+)$/m)?.[1];
+      const data = block.match(/^data: (.+)$/m)?.[1];
+      if (!event || !data) continue;
+      events.push({ type: event, data: JSON.parse(data) });
+      if (event === "complete") {
+        await reader.cancel();
+        return events;
+      }
+    }
+    if (done) return events;
+  }
 }
 
 function waitForOutput(child, pattern) {
@@ -192,5 +252,20 @@ function waitForExit(child) {
       clearTimeout(timer);
       resolve();
     });
+  });
+}
+
+function assertProcessExit(child, timeoutMs) {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      child.off("exit", handleExit);
+      reject(new Error(`server did not exit within ${timeoutMs} ms`));
+    }, timeoutMs);
+    const handleExit = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    child.once("exit", handleExit);
   });
 }

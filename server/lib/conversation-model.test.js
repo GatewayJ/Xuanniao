@@ -68,6 +68,20 @@ test("question planning rejects obsolete placement controls at the domain bounda
   }
 });
 
+test("new questions cannot append another turn inside an existing tree node", () => {
+  assert.throws(
+    () => planConversationQuestion(rootThread(), {
+      content: "continue inside root",
+      nodeId: "root"
+    }),
+    (error) => (
+      error instanceof ConversationRuleError
+      && error.statusCode === 400
+      && /new conversation node/.test(error.message)
+    )
+  );
+});
+
 test("continuing a node invalidates descendant sessions", () => {
   const thread = rootThread();
   thread.messages.push({

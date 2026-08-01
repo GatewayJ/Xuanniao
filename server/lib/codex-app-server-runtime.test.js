@@ -22,14 +22,26 @@ class StubRuntime extends CodexAppServerRuntime {
     this.calls.push({ method, params });
     if (method === "thread/start") {
       this.nextThread += 1;
-      return { thread: { id: `thread-${this.nextThread}` } };
+      return {
+        thread: { id: `thread-${this.nextThread}` },
+        model: "gpt-default",
+        reasoningEffort: "medium"
+      };
     }
     if (method === "thread/fork") {
       this.nextThread += 1;
-      return { thread: { id: `fork-${this.nextThread}` } };
+      return {
+        thread: { id: `fork-${this.nextThread}` },
+        model: "gpt-default",
+        reasoningEffort: "medium"
+      };
     }
     if (method === "thread/resume") {
-      return { thread: { id: params.threadId } };
+      return {
+        thread: { id: params.threadId },
+        model: "gpt-default",
+        reasoningEffort: "medium"
+      };
     }
     if (method === "turn/start") {
       this.nextTurn += 1;
@@ -75,7 +87,12 @@ test("native runtime persists a semantic session and avoids unchanged context re
   assert.equal(persisted.adapter, "codex-app-server");
   assert.equal(persisted.sessionId, "thread-1");
   assert.equal(persisted.turnId, "turn-1");
-  const firstPrompt = runtime.calls.find(({ method }) => method === "turn/start").params.input[0].text;
+  const firstTurn = runtime.calls.find(({ method }) => method === "turn/start");
+  const firstPrompt = firstTurn.params.input[0].text;
+  assert.equal(firstTurn.params.model, "gpt-default");
+  assert.equal(firstTurn.params.effort, "medium");
+  assert.equal(first.model, "gpt-default");
+  assert.equal(first.reasoningEffort, "medium");
   assert.match(firstPrompt, /<XUANNIAO_DOCUMENT>/);
 
   runtime.calls = [];
@@ -148,6 +165,7 @@ test("native runtime lists paginated models and applies settings to the next tur
         model: "gpt-fast",
         displayName: "Fast",
         isDefault: true,
+        defaultReasoningEffort: "low",
         supportedReasoningEfforts: [{ reasoningEffort: "low", description: "Fast" }]
       }],
       nextCursor: "page-2"
@@ -179,7 +197,7 @@ test("native runtime lists paginated models and applies settings to the next tur
   ]);
 
   runtime.configure({ model: "gpt-deep", reasoningEffort: "high" });
-  await runtime.runTurn({
+  const configuredTurn = await runtime.runTurn({
     question: "Think deeply",
     document,
     thread: {
@@ -195,6 +213,29 @@ test("native runtime lists paginated models and applies settings to the next tur
   const turnStart = runtime.calls.find(({ method }) => method === "turn/start");
   assert.equal(turnStart.params.model, "gpt-deep");
   assert.equal(turnStart.params.effort, "high");
+  assert.equal(configuredTurn.model, "gpt-deep");
+  assert.equal(configuredTurn.reasoningEffort, "high");
+
+  runtime.calls = [];
+  runtime.configure();
+  const defaultTurn = await runtime.runTurn({
+    question: "Use defaults again",
+    document,
+    thread: {
+      id: "settings-thread",
+      sessionKey: "settings-thread:root",
+      agentSession: configuredTurn.session,
+      parentAgentSession: null,
+      selectedText: "Details.",
+      anchor: {},
+      messages: []
+    }
+  });
+  const defaultTurnStart = runtime.calls.find(({ method }) => method === "turn/start");
+  assert.equal(defaultTurnStart.params.model, "gpt-fast");
+  assert.equal(defaultTurnStart.params.effort, "low");
+  assert.equal(defaultTurn.model, "gpt-fast");
+  assert.equal(defaultTurn.reasoningEffort, "low");
 });
 
 test("native approvals remain pending until the user resolves them", () => {
@@ -437,7 +478,10 @@ test("native event stream preserves final messages and tool lifecycle updates", 
     cwd: "/tmp",
     timeoutMs: 1_000
   });
-  const completed = runtime.waitForTurn("thread-1", "turn-1");
+  const liveUpdates = [];
+  const completed = runtime.waitForTurn("thread-1", "turn-1", {
+    onUpdate: (update) => liveUpdates.push(update)
+  });
   runtime.handleNotification({
     method: "item/started",
     params: {
@@ -448,6 +492,30 @@ test("native event stream preserves final messages and tool lifecycle updates", 
         type: "commandExecution",
         status: "inProgress",
         command: "npm test"
+      }
+    }
+  });
+  runtime.handleNotification({
+    method: "item/commandExecution/outputDelta",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "command-1",
+      delta: "all tests passed\n"
+    }
+  });
+  runtime.handleNotification({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "command-1",
+        type: "commandExecution",
+        status: "completed",
+        command: "npm test",
+        aggregatedOutput: "all tests passed\n",
+        exitCode: 0
       }
     }
   });
@@ -472,10 +540,64 @@ test("native event stream preserves final messages and tool lifecycle updates", 
   assert.equal(result.content, "Done.");
   assert.deepEqual(result.updates[0], {
     type: "commandExecution",
-    status: "inProgress",
+    status: "completed",
     itemId: "command-1",
     command: "npm test",
-    exitCode: undefined,
-    tool: undefined
+    cwd: "",
+    output: "all tests passed\n",
+    exitCode: 0
   });
+  assert.equal(liveUpdates.length, 3);
+  assert.equal(liveUpdates[1].outputDelta, "all tests passed\n");
+});
+
+test("native event stream batches adjacent command output deltas", async () => {
+  const runtime = new CodexAppServerRuntime({
+    documentPath: "/tmp/plan.md",
+    cwd: "/tmp",
+    timeoutMs: 1_000
+  });
+  const liveUpdates = [];
+  const completed = runtime.waitForTurn("thread-1", "turn-batched-output", {
+    onUpdate: (update) => liveUpdates.push(update)
+  });
+
+  for (const delta of ["first ", "second ", "third"]) {
+    runtime.handleNotification({
+      method: "item/commandExecution/outputDelta",
+      params: {
+        threadId: "thread-1",
+        turnId: "turn-batched-output",
+        itemId: "command-1",
+        delta
+      }
+    });
+  }
+  runtime.handleNotification({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-batched-output",
+      item: {
+        id: "command-1",
+        type: "commandExecution",
+        status: "completed",
+        command: "printf output",
+        aggregatedOutput: "first second third",
+        exitCode: 0
+      }
+    }
+  });
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "thread-1",
+      turn: { id: "turn-batched-output", status: "completed" }
+    }
+  });
+
+  await completed;
+  const outputUpdates = liveUpdates.filter((update) => update.outputDelta);
+  assert.equal(outputUpdates.length, 1);
+  assert.equal(outputUpdates[0].outputDelta, "first second third");
 });

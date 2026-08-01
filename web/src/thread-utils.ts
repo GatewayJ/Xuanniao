@@ -1,4 +1,5 @@
 import { compareThreadsByAnchor, normalizeSearchText, resolveThreadAnchor } from "./thread-anchors.ts";
+import { pendingAgentRunMeta } from "./agent-run.ts";
 import type { ConversationMessageCommand, Message, SelectionContext, Thread } from "./types";
 
 let pendingMessageSequence = 0;
@@ -58,9 +59,10 @@ export function appendPendingMessage(
     pendingMessages.push({
       id: nextPendingMessageId("pending-agent"),
       role: "assistant",
-      content: "Working with local Codex...",
+      content: "",
       nodeId: pendingNodeId,
       parentId: pendingQuestionId,
+      meta: command.agentRunId ? pendingAgentRunMeta(command.agentRunId, now) : {},
       createdAt: now
     });
   }
@@ -77,7 +79,14 @@ export function hasAssistantReplyAfter(threads: Thread[], threadId: string, mess
   return Boolean(thread && findAssistantReplyIndex(thread.messages, index) >= 0);
 }
 
-export function updateMessageWithPendingReply(threads: Thread[], threadId: string, messageId: string, content: string, rerunAgent: boolean): Thread[] {
+export function updateMessageWithPendingReply(
+  threads: Thread[],
+  threadId: string,
+  messageId: string,
+  content: string,
+  rerunAgent: boolean,
+  agentRunId: string | null = null
+): Thread[] {
   return threads.map((thread) => {
     if (thread.id !== threadId) return thread;
 
@@ -92,9 +101,10 @@ export function updateMessageWithPendingReply(threads: Thread[], threadId: strin
       const pendingAssistant: Message = {
         id: nextPendingMessageId("pending-agent"),
         role: "assistant",
-        content: "Updating Codex reply...",
+        content: "",
         nodeId: messages[index].nodeId || messageId,
         parentId: messageId,
+        meta: agentRunId ? pendingAgentRunMeta(agentRunId, new Date().toISOString()) : {},
         createdAt: new Date().toISOString()
       };
       const assistantIndex = findAssistantReplyIndex(messages, index);

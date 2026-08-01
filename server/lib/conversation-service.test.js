@@ -3,11 +3,13 @@ import test from "node:test";
 
 import { ConversationConflictError } from "./conversation-model.js";
 import { ConversationService } from "./conversation-service.js";
+import { AgentRunBroker } from "./agent-run-broker.js";
 
 function createHarness({
   agentError = null,
   completeAgentError = null,
   runTurn = null,
+  agentRuns = null,
   controlledReplacement = false,
   addMessageBarrier = null
 } = {}) {
@@ -43,7 +45,25 @@ function createHarness({
     async updateMessage(_threadId, messageId, patch) {
       const message = messages.find((item) => item.id === messageId);
       if (!message) throw new Error(`message not found: ${messageId}`);
-      Object.assign(message, patch);
+      message.content = patch.content;
+      if (Object.hasOwn(patch, "agentRunId")) {
+        message.meta = { ...(message.meta || {}) };
+        if (patch.agentRunId) message.meta.agentRunId = patch.agentRunId;
+        else delete message.meta.agentRunId;
+      }
+      return message;
+    },
+    async prepareQuestionRerun(_threadId, messageId, patch) {
+      const message = await this.updateMessage(_threadId, messageId, patch);
+      const removedAssistant = await this.removeAssistantAfter(_threadId, messageId);
+      return { message, removedAssistant };
+    },
+    async setAgentRunId(_threadId, messageId, agentRunId) {
+      const message = messages.find((item) => item.id === messageId);
+      if (!message) throw new Error(`message not found: ${messageId}`);
+      message.meta = { ...(message.meta || {}) };
+      if (agentRunId) message.meta.agentRunId = agentRunId;
+      else delete message.meta.agentRunId;
       return message;
     },
     async removeAssistantAfter(_threadId, userMessageId) {
@@ -130,6 +150,7 @@ function createHarness({
       threadStore: store,
       document,
       agent,
+      agentRuns,
       controlledReplacement
     }),
     messages,
@@ -148,6 +169,61 @@ test("conversation service returns an explicit completed outcome", async () => {
   });
   assert.equal(result.agentOutcome, "completed");
   assert.equal(result.assistantMessage.error, undefined);
+});
+
+test("conversation service streams agent updates and persists their duration", async () => {
+  const agentRuns = new AgentRunBroker();
+  const events = [];
+  agentRuns.reserve("run_12345678");
+  const unsubscribe = agentRuns.subscribe("run_12345678", (event) => events.push(event));
+  const { service } = createHarness({
+    agentRuns,
+    runTurn: async ({ onUpdate }) => {
+      onUpdate({
+        type: "commandExecution",
+        itemId: "command-1",
+        command: "npm test",
+        status: "completed"
+      });
+      return {
+        content: "answer",
+        stopReason: "completed",
+        transport: "test",
+        updates: [{ type: "commandExecution", itemId: "command-1", status: "completed" }],
+        durationMs: 2_500,
+        model: "gpt-test",
+        reasoningEffort: "high",
+        session: null
+      };
+    }
+  });
+
+  const result = await service.addQuestion("thread-1", {
+    content: "question",
+    parentMessageId: "root",
+    askAgent: true,
+    agentRunId: "run_12345678"
+  });
+
+  assert.equal(events.some((event) => event.type === "update"), true);
+  assert.equal(events.at(-1).type, "complete");
+  assert.equal(result.userMessage.meta.agentRunId, "run_12345678");
+  assert.equal(result.assistantMessage.meta.durationMs, 2_500);
+  assert.equal(result.assistantMessage.meta.model, "gpt-test");
+  assert.equal(result.assistantMessage.meta.reasoningEffort, "high");
+  unsubscribe();
+  agentRuns.dispose();
+});
+
+test("rerunning a saved question persists the new agent run id", async () => {
+  const { service, messages } = createHarness();
+  await service.updateQuestion("thread-1", "root", {
+    content: "root",
+    rerunAgent: true,
+    agentRunId: "rerun_12345678"
+  });
+
+  assert.equal(messages[0].meta.agentRunId, "rerun_12345678");
 });
 
 test("conversation service persists agent failures with a failed outcome", async () => {
@@ -180,26 +256,34 @@ test("an explicit rerun answers a previously unanswered saved question", async (
 
 test("an explicit rerun joins an identical agent turn already in flight", async () => {
   let releaseTurn;
+  let markTurnStarted;
   let runCount = 0;
   const turnResult = new Promise((resolve) => {
     releaseTurn = resolve;
   });
+  const turnStarted = new Promise((resolve) => {
+    markTurnStarted = resolve;
+  });
   const { service, messages } = createHarness({
     runTurn: async () => {
       runCount += 1;
+      markTurnStarted();
       return turnResult;
     }
   });
 
   const original = service.updateQuestion("thread-1", "root", {
     content: "root",
-    rerunAgent: true
+    rerunAgent: true,
+    agentRunId: "original_run_12345678"
   });
-  await Promise.resolve();
+  await turnStarted;
   const retry = service.updateQuestion("thread-1", "root", {
     content: "root",
     rerunAgent: true
   });
+  await Promise.resolve();
+  assert.equal(messages[0].meta.agentRunId, "original_run_12345678");
   releaseTurn({
     content: "answer",
     stopReason: "completed",
@@ -210,6 +294,7 @@ test("an explicit rerun joins an identical agent turn already in flight", async 
 
   const [originalResult, retryResult] = await Promise.all([original, retry]);
   assert.equal(runCount, 1);
+  assert.equal(messages[0].meta.agentRunId, "original_run_12345678");
   assert.equal(originalResult.assistantMessage.id, retryResult.assistantMessage.id);
   assert.equal(messages.filter((message) => message.role === "assistant").length, 1);
 });

@@ -15,7 +15,16 @@ export function useAgentSettings({ setStatus }: AgentSettingsOptions) {
   const [error, setError] = useState("");
   const requestRef = useRef<AbortController | null>(null);
 
-  useEffect(() => () => requestRef.current?.abort(), []);
+  useEffect(() => {
+    const request = new AbortController();
+    requestRef.current = request;
+    void api.settings(request.signal).then((payload) => {
+      if (!request.signal.aborted) setData(payload);
+    }).catch(() => {
+      // The settings dialog performs an explicit retry and presents any error.
+    });
+    return () => request.abort();
+  }, []);
 
   async function openSettings() {
     requestRef.current?.abort();

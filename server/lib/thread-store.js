@@ -12,6 +12,7 @@ import {
   normalizeAgentSession,
   removeAssistantReply,
   updateConversationMessage,
+  updateConversationAgentRun,
   updateConversationMessageMeta
 } from "./conversation-model.js";
 
@@ -129,6 +130,33 @@ export class ThreadStore {
       const data = await this.read();
       const thread = requireThread(data, threadId);
       const message = updateConversationMessage(thread, messageId, patch, new Date().toISOString());
+      await this.write(data);
+      return message;
+    });
+  }
+
+  async prepareQuestionRerun(threadId, messageId, patch) {
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const now = new Date().toISOString();
+      const message = updateConversationMessage(thread, messageId, patch, now);
+      const removedAssistant = removeAssistantReply(thread, messageId, now);
+      await this.write(data);
+      return { message, removedAssistant };
+    });
+  }
+
+  async setAgentRunId(threadId, messageId, agentRunId) {
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const message = updateConversationAgentRun(
+        thread,
+        messageId,
+        agentRunId,
+        new Date().toISOString()
+      );
       await this.write(data);
       return message;
     });

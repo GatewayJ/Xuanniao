@@ -1,17 +1,20 @@
 import { ConversationConflictError, planConversationQuestion } from "./conversation-model.js";
 import { branchThreadForQuestion } from "./thread-tree.js";
+import { normalizeAgentRunId } from "./agent-run-broker.js";
 
 export class ConversationService {
   constructor({
     threadStore,
     document,
     agent,
+    agentRuns = null,
     controlledReplacement = false,
     onAgentError = () => {}
   }) {
     this.threadStore = threadStore;
     this.document = document;
     this.agent = agent;
+    this.agentRuns = agentRuns;
     this.controlledReplacement = controlledReplacement;
     this.onAgentError = onAgentError;
     this.activeReplies = new Map();
@@ -26,9 +29,16 @@ export class ConversationService {
   }
 
   async addQuestionWithinOperation(threadId, command) {
+    const agentRunId = normalizeAgentRunId(command.agentRunId);
     const thread = await this.threadStore.get(threadId);
     const planned = planConversationQuestion(thread, command);
-    const userMessage = await this.threadStore.addMessage(threadId, planned.message);
+    const userMessage = await this.threadStore.addMessage(threadId, {
+      ...planned.message,
+      meta: {
+        ...(planned.message.meta || {}),
+        ...(planned.askAgent && agentRunId ? { agentRunId } : {})
+      }
+    });
 
     if (!planned.askAgent) {
       return {
@@ -40,7 +50,12 @@ export class ConversationService {
       };
     }
 
-    const reply = await this.createAssistantReply(threadId, planned.message.content, userMessage.id);
+    const reply = await this.createAssistantReply(
+      threadId,
+      planned.message.content,
+      userMessage.id,
+      agentRunId
+    );
     return {
       userMessage,
       ...reply,
@@ -55,7 +70,12 @@ export class ConversationService {
     );
   }
 
-  async updateQuestionWithinOperation(threadId, messageId, { content, rerunAgent = false }) {
+  async updateQuestionWithinOperation(
+    threadId,
+    messageId,
+    { content, rerunAgent = false, agentRunId = null }
+  ) {
+    const normalizedAgentRunId = normalizeAgentRunId(agentRunId);
     const normalizedContent = String(content || "").trim();
     if (!normalizedContent) {
       const error = new Error("message content is required");
@@ -66,6 +86,12 @@ export class ConversationService {
     const replyKey = activeReplyKey(threadId, messageId);
     const activeReply = this.activeReplies.get(replyKey);
     if (activeReply) {
+      if (rerunAgent && activeReply.content === normalizedContent) {
+        if (normalizedAgentRunId) {
+          await this.threadStore.setAgentRunId(threadId, messageId, normalizedAgentRunId);
+          this.attachAgentRun(activeReply.progress, normalizedAgentRunId, threadId, messageId);
+        }
+      }
       const reply = await activeReply.promise;
       if (rerunAgent && activeReply.content === normalizedContent) {
         const thread = await this.threadStore.get(threadId);
@@ -80,17 +106,25 @@ export class ConversationService {
     }
 
     const shouldRerunAgent = rerunAgent || (await this.threadStore.hasAssistantAfter(threadId, messageId));
-    const message = await this.threadStore.updateMessage(threadId, messageId, {
-      content: normalizedContent
-    });
+    const patch = {
+      content: normalizedContent,
+      ...(shouldRerunAgent ? { agentRunId: normalizedAgentRunId } : {})
+    };
+    const message = shouldRerunAgent
+      ? (await this.threadStore.prepareQuestionRerun(threadId, messageId, patch)).message
+      : await this.threadStore.updateMessage(threadId, messageId, patch);
     let reply = {
       assistantMessage: null,
       agentOutcome: "not-requested",
       document: null
     };
     if (shouldRerunAgent) {
-      await this.threadStore.removeAssistantAfter(threadId, messageId);
-      reply = await this.createAssistantReply(threadId, normalizedContent, messageId);
+      reply = await this.createAssistantReply(
+        threadId,
+        normalizedContent,
+        messageId,
+        normalizedAgentRunId
+      );
     }
     return {
       message,
@@ -138,24 +172,44 @@ export class ConversationService {
     }
   }
 
-  createAssistantReply(threadId, content, questionMessageId) {
+  createAssistantReply(threadId, content, questionMessageId, agentRunId = null) {
     const key = activeReplyKey(threadId, questionMessageId);
     const activeReply = this.activeReplies.get(key);
-    if (activeReply?.content === content) return activeReply.promise;
+    if (activeReply?.content === content) {
+      this.attachAgentRun(activeReply.progress, agentRunId, threadId, questionMessageId);
+      return activeReply.promise;
+    }
 
-    const task = activeReply
-      ? activeReply.promise.catch(() => {}).then(() => this.runAssistantReply(threadId, content, questionMessageId))
-      : this.runAssistantReply(threadId, content, questionMessageId);
+    const progress = {
+      runIds: new Set(),
+      events: [],
+      startedAt: Date.now()
+    };
+    this.attachAgentRun(progress, agentRunId, threadId, questionMessageId);
+
+    const work = activeReply
+      ? activeReply.promise.catch(() => {}).then(() => this.runAssistantReply(threadId, content, questionMessageId, progress))
+      : this.runAssistantReply(threadId, content, questionMessageId, progress);
+    const task = work.then(
+      (reply) => {
+        this.completeAgentRuns(progress, reply.agentOutcome === "failed" ? "failed" : "completed");
+        return reply;
+      },
+      (error) => {
+        this.completeAgentRuns(progress, "failed", error);
+        throw error;
+      }
+    );
     const trackedTask = task.finally(() => {
       if (this.activeReplies.get(key)?.promise === trackedTask) {
         this.activeReplies.delete(key);
       }
     });
-    this.activeReplies.set(key, { content, promise: trackedTask });
+    this.activeReplies.set(key, { content, promise: trackedTask, progress });
     return trackedTask;
   }
 
-  async runAssistantReply(threadId, content, questionMessageId) {
+  async runAssistantReply(threadId, content, questionMessageId, progress) {
     let updatedDocument = null;
     const agentSnapshot = await this.document.createAgentSnapshot();
     let snapshotVerified = false;
@@ -176,7 +230,8 @@ export class ConversationService {
         question: content,
         document: agentSnapshot.document,
         thread,
-        mode: editRequested ? "replace-selection" : "chat"
+        mode: editRequested ? "replace-selection" : "chat",
+        onUpdate: (update) => this.publishAgentUpdate(progress, update)
       });
 
       updatedDocument = await this.document.verifyAgentSnapshot(agentSnapshot);
@@ -258,6 +313,29 @@ export class ConversationService {
     };
   }
 
+  attachAgentRun(progress, agentRunId, threadId, questionMessageId) {
+    if (!agentRunId || !this.agentRuns || progress.runIds.has(agentRunId)) return;
+    progress.runIds.add(agentRunId);
+    this.agentRuns.start(agentRunId, { threadId, questionMessageId });
+    for (const event of progress.events) this.agentRuns.publish(agentRunId, event);
+  }
+
+  publishAgentUpdate(progress, update) {
+    progress.events.push(update);
+    if (progress.events.length > 120) progress.events.shift();
+    for (const runId of progress.runIds) this.agentRuns?.publish(runId, update);
+  }
+
+  completeAgentRuns(progress, status, error = null) {
+    const durationMs = Date.now() - progress.startedAt;
+    for (const runId of progress.runIds) {
+      this.agentRuns?.complete(runId, status, {
+        durationMs,
+        error: error instanceof Error ? error.message : null
+      });
+    }
+  }
+
   async persistAgentFailure(
     threadId,
     questionMessageId,
@@ -278,7 +356,13 @@ export class ConversationService {
       {
         role: "assistant",
         content: agentFailureContent(errorMessage),
-        error: true
+        error: true,
+        meta: {
+          durationMs: Number.isFinite(error?.durationMs) ? error.durationMs : null,
+          updates: Array.isArray(error?.updates) ? error.updates : [],
+          model: typeof error?.model === "string" ? error.model : null,
+          reasoningEffort: typeof error?.reasoningEffort === "string" ? error.reasoningEffort : null
+        }
       },
       null,
       expectedBranchRevision
@@ -299,7 +383,10 @@ function assistantMessageForAnswer(answer) {
       stopReason: answer.stopReason,
       transport: answer.transport,
       appliedEdit: Boolean(answer.appliedEdit),
-      updates: answer.updates
+      updates: answer.updates,
+      durationMs: Number.isFinite(answer.durationMs) ? answer.durationMs : null,
+      model: typeof answer.model === "string" ? answer.model : null,
+      reasoningEffort: typeof answer.reasoningEffort === "string" ? answer.reasoningEffort : null
     }
   };
 }

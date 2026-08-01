@@ -1,4 +1,4 @@
-import { branchRevisionForQuestion, conversationNode, parentQuestion, selectionComesFromNode } from "./thread-tree.js";
+import { branchRevisionForQuestion, parentQuestion, selectionComesFromNode } from "./thread-tree.js";
 
 export const CONVERSATION_NODE_KINDS = new Set([
   "question",
@@ -15,28 +15,25 @@ export function planConversationQuestion(thread, command) {
   if (!content) throw new ConversationRuleError("message content is required");
   assertAppendOnlyPlacement(command);
 
-  const requestedNodeId = optionalId(command.nodeId);
-  const existingNode = requestedNodeId ? conversationNode(thread, requestedNodeId) : null;
-  if (requestedNodeId && !existingNode) {
-    throw new ConversationRuleError(`conversation node not found: ${requestedNodeId}`);
+  if (optionalId(command.nodeId)) {
+    throw new ConversationRuleError(
+      "new questions must create a new conversation node; edit or retry the existing question instead"
+    );
   }
 
-  const parentMessageId = existingNode ? existingNode.parentId || null : optionalId(command.parentMessageId);
-  if (!existingNode) {
-    try {
-      parentQuestion(thread, parentMessageId);
-    } catch (error) {
-      throw new ConversationRuleError(error instanceof Error ? error.message : String(error));
-    }
+  const parentMessageId = optionalId(command.parentMessageId);
+  try {
+    parentQuestion(thread, parentMessageId);
+  } catch (error) {
+    throw new ConversationRuleError(error instanceof Error ? error.message : String(error));
   }
 
   const branchSelection = normalizeBranchSelection(command.branchSelection);
   if (branchSelection) {
-    const sourceNodeId = existingNode ? requestedNodeId : parentMessageId;
-    if (!sourceNodeId) {
+    if (!parentMessageId) {
       throw new ConversationRuleError("selected message text requires a conversation node");
     }
-    if (!selectionComesFromNode(thread, branchSelection, sourceNodeId)) {
+    if (!selectionComesFromNode(thread, branchSelection, parentMessageId)) {
       throw new ConversationRuleError("selected message text must come from the target node");
     }
   }
@@ -46,7 +43,7 @@ export function planConversationQuestion(thread, command) {
     message: {
       role: "user",
       content,
-      nodeId: requestedNodeId,
+      nodeId: null,
       parentId: parentMessageId,
       meta: branchSelection ? { branchSelection } : {}
     }
@@ -99,8 +96,18 @@ export function updateConversationMessage(thread, messageId, patch, now) {
   const message = requireMessage(thread, messageId);
   if (message.role !== "user") throw new Error("only local user comments can be edited");
   message.content = patch.content;
+  if (Object.hasOwn(patch, "agentRunId")) setMessageAgentRunId(message, patch.agentRunId);
   message.updatedAt = now;
   invalidateNodeAndDescendants(thread.messages, message.nodeId || message.id);
+  thread.updatedAt = now;
+  return message;
+}
+
+export function updateConversationAgentRun(thread, messageId, agentRunId, now) {
+  const message = requireMessage(thread, messageId);
+  if (message.role !== "user") throw new Error("only user questions can reference an agent run");
+  setMessageAgentRunId(message, agentRunId);
+  message.updatedAt = now;
   thread.updatedAt = now;
   return message;
 }
@@ -124,6 +131,16 @@ export function normalizeConversationMetaPatch(value) {
     meta.nodeKind = patch.nodeKind;
   }
   return meta;
+}
+
+function setMessageAgentRunId(message, agentRunId) {
+  const meta = { ...(message.meta || {}) };
+  if (agentRunId) {
+    meta.agentRunId = agentRunId;
+  } else {
+    delete meta.agentRunId;
+  }
+  message.meta = meta;
 }
 
 export function deleteConversationMessage(thread, messageId, now) {

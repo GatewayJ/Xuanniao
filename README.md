@@ -17,6 +17,7 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 - **空间化导航**：支持无限画布、平移、缩放、节点焦点、面包屑和树形缩略图。
 - **受控文档修改**：Codex 可以返回限定范围的 replacement，由玄鸟应用并同步 Thread anchor。
 - **Codex 偏好**：设置页动态读取本机 Codex 模型，并按模型能力选择推理深度。
+- **执行过程可见**：实时展示命令、工具调用、文件修改、搜索和计划；正文完成后自动折叠，刷新后仍可展开。
 
 ## 界面
 
@@ -47,7 +48,7 @@ Thread 工作区采用三栏布局：左侧预览锚定文档，中间显示当�
 ```
 
 ```text
-从叶子节点继续追问
+从叶子节点创建下一步
 
 A → B → C
       ↓
@@ -56,7 +57,7 @@ A → B → C → D
 
 - 点击节点：在中间 content 栏打开该节点，并在右侧 Tree 中保持高亮。
 - 切换 Tree 节点：左侧文档预览自动回到当前 Thread 的原文锚点，并使用与主 Preview 相同的激活高亮；原文移动后按最新正文恢复位置。
-- 叶子节点只显示 `＋ 子节点`：从当前叶子继续提问。
+- 叶子节点只显示 `＋ 子节点`：在当前叶子下创建下一步问题。
 - 已有子路径的节点只显示 `⑂ 分支`：从当前节点创建新的独立分支，不移动既有子树。
 - 节点 content 输入区遵循同一规则，不提供创建方式切换或路径插入。
 - Tree 连接线只表达父子关系，不提供创建按钮。
@@ -124,7 +125,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 ┌──────────────────────────── Browser / React ────────────────────────────┐
 │ DocumentPane · ThreadRail · Thread Canvas · FilePicker · Diagram Viewer │
 │ CodeMirror · markdown-it · Mermaid · anchor remapping                   │
-└─────────────────────────────── fetch /api ───────────────────────────────┘
+└────────────────────────── REST + Agent Run SSE ──────────────────────────┘
                                       │
 ┌──────────────────────────── Node HTTP Server ───────────────────────────┐
 │ document I/O · append-only thread tree · metadata persistence           │
@@ -143,9 +144,11 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 | 选区交互 | `web/src/hooks/useMessageSelection.ts` | 消息选区生命周期、引用捕获与提问浮层 |
 | 树布局 | `web/src/thread-tree.ts`, `web/src/thread-canvas.ts` | 会话树构建、导航、路径和空间布局 |
 | 渲染 | `web/src/markdown.ts` | Markdown、代码块与按需加载的 Mermaid |
+| Agent 过程 | `web/src/agent-run.ts`, `components/AgentRunTimeline.tsx` | 实时步骤归并、耗时和可折叠过程展示 |
 | HTTP 适配 | `web/src/api.ts`, `server/index.js` | 请求解析、响应和依赖组合 |
 | 会话领域 | `server/lib/conversation-model.js` | 分支放置、树状态迁移和 session 失效规则 |
 | 应用服务 | `server/lib/conversation-service.js` | 会话命令、Agent 回合和受控文档修改编排 |
+| 运行事件 | `server/lib/agent-run-broker.js` | 有界 Agent 事件缓存、SSE 订阅和终态保留 |
 | 文档事务 | `server/lib/document-workspace.js` | revision、原子写、锚点校验和活动文档保护 |
 | 持久化 | `server/lib/thread-store.js` | Thread JSON 读写、迁移和并发串行化 |
 | Runtime 组合 | `server/lib/agent-runtime.js` | 传输选择、配置归一化和应用边界 |
@@ -173,12 +176,13 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 当前实现采用 **conversation-node-level Agent session**：
 
 - 默认使用 Codex `app-server`，但仅在第一次 Agent 请求时按需启动；CLI 不可用不会阻断本地文档编辑。
-- 根节点使用 `thread/start`；同一节点连续轮次复用 thread；子分支从父节点最近成功 turn 使用 `thread/fork`。
+- 每个新问题都是独立节点；根节点使用 `thread/start`，子节点从父节点最近成功 turn 使用 `thread/fork`。
 - Agent session 持久化到 Thread store，服务重启后使用 `thread/resume` 恢复。
 - 文档未变化时不重复发送完整正文；小范围变化发送精确 splice，大范围变化重新同步完整快照。
 - Agent 上下文超过显式字符预算时会失败并提示，不会静默截断；文档快照使用有界 LRU 缓存。
 - 新建或重建分支只注入该路径需要的祖先历史，不包含兄弟分支。
-- 编辑、删除问题或继续已有子分支的父节点时，会清除当前节点及受影响后代的陈旧 session，避免 Agent 历史与可见树不一致。
+- 编辑、删除问题或回答时，会清除当前节点及受影响后代的陈旧 session，避免 Agent 历史与可见树不一致。
+- 浏览器刷新会重新订阅活动任务；服务重启后若任务运行状态已经丢失，页面会明确标记为中断并保留节点重试入口。
 - 原生 Runtime 只按同一 session 串行化；不同分支可以并行运行。持久化写入由 Thread store 串行提交。
 - Agent 完成时会校验分支 revision，并原子写入回答与 session；运行期间祖先路径变化的旧回答和错误回复都不会覆盖新上下文。
 - 每个文档响应携带内容 revision；浏览器保存和受控替换使用 compare-and-swap，拒绝覆盖并发或外部修改。
@@ -186,6 +190,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 - 活动 Markdown 文档是受保护资源：ACP 文件写直接拒绝；所有 Agent 回合结束后还会校验 revision。无法归因的外部修改会保留原文件并报告冲突，不会用旧快照覆盖用户内容。
 - 文档切换会失效旧保存队列；保存请求同时携带文档路径和 revision，服务端拒绝落到其它活动文档。Thread metadata 通过临时文件和原子 rename 落盘。
 - 原生和 ACP turn 都使用活动空闲超时：输出、工具事件等活动会自动续期，等待用户审批时暂停计时。原生模式先发送 `turn/interrupt`，ACP 模式失效并重启 adapter，避免超时任务的迟到事件污染下一轮。
+- 每轮 Agent 请求使用独立运行 ID。命令、工具、文件、搜索、计划和公开 reasoning summary 通过 SSE 实时显示；最终步骤和耗时随 assistant message 持久化，正文出现后过程自动折叠。
 
 ACP 仍作为兼容传输保留，但不支持原生 thread fork，且同一 adapter 进程内的请求会串行执行。Local-first 表示文档和玄鸟元数据保存在本机；模型与网络行为取决于 Codex CLI 或所选 adapter 的配置。
 

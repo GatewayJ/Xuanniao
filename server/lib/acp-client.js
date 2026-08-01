@@ -112,15 +112,15 @@ export class AcpDocumentAgent {
     await this.ensureInitialized();
   }
 
-  async runTurn({ question, document, thread, mode = "chat" }) {
-    const task = () => this.promptViaAcp({ question, document, thread, mode });
+  async runTurn({ question, document, thread, mode = "chat", onUpdate = null }) {
+    const task = () => this.promptViaAcp({ question, document, thread, mode, onUpdate });
 
     const run = this.promptLock.then(task, task);
     this.promptLock = run.catch(() => {});
     return run;
   }
 
-  async promptViaAcp({ question, document, thread, mode }) {
+  async promptViaAcp({ question, document, thread, mode, onUpdate }) {
     const session = await this.ensureThreadSession(thread);
     const hash = documentHash(document.content);
     const previousDocument = this.documentSnapshots.get(session.sessionId);
@@ -131,7 +131,10 @@ export class AcpDocumentAgent {
       sessionId: session.sessionId,
       threadId: thread.id,
       chunks: [],
-      updates: []
+      updates: [],
+      updateIndexes: new Map(),
+      onUpdate,
+      startedAt: Date.now()
     };
     this.activeTurn = turn;
 
@@ -170,8 +173,17 @@ export class AcpDocumentAgent {
         stopReason: result?.stopReason ?? null,
         transport: "acp",
         updates: turn.updates.slice(-30),
+        durationMs: Date.now() - turn.startedAt,
+        model: null,
+        reasoningEffort: null,
         session: agentSession
       };
+    } catch (error) {
+      if (error && typeof error === "object") {
+        if (!Array.isArray(error.updates)) error.updates = turn.updates;
+        if (!Number.isFinite(error.durationMs)) error.durationMs = Date.now() - turn.startedAt;
+      }
+      throw error;
     } finally {
       if (this.activeTurn?.id === turn.id) {
         this.activeTurn = null;
@@ -440,7 +452,17 @@ export class AcpDocumentAgent {
     }
 
     this.rpc.touchRequests("session/prompt");
-    this.activeTurn.updates.push(compactUpdate(update));
+    const compact = compactUpdate(update);
+    if (compact) {
+      upsertAcpUpdate(this.activeTurn, compact);
+      if (typeof this.activeTurn.onUpdate === "function") {
+        try {
+          this.activeTurn.onUpdate(compact);
+        } catch (error) {
+          this.rpc.appendDiagnostic(`\nAgent run update listener failed: ${error instanceof Error ? error.message : String(error)}`);
+        }
+      }
+    }
     if (update.sessionUpdate === "agent_message_chunk" && update.content?.type === "text") {
       this.activeTurn.chunks.push(update.content.text || "");
     }
@@ -511,25 +533,56 @@ export function buildPrompt(options) {
 
 function compactUpdate(update) {
   if (update.sessionUpdate === "agent_message_chunk") {
-    return {
-      sessionUpdate: update.sessionUpdate,
-      textLength: update.content?.text?.length ?? 0
-    };
+    return null;
   }
   if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-    return {
-      sessionUpdate: update.sessionUpdate,
-      toolCallId: update.toolCallId,
-      title: update.title,
-      kind: update.kind,
-      status: update.status
+    const compact = {
+      type: "toolCall",
+      itemId: update.toolCallId || null
     };
+    copyDefined(compact, update, "title");
+    copyDefined(compact, update, "kind");
+    if (update.status !== undefined && update.status !== null) {
+      compact.status = update.status;
+    } else if (update.sessionUpdate === "tool_call") {
+      compact.status = "inProgress";
+    }
+    const output = update.content ?? update.rawOutput ?? update.result;
+    if (output !== undefined && output !== null) compact.output = displayValue(output);
+    return compact;
   }
   if (update.sessionUpdate === "plan") {
     return {
-      sessionUpdate: update.sessionUpdate,
-      entries: Array.isArray(update.entries) ? update.entries.length : 0
+      type: "plan",
+      itemId: "turn-plan",
+      status: "inProgress",
+      plan: Array.isArray(update.entries) ? update.entries.slice(0, 50) : []
     };
   }
-  return { sessionUpdate: update.sessionUpdate || "unknown" };
+  return null;
+}
+
+function copyDefined(target, source, key) {
+  if (source[key] !== undefined && source[key] !== null) target[key] = source[key];
+}
+
+function upsertAcpUpdate(turn, update) {
+  const key = update.itemId ? `${update.type}:${update.itemId}` : null;
+  if (!key) {
+    turn.updates.push(update);
+    return;
+  }
+  const index = turn.updateIndexes.get(key);
+  if (index === undefined) {
+    turn.updateIndexes.set(key, turn.updates.length);
+    turn.updates.push(update);
+  } else {
+    turn.updates[index] = { ...turn.updates[index], ...update };
+  }
+}
+
+function displayValue(value) {
+  if (value === null || value === undefined) return "";
+  const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+  return text.length > 12_000 ? `…${text.slice(-11_999)}` : text;
 }

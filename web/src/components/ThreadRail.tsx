@@ -9,7 +9,9 @@ import {
   type WheelEvent
 } from "react";
 import { createPortal } from "react-dom";
+import { agentSettingsSummary } from "../agent-settings-view";
 import { useMessageSelection } from "../hooks/useMessageSelection";
+import { AgentRunTimeline } from "./AgentRunTimeline";
 import { useRenderedPreview } from "../hooks/useRenderedPreview";
 import { renderMessageMarkdown } from "../markdown";
 import { resolveThreadAnchor } from "../thread-anchors";
@@ -30,7 +32,7 @@ import {
   conversationNodeStatus,
   flattenConversationTree
 } from "../thread-tree";
-import type { BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
+import type { AgentSettingsPayload, BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
 
 const THREAD_PANE_DIVIDER_WIDTH = 6;
 
@@ -57,6 +59,7 @@ type ThreadQuestionCommand = Omit<ConversationMessageCommand, "threadId" | "askA
 
 type ThreadRailProps = {
   documentData: DocumentPayload | null;
+  agentSettings: AgentSettingsPayload | null;
   threads: Thread[];
   activeThreadId: string | null;
   spatialLayout: ThreadSpatialLayout | null;
@@ -339,6 +342,7 @@ export function ThreadRail(props: ThreadRailProps) {
       {openThreadDetail && createPortal(
         <ThreadDetailModal
           documentData={props.documentData}
+          agentSettings={props.agentSettings}
           thread={openThreadDetail}
           permissionRequests={props.permissionRequests.filter((request) => (
             request.threadId === openThreadDetail.id || (!request.threadId && openThreadDetail.id === props.activeThreadId)
@@ -372,6 +376,7 @@ export function ThreadRail(props: ThreadRailProps) {
 
 function ThreadDetailModal(props: {
   documentData: DocumentPayload | null;
+  agentSettings: AgentSettingsPayload | null;
   thread: Thread;
   permissionRequests: PermissionRequest[];
   resolvingPermissionIds: Set<string>;
@@ -636,6 +641,7 @@ function ThreadDetailModal(props: {
   const messageDraft = props.messageDrafts[draftKey] || "";
   const selectedNodeOrigin = selectedNode ? messageBranchSelection(selectedNode.question) : null;
   const selectedNodeKind = selectedNode ? conversationNodeKind(selectedNode) : "question";
+  const effectiveAgentSettings = agentSettingsSummary(props.agentSettings);
   const semanticStats = useMemo(() => conversationSemanticStats(nodes), [nodes]);
   const lineLabel = lineStart
     ? `第 ${lineStart}${lineEnd && lineEnd !== lineStart ? `–${lineEnd}` : ""} 行`
@@ -955,6 +961,13 @@ function ThreadDetailModal(props: {
                   <small>{documentAnchorOutdated ? `原文已变化 · 上次${lineLabel}` : lineLabel}</small>
                 </div>
                 <blockquote>{props.thread.selectedText || "未保存引用内容"}</blockquote>
+                {selectedNode && (
+                  <div className="threadContextNodeLink">
+                    <span>当前 Tree 节点</span>
+                    <strong title={selectedNode.question.content}>{questionSummary(selectedNode.question.content)}</strong>
+                    <small>沿用此文档锚点</small>
+                  </div>
+                )}
               </div>
               {documentContent !== null ? (
                 <article
@@ -1256,8 +1269,8 @@ function ThreadDetailModal(props: {
                       </div>
                       <label htmlFor="thread-canvas-question">
                         {nodeCreationMode === "branch"
-                          ? "从当前节点新建独立分支"
-                          : "从当前叶子节点继续提问"}
+                          ? "从当前节点创建另一条独立分支"
+                          : "在当前叶子节点下创建下一步"}
                       </label>
                     </div>
                     {messageDraft.trim() && selectedNode && (
@@ -1282,7 +1295,10 @@ function ThreadDetailModal(props: {
                       aria-label="继续追问"
                     />
                     <div className="threadModalComposerActions">
-                      <span>支持 Markdown · ⌘/Ctrl + Enter 发送 · 自动继承祖先上下文</span>
+                      <div className="threadComposerContext">
+                        <span>新问题会成为独立节点 · 自动继承当前路径上下文</span>
+                        {effectiveAgentSettings && <small>{effectiveAgentSettings}</small>}
+                      </div>
                       <button
                         type="submit"
                         className="primaryButton"
@@ -1343,7 +1359,10 @@ function ThreadDetailModal(props: {
                       aria-label="根节点问题"
                     />
                     <div className="threadModalComposerActions">
-                      <span>这将成为讨论树的起点</span>
+                      <div className="threadComposerContext">
+                        <span>这将成为讨论树的起点</span>
+                        {effectiveAgentSettings && <small>{effectiveAgentSettings}</small>}
+                      </div>
                       <button type="submit" className="primaryButton" disabled={!messageDraft.trim()}>询问 Codex</button>
                     </div>
                   </form>
@@ -1385,7 +1404,7 @@ function ConversationCanvasNode(props: {
   onOpen: () => void;
   onCreate: () => void;
 }) {
-  const userTurns = props.node.messages.filter((message) => message.role === "user").length;
+  const legacyTurnCount = props.node.messages.filter((message) => message.role === "user").length;
   const status = conversationNodeStatus(props.node);
   const kind = conversationNodeKind(props.node);
   const canCreateBranch = conversationNodeCanBranch(props.node);
@@ -1413,8 +1432,8 @@ function ConversationCanvasNode(props: {
         </span>
         <strong>{questionSummary(props.node.question.content)}</strong>
         <span className="threadCanvasNodeMeta">
-          {userTurns} 轮
-          {` · ${NODE_KIND_META[kind].label}`}
+          {legacyTurnCount > 1 ? `历史 ${legacyTurnCount} 轮 · ` : ""}
+          {NODE_KIND_META[kind].label}
           {props.node.children.length > 0 ? ` · ${props.node.children.length} 个子节点` : ""}
           {hasSelectedOrigin ? " · 包含引用" : ""}
         </span>
@@ -1436,7 +1455,7 @@ function ConversationCanvasNode(props: {
             type="button"
             className="threadCanvasNodeAdd"
             aria-label={`从 ${questionSummary(props.node.question.content)} 创建子节点`}
-            title="从当前叶子节点继续提问"
+            title="在当前叶子节点下创建下一步"
             onClick={props.onCreate}
           >
             <span aria-hidden="true">+</span>
@@ -1592,7 +1611,12 @@ function ThreadMessageDetail(props: {
             </div>
           </div>
         ) : (
-          <div className="messageContent" dangerouslySetInnerHTML={{ __html: renderMessageMarkdown(message.content) }} />
+          <>
+            {message.role === "assistant" && <AgentRunTimeline message={message} />}
+            {message.content && (
+              <div className="messageContent" dangerouslySetInnerHTML={{ __html: renderMessageMarkdown(message.content) }} />
+            )}
+          </>
         )}
       </div>
     </section>

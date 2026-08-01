@@ -11,6 +11,7 @@ import { JsonLineRpcProcess } from "./json-line-rpc-process.js";
 import { normalizeModelCatalog } from "./agent-settings.js";
 
 const adapterName = "codex-app-server";
+const COMMAND_OUTPUT_BATCH_MS = 75;
 
 export class CodexAppServerRuntime {
   constructor({
@@ -43,6 +44,9 @@ export class CodexAppServerRuntime {
     this.sessionLocks = new Map();
     this.loadedThreads = new Set();
     this.threadOwners = new Map();
+    this.threadSettings = new Map();
+    this.modelCatalog = null;
+    this.modelCatalogRequest = null;
     this.documentSnapshots = new DocumentSnapshotCache(snapshotCacheEntries);
     this.initialized = false;
     this.initializing = null;
@@ -109,7 +113,19 @@ export class CodexAppServerRuntime {
       cursor = nextCursor;
     }
 
-    return normalizeModelCatalog(entries);
+    const catalog = normalizeModelCatalog(entries);
+    this.modelCatalog = catalog;
+    return catalog;
+  }
+
+  async cachedModelCatalog() {
+    if (this.modelCatalog) return this.modelCatalog;
+    if (!this.modelCatalogRequest) {
+      this.modelCatalogRequest = this.listModels().finally(() => {
+        this.modelCatalogRequest = null;
+      });
+    }
+    return this.modelCatalogRequest;
   }
 
   async start() {
@@ -125,6 +141,9 @@ export class CodexAppServerRuntime {
     this.initializing = null;
     this.loadedThreads.clear();
     this.threadOwners.clear();
+    this.threadSettings.clear();
+    this.modelCatalog = null;
+    this.modelCatalogRequest = null;
     this.documentSnapshots.clear();
     this.earlyTurnEvents.clear();
     this.abandonedTurnIds.clear();
@@ -152,11 +171,12 @@ export class CodexAppServerRuntime {
     }
   }
 
-  async runTurn({ question, document, thread, mode = "chat" }) {
+  async runTurn({ question, document, thread, mode = "chat", onUpdate = null }) {
     const lockKey = thread.sessionKey || thread.id;
     return this.withSessionLock(lockKey, async () => {
       await this.ensureInitialized();
       const session = await this.ensureThread(thread);
+      const effectiveSettings = await this.resolveTurnSettings(session);
       const hash = documentHash(document.content);
       const previousDocument = this.documentSnapshots.get(session.sessionId);
       const includeDocument = session.documentHash !== hash;
@@ -183,16 +203,26 @@ export class CodexAppServerRuntime {
           threadId: session.sessionId,
           input: [{ type: "text", text: prompt }],
           cwd: this.cwd,
-          model: this.model,
-          effort: this.reasoningEffort
+          model: effectiveSettings.model,
+          effort: effectiveSettings.reasoningEffort
         })
       );
       const turnId = start?.turn?.id;
       if (!turnId) {
         throw new Error("Codex turn/start did not return a turn id.");
       }
+      this.threadSettings.set(session.sessionId, effectiveSettings);
 
-      const result = await this.waitForTurn(session.sessionId, turnId);
+      let result;
+      try {
+        result = await this.waitForTurn(session.sessionId, turnId, { onUpdate });
+      } catch (error) {
+        if (error && typeof error === "object") {
+          error.model = effectiveSettings.model;
+          error.reasoningEffort = effectiveSettings.reasoningEffort;
+        }
+        throw error;
+      }
       const agentSession = {
         adapter: adapterName,
         sessionId: session.sessionId,
@@ -206,9 +236,37 @@ export class CodexAppServerRuntime {
         stopReason: result.turn?.status ?? null,
         transport: adapterName,
         updates: result.updates.slice(-50),
+        durationMs: result.durationMs,
+        model: effectiveSettings.model,
+        reasoningEffort: effectiveSettings.reasoningEffort,
         session: agentSession
       };
     });
+  }
+
+  async resolveTurnSettings(session) {
+    let catalog = this.modelCatalog;
+    if ((!this.model || !this.reasoningEffort) && !catalog) {
+      try {
+        catalog = await this.cachedModelCatalog();
+      } catch {
+        catalog = [];
+      }
+    }
+    const selectedModel = this.model
+      ? catalog?.find((candidate) => candidate.model === this.model || candidate.id === this.model) || null
+      : catalog?.find((candidate) => candidate.isDefault) || catalog?.[0] || null;
+    const model = this.model || selectedModel?.model || session.model || null;
+    const sessionReasoningEffort = !session.model || session.model === model
+      ? session.reasoningEffort
+      : null;
+    return {
+      model,
+      reasoningEffort: this.reasoningEffort
+        || selectedModel?.defaultReasoningEffort
+        || sessionReasoningEffort
+        || null
+    };
   }
 
   async ensureInitialized() {
@@ -243,14 +301,15 @@ export class CodexAppServerRuntime {
     if (stored) {
       if (!this.loadedThreads.has(stored.sessionId)) {
         try {
-          await this.request("thread/resume", this.threadParams({ threadId: stored.sessionId }));
+          const resumed = await this.request("thread/resume", this.threadParams({ threadId: stored.sessionId }));
+          this.rememberThreadSettings(stored.sessionId, resumed);
         } catch {
           return this.createThread(thread);
         }
         this.loadedThreads.add(stored.sessionId);
       }
       this.threadOwners.set(stored.sessionId, thread.id);
-      return { ...stored, historyMode: "inherited" };
+      return { ...stored, ...this.settingsForThread(stored.sessionId), historyMode: "inherited" };
     }
 
     const parent = sessionForAdapter(thread.parentAgentSession, adapterName);
@@ -267,12 +326,14 @@ export class CodexAppServerRuntime {
         if (!sessionId) throw new Error("Codex thread/fork did not return a thread id.");
         this.loadedThreads.add(sessionId);
         this.threadOwners.set(sessionId, thread.id);
+        this.rememberThreadSettings(sessionId, forked);
         const parentSnapshot = this.documentSnapshots.get(parent.sessionId);
         if (parentSnapshot !== undefined) this.documentSnapshots.set(sessionId, parentSnapshot);
         return {
           sessionId,
           turnId: null,
           documentHash: parent.documentHash,
+          ...this.settingsForThread(sessionId),
           historyMode: "forked"
         };
       } catch {
@@ -296,12 +357,26 @@ export class CodexAppServerRuntime {
     }
     this.loadedThreads.add(sessionId);
     this.threadOwners.set(sessionId, thread.id);
+    this.rememberThreadSettings(sessionId, started);
     return {
       sessionId,
       turnId: null,
       documentHash: null,
+      ...this.settingsForThread(sessionId),
       historyMode: "fresh"
     };
+  }
+
+  rememberThreadSettings(sessionId, response) {
+    const previous = this.threadSettings.get(sessionId) || {};
+    this.threadSettings.set(sessionId, {
+      model: optionalString(response?.model) || previous.model || null,
+      reasoningEffort: optionalString(response?.reasoningEffort) || previous.reasoningEffort || null
+    });
+  }
+
+  settingsForThread(sessionId) {
+    return this.threadSettings.get(sessionId) || { model: null, reasoningEffort: null };
   }
 
   threadParams(params) {
@@ -340,6 +415,9 @@ export class CodexAppServerRuntime {
     this.initialized = false;
     this.loadedThreads.clear();
     this.threadOwners.clear();
+    this.threadSettings.clear();
+    this.modelCatalog = null;
+    this.modelCatalogRequest = null;
   }
 
   handleServerRequest(message) {
@@ -416,7 +494,7 @@ export class CodexAppServerRuntime {
     this.earlyTurnEvents.set(turnId, early.slice(-100));
   }
 
-  waitForTurn(threadId, turnId) {
+  waitForTurn(threadId, turnId, { onUpdate = null } = {}) {
     return new Promise((resolve, reject) => {
       const state = {
         threadId,
@@ -424,8 +502,15 @@ export class CodexAppServerRuntime {
         chunks: [],
         completedText: "",
         updates: [],
+        updateIndexes: new Map(),
+        commandOutput: new Map(),
+        pendingCommandOutput: new Map(),
+        reasoningSummary: new Map(),
+        onUpdate,
+        startedAt: Date.now(),
         timer: null,
         interruptTimer: null,
+        commandOutputTimer: null,
         timeoutError: null,
         settled: false,
         resolve: (value) => {
@@ -433,6 +518,7 @@ export class CodexAppServerRuntime {
           state.settled = true;
           clearTimeout(state.timer);
           clearTimeout(state.interruptTimer);
+          clearTimeout(state.commandOutputTimer);
           resolve(value);
         },
         reject: (error) => {
@@ -440,6 +526,11 @@ export class CodexAppServerRuntime {
           state.settled = true;
           clearTimeout(state.timer);
           clearTimeout(state.interruptTimer);
+          clearTimeout(state.commandOutputTimer);
+          if (error && typeof error === "object") {
+            if (!Array.isArray(error.updates)) error.updates = state.updates;
+            if (!Number.isFinite(error.durationMs)) error.durationMs = Date.now() - state.startedAt;
+          }
           reject(error);
         }
       };
@@ -504,6 +595,9 @@ export class CodexAppServerRuntime {
       this.initialized = false;
       this.loadedThreads.clear();
       this.threadOwners.clear();
+      this.threadSettings.clear();
+      this.modelCatalog = null;
+      this.modelCatalogRequest = null;
       this.rpc.kill();
     }, this.interruptGraceMs);
   }
@@ -521,32 +615,125 @@ export class CodexAppServerRuntime {
       state.chunks.push(params.delta || "");
       return;
     }
+    if (method === "item/commandExecution/outputDelta") {
+      const itemId = params.itemId || null;
+      const delta = boundedText(params.delta, 4_000);
+      if (!delta) return;
+      if (itemId) {
+        state.commandOutput.set(
+          itemId,
+          boundedTail(`${state.commandOutput.get(itemId) || ""}${delta}`, 12_000)
+        );
+      }
+      this.enqueueCommandOutput(state, itemId, delta);
+      return;
+    }
+    if (method === "item/reasoning/summaryTextDelta") {
+      const itemId = params.itemId || null;
+      const delta = boundedText(params.delta, 2_000);
+      if (!delta) return;
+      if (itemId) {
+        state.reasoningSummary.set(
+          itemId,
+          boundedTail(`${state.reasoningSummary.get(itemId) || ""}${delta}`, 8_000)
+        );
+      }
+      this.emitTurnUpdate(state, {
+        type: "reasoning",
+        status: "inProgress",
+        itemId,
+        summaryDelta: delta
+      });
+      return;
+    }
     if (method === "item/started" || method === "item/completed") {
+      if (method === "item/completed") this.flushCommandOutput(state);
       const item = params.item || {};
-      state.updates.push(compactItemUpdate(method, item));
+      const update = compactItemUpdate(method, item, {
+        commandOutput: state.commandOutput.get(item.id),
+        reasoningSummary: state.reasoningSummary.get(item.id)
+      });
+      if (update) {
+        upsertTurnUpdate(state, update);
+        this.emitTurnUpdate(state, update);
+      }
       if (method === "item/completed" && item.type === "agentMessage") {
         state.completedText = item.text || state.completedText;
       }
       return;
     }
+    if (method === "turn/plan/updated") {
+      const update = compactPlanUpdate(params);
+      upsertTurnUpdate(state, update);
+      this.emitTurnUpdate(state, update);
+      return;
+    }
     if (method === "error" && params.willRetry === false) {
-      state.updates.push({
+      const update = {
         type: "error",
+        status: "failed",
         message: params.error?.message || "Codex turn error"
-      });
+      };
+      state.updates.push(update);
+      this.emitTurnUpdate(state, update);
       return;
     }
     if (method === "turn/completed") {
+      this.flushCommandOutput(state);
       this.turns.delete(state.turnId);
       this.cancelPendingPermissionsForTurn(state.turnId);
       const content = state.chunks.join("").trim() || state.completedText.trim();
       if (state.timeoutError) {
         state.reject(state.timeoutError);
       } else if (params.turn?.status === "failed") {
-        state.reject(new Error(params.turn?.error?.message || "Codex turn failed."));
+        const error = new Error(params.turn?.error?.message || "Codex turn failed.");
+        error.updates = state.updates;
+        error.durationMs = Date.now() - state.startedAt;
+        state.reject(error);
       } else {
-        state.resolve({ content, turn: params.turn, updates: state.updates });
+        state.resolve({
+          content,
+          turn: params.turn,
+          updates: state.updates,
+          durationMs: Date.now() - state.startedAt
+        });
       }
+    }
+  }
+
+  emitTurnUpdate(state, update) {
+    if (typeof state.onUpdate !== "function") return;
+    try {
+      state.onUpdate(update);
+    } catch (error) {
+      this.rpc.appendDiagnostic(`\nAgent run update listener failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  enqueueCommandOutput(state, itemId, delta) {
+    const key = itemId || "";
+    state.pendingCommandOutput.set(
+      key,
+      boundedTail(`${state.pendingCommandOutput.get(key) || ""}${delta}`, 12_000)
+    );
+    if (state.commandOutputTimer) return;
+    state.commandOutputTimer = setTimeout(() => this.flushCommandOutput(state), COMMAND_OUTPUT_BATCH_MS);
+    state.commandOutputTimer.unref?.();
+  }
+
+  flushCommandOutput(state) {
+    clearTimeout(state.commandOutputTimer);
+    state.commandOutputTimer = null;
+    if (state.settled || state.pendingCommandOutput.size === 0) return;
+    const pending = [...state.pendingCommandOutput];
+    state.pendingCommandOutput.clear();
+    for (const [itemId, outputDelta] of pending) {
+      this.emitTurnUpdate(state, {
+        type: "commandExecution",
+        status: "inProgress",
+        itemId: itemId || null,
+        outputDelta
+      });
     }
   }
 
@@ -749,15 +936,100 @@ function shortText(value, limit) {
   return normalized.length > limit ? `${normalized.slice(0, limit - 1)}…` : normalized;
 }
 
-function compactItemUpdate(method, item) {
-  return {
+function compactItemUpdate(method, item, accumulated = {}) {
+  if (item.type === "agentMessage" || item.type === "userMessage") return null;
+  const update = {
     type: item.type || "unknown",
     status: method === "item/completed" ? item.status || "completed" : item.status || "inProgress",
-    itemId: item.id || null,
-    command: item.type === "commandExecution" ? item.command : undefined,
-    exitCode: item.type === "commandExecution" ? item.exitCode : undefined,
-    tool: item.type === "mcpToolCall" ? item.tool : undefined
+    itemId: item.id || null
   };
+  if (item.type === "commandExecution") {
+    update.command = boundedText(item.command, 2_000);
+    update.cwd = boundedText(item.cwd, 1_000);
+    update.output = boundedTail(item.aggregatedOutput || accumulated.commandOutput, 12_000);
+    update.exitCode = Number.isInteger(item.exitCode) ? item.exitCode : null;
+    update.durationMs = Number.isFinite(item.durationMs) ? item.durationMs : null;
+  } else if (item.type === "fileChange") {
+    update.changes = Array.isArray(item.changes)
+      ? item.changes.slice(0, 50).map((change) => compactObject({
+          path: boundedText(change.path, 1_000),
+          kind: change.kind || null,
+          diff: boundedText(change.diff, 8_000)
+        }))
+      : [];
+  } else if (item.type === "mcpToolCall") {
+    update.server = boundedText(item.server, 200);
+    update.tool = boundedText(item.tool, 300);
+    update.result = boundedText(stringifyDisplayValue(item.result), 12_000);
+    update.error = boundedText(stringifyDisplayValue(item.error), 4_000);
+  } else if (item.type === "dynamicToolCall") {
+    update.tool = boundedText(item.tool, 300);
+    update.result = boundedText(stringifyDisplayValue(item.contentItems || item.result), 12_000);
+  } else if (item.type === "webSearch") {
+    update.query = boundedText(item.query, 2_000);
+    update.action = boundedText(stringifyDisplayValue(item.action), 4_000);
+  } else if (item.type === "reasoning") {
+    const summary = Array.isArray(item.summary) ? item.summary.join("\n") : item.summary;
+    update.summary = boundedText(summary || accumulated.reasoningSummary, 8_000);
+  } else if (item.type === "collabToolCall") {
+    update.tool = boundedText(item.tool, 300);
+    update.receiverThreadIds = Array.isArray(item.receiverThreadIds)
+      ? item.receiverThreadIds.slice(0, 20).map(String)
+      : [];
+  } else if (item.type === "imageView") {
+    update.path = boundedText(item.path, 1_000);
+  }
+  return compactObject(update);
+}
+
+function compactPlanUpdate(params) {
+  return {
+    type: "plan",
+    status: "inProgress",
+    itemId: "turn-plan",
+    explanation: boundedText(params.explanation, 4_000),
+    plan: Array.isArray(params.plan)
+      ? params.plan.slice(0, 50).map((entry) => compactObject({
+          step: boundedText(entry.step, 1_000),
+          status: entry.status || null
+        }))
+      : []
+  };
+}
+
+function upsertTurnUpdate(state, update) {
+  const key = update.itemId ? `${update.type}:${update.itemId}` : null;
+  if (!key) {
+    state.updates.push(update);
+    return;
+  }
+  const existing = state.updateIndexes.get(key);
+  if (existing === undefined) {
+    state.updateIndexes.set(key, state.updates.length);
+    state.updates.push(update);
+  } else {
+    state.updates[existing] = update;
+  }
+}
+
+function stringifyDisplayValue(value) {
+  if (value === null || value === undefined) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
+}
+
+function boundedText(value, limit) {
+  if (typeof value !== "string") return "";
+  return value.length > limit ? `${value.slice(0, limit - 1)}…` : value;
+}
+
+function boundedTail(value, limit) {
+  if (typeof value !== "string") return "";
+  return value.length > limit ? `…${value.slice(-(limit - 1))}` : value;
 }
 
 function compactObject(value) {

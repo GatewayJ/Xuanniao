@@ -114,6 +114,65 @@ test("disposing ACP while permission is pending does not write to the closed pro
   assert.deepEqual(writes, []);
 });
 
+test("ACP tool call updates preserve fields omitted by sparse updates", () => {
+  const agent = createAgent("/tmp/document.md", "full-access");
+  const liveUpdates = [];
+  agent.rpc.touchRequests = () => {};
+  agent.activeTurn = {
+    sessionId: "session-1",
+    chunks: [],
+    updates: [],
+    updateIndexes: new Map(),
+    onUpdate: (update) => liveUpdates.push(update)
+  };
+
+  agent.handleNotification({
+    method: "session/update",
+    params: {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tool-1",
+        title: "Run tests",
+        status: "in_progress",
+        rawOutput: "partial output"
+      }
+    }
+  });
+  agent.handleNotification({
+    method: "session/update",
+    params: {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool-1",
+        title: "Run all tests"
+      }
+    }
+  });
+  agent.handleNotification({
+    method: "session/update",
+    params: {
+      sessionId: "session-1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tool-1",
+        status: "completed"
+      }
+    }
+  });
+
+  assert.deepEqual(agent.activeTurn.updates, [{
+    type: "toolCall",
+    itemId: "tool-1",
+    title: "Run all tests",
+    status: "completed",
+    output: "partial output"
+  }]);
+  assert.equal(liveUpdates[1].status, undefined);
+  assert.equal(liveUpdates[1].output, undefined);
+});
+
 test("each thread creates or loads its own persisted ACP session", async () => {
   class StubAgent extends AcpDocumentAgent {
     constructor() {

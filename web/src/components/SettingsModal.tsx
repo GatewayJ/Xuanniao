@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 
+import { effortLabel, findEffectiveModel } from "../agent-settings-view";
 import type { AgentModelOption, AgentSettingsPayload } from "../types";
 
 type SettingsModalProps = {
@@ -10,16 +11,6 @@ type SettingsModalProps = {
   error: string;
   onClose: () => void;
   onSave: (model: string | null, reasoningEffort: string | null) => void;
-};
-
-const effortLabels: Record<string, string> = {
-  minimal: "最低",
-  low: "低",
-  medium: "中",
-  high: "高",
-  xhigh: "极高",
-  max: "Max",
-  ultra: "Ultra"
 };
 
 export function SettingsModal({ open, data, loading, saving, error, onClose, onSave }: SettingsModalProps) {
@@ -48,6 +39,7 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
 
   const effectiveModel = useMemo(() => findEffectiveModel(data?.models || [], model), [data?.models, model]);
   const supportedEfforts = effectiveModel?.supportedReasoningEfforts || [];
+  const selectedEffort = supportedEfforts.find((option) => option.reasoningEffort === reasoningEffort);
   const unavailableModel = Boolean(model && !effectiveModel);
   const canSave = Boolean(
     data?.modelSelectionSupported &&
@@ -157,24 +149,30 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
                     </div>
                     <span>{reasoningEffort ? effortLabel(reasoningEffort) : "模型默认"}</span>
                   </div>
-                  <div className="effortOptions" role="radiogroup" aria-labelledby="effort-setting-label">
-                    <label className={!reasoningEffort ? "effortOption active" : "effortOption"}>
-                      <input type="radio" name="reasoning-effort" checked={!reasoningEffort} onChange={() => setReasoningEffort("")} />
-                      <strong>默认</strong>
-                      <small>{effectiveModel?.defaultReasoningEffort ? `当前为${effortLabel(effectiveModel.defaultReasoningEffort)}` : "由模型决定"}</small>
-                    </label>
-                    {supportedEfforts.map((option) => (
-                      <label key={option.reasoningEffort} className={reasoningEffort === option.reasoningEffort ? "effortOption active" : "effortOption"}>
-                        <input
-                          type="radio"
-                          name="reasoning-effort"
-                          checked={reasoningEffort === option.reasoningEffort}
-                          onChange={() => setReasoningEffort(option.reasoningEffort)}
-                        />
-                        <strong>{effortLabel(option.reasoningEffort)}</strong>
-                        <small>{option.description || option.reasoningEffort}</small>
-                      </label>
-                    ))}
+                  <div className="reasoningEffortControl">
+                    <select
+                      id="reasoning-effort"
+                      aria-labelledby="effort-setting-label"
+                      value={reasoningEffort}
+                      onChange={(event) => setReasoningEffort(event.target.value)}
+                    >
+                      <option value="">
+                        {effectiveModel?.defaultReasoningEffort
+                          ? `模型默认（${effortLabel(effectiveModel.defaultReasoningEffort)}）`
+                          : "模型默认"}
+                      </option>
+                      {supportedEfforts.map((option) => (
+                        <option key={option.reasoningEffort} value={option.reasoningEffort}>
+                          {effortLabel(option.reasoningEffort)}
+                        </option>
+                      ))}
+                    </select>
+                    <small>
+                      {selectedEffort?.description
+                        || (effectiveModel?.defaultReasoningEffort
+                          ? `当前默认推理深度：${effortLabel(effectiveModel.defaultReasoningEffort)}`
+                          : "由所选模型决定推理深度")}
+                    </small>
                   </div>
                 </section>
               </>
@@ -214,18 +212,9 @@ function ModelOption({ checked, title, description, badge, invalid = false, onCh
   );
 }
 
-function findEffectiveModel(models: AgentModelOption[], selected: string): AgentModelOption | null {
-  if (selected) return models.find((model) => model.model === selected || model.id === selected) || null;
-  return models.find((model) => model.isDefault) || models[0] || null;
-}
-
 function defaultModelDescription(models: AgentModelOption[]): string {
   const defaultModel = findEffectiveModel(models, "");
   return defaultModel ? `当前默认：${defaultModel.displayName}` : "使用 Codex 当前的默认模型";
-}
-
-function effortLabel(value: string): string {
-  return effortLabels[value] || value;
 }
 
 function transportLabel(transport: string): string {
