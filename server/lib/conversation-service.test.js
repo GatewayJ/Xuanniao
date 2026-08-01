@@ -299,6 +299,66 @@ test("an explicit rerun joins an identical agent turn already in flight", async 
   assert.equal(messages.filter((message) => message.role === "assistant").length, 1);
 });
 
+test("a late subscriber receives retained plan, diff, and subagent progress", async () => {
+  let releaseTurn;
+  let markTurnStarted;
+  const turnResult = new Promise((resolve) => {
+    releaseTurn = resolve;
+  });
+  const turnStarted = new Promise((resolve) => {
+    markTurnStarted = resolve;
+  });
+  const agentRuns = new AgentRunBroker();
+  agentRuns.reserve("late_run_12345678");
+  const { service } = createHarness({
+    agentRuns,
+    runTurn: async ({ onUpdate }) => {
+      onUpdate({ type: "plan", itemId: "turn-plan", plan: [{ step: "Implement", status: "inProgress" }] });
+      onUpdate({ type: "diff", itemId: "turn-diff", filesChanged: 1, additions: 3, deletions: 1 });
+      onUpdate({
+        type: "subagent",
+        itemId: "subagent:worker",
+        scope: "subagent",
+        agentThreadId: "worker",
+        agentStatus: "running"
+      });
+      for (let index = 0; index < 140; index += 1) {
+        onUpdate({ type: "commandExecution", itemId: `command-${index}`, status: "completed" });
+      }
+      markTurnStarted();
+      return turnResult;
+    }
+  });
+
+  const original = service.updateQuestion("thread-1", "root", {
+    content: "root",
+    rerunAgent: true
+  });
+  await turnStarted;
+  const retry = service.updateQuestion("thread-1", "root", {
+    content: "root",
+    rerunAgent: true,
+    agentRunId: "late_run_12345678"
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const snapshot = agentRuns.snapshot("late_run_12345678");
+  assert.ok(snapshot.events.some((event) => event.type === "plan"));
+  assert.ok(snapshot.events.some((event) => event.type === "diff"));
+  assert.ok(snapshot.events.some((event) => event.type === "subagent"));
+  assert.ok(snapshot.events.some((event) => event.itemId === "command-139"));
+
+  releaseTurn({
+    content: "answer",
+    stopReason: "completed",
+    transport: "test",
+    updates: [],
+    session: null
+  });
+  await Promise.all([original, retry]);
+  agentRuns.dispose();
+});
+
 test("a stale agent result does not bypass the conversation conflict guard", async () => {
   const conflict = new ConversationConflictError(
     "conversation branch changed while the agent was working; retry the question"

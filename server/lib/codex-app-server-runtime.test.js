@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
+import { AGENT_DEVELOPER_INSTRUCTIONS } from "./agent-context.js";
+import { CodexAppServerRuntime, summarizeUnifiedDiff } from "./codex-app-server-runtime.js";
 
 class StubRuntime extends CodexAppServerRuntime {
   constructor() {
@@ -93,6 +94,7 @@ test("native runtime persists a semantic session and avoids unchanged context re
   assert.equal(firstTurn.params.effort, "medium");
   assert.equal(first.model, "gpt-default");
   assert.equal(first.reasoningEffort, "medium");
+  assert.equal(runtime.calls.find(({ method }) => method === "thread/start").params.developerInstructions, AGENT_DEVELOPER_INSTRUCTIONS);
   assert.match(firstPrompt, /<XUANNIAO_DOCUMENT>/);
 
   runtime.calls = [];
@@ -126,9 +128,27 @@ test("native child branches fork from the exact parent turn", async () => {
       threadId: "parent-thread",
       lastTurnId: "parent-turn",
       cwd: "/tmp",
-      sandbox: "danger-full-access"
+      sandbox: "danger-full-access",
+      developerInstructions: AGENT_DEVELOPER_INSTRUCTIONS
     }
   });
+});
+
+test("native resumed threads refresh Xuanniao developer instructions", async () => {
+  const runtime = new StubRuntime();
+  await runtime.ensureThread({
+    id: "xuanniao-thread",
+    agentSession: {
+      adapter: "codex-app-server",
+      sessionId: "stored-thread",
+      turnId: "stored-turn",
+      documentHash: "stored-hash"
+    },
+    parentAgentSession: null
+  });
+
+  const resumed = runtime.calls.find(({ method }) => method === "thread/resume");
+  assert.equal(resumed.params.developerInstructions, AGENT_DEVELOPER_INSTRUCTIONS);
 });
 
 test("native resumed turns inject local-only messages missing from agent history", async () => {
@@ -236,6 +256,368 @@ test("native runtime lists paginated models and applies settings to the next tur
   assert.equal(defaultTurnStart.params.effort, "low");
   assert.equal(defaultTurn.model, "gpt-fast");
   assert.equal(defaultTurn.reasoningEffort, "low");
+});
+
+test("unified diff summaries count aggregate files and changed lines", () => {
+  assert.deepEqual(summarizeUnifiedDiff([
+    "diff --git a/src/one.js b/src/one.js",
+    "--- a/src/one.js",
+    "+++ b/src/one.js",
+    "@@ -1 +1,2 @@",
+    "-old",
+    "+new",
+    "+more",
+    "diff --git a/src/two.js b/src/two.js",
+    "similarity index 100%",
+    "rename from src/two.js",
+    "rename to src/renamed.js"
+  ].join("\n")), {
+    filesChanged: 2,
+    additions: 2,
+    deletions: 1
+  });
+
+  assert.deepEqual(summarizeUnifiedDiff([
+    "diff --git a/image.png b/image.png",
+    "Binary files a/image.png and b/image.png differ"
+  ].join("\n")), {
+    filesChanged: 1,
+    additions: 0,
+    deletions: 0
+  });
+
+  assert.deepEqual(summarizeUnifiedDiff([
+    "diff --git a/src/operators.txt b/src/operators.txt",
+    "--- a/src/operators.txt",
+    "+++ b/src/operators.txt",
+    "@@ -1 +1 @@",
+    "--- removed-content",
+    "+++ added-content"
+  ].join("\n")), {
+    filesChanged: 1,
+    additions: 1,
+    deletions: 1
+  });
+});
+
+test("late child threads are not adopted by the next root turn", async () => {
+  const runtime = new CodexAppServerRuntime({ documentPath: "/tmp/plan.md", cwd: "/tmp", timeoutMs: 1_000 });
+  runtime.loadedThreads.add("thread-root");
+  runtime.threadOwners.set("thread-root", "xuanniao-thread");
+
+  const first = runtime.waitForTurn("thread-root", "turn-1");
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "thread-root", turn: { id: "turn-1", status: "completed" } }
+  });
+  await first;
+
+  runtime.handleNotification({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "late-child",
+        parentThreadId: "thread-root",
+        preview: "stale task",
+        status: { type: "active", activeFlags: [] }
+      }
+    }
+  });
+
+  const liveUpdates = [];
+  const second = runtime.waitForTurn("thread-root", "turn-2", {
+    onUpdate: (update) => liveUpdates.push(update)
+  });
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "thread-root", turn: { id: "turn-2", status: "completed" } }
+  });
+  const result = await second;
+
+  assert.equal(runtime.pendingSubagentThreads.size, 0);
+  assert.equal(result.updates.some((update) => update.agentThreadId === "late-child"), false);
+  assert.equal(liveUpdates.some((update) => update.agentThreadId === "late-child"), false);
+});
+
+test("child threads arriving while a root turn starts are replayed into that turn", async () => {
+  const runtime = new CodexAppServerRuntime({ documentPath: "/tmp/plan.md", cwd: "/tmp", timeoutMs: 1_000 });
+  runtime.loadedThreads.add("thread-root");
+  runtime.threadOwners.set("thread-root", "xuanniao-thread");
+  runtime.prepareRootTurnStart("thread-root");
+  runtime.handleNotification({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "early-child",
+        parentThreadId: "thread-root",
+        preview: "current task",
+        status: { type: "active", activeFlags: [] }
+      }
+    }
+  });
+
+  const completed = runtime.waitForTurn("thread-root", "turn-current");
+  runtime.startingRootThreads.delete("thread-root");
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "thread-root", turn: { id: "turn-current", status: "completed" } }
+  });
+  const result = await completed;
+
+  assert.equal(result.updates.some((update) => update.agentThreadId === "early-child"), true);
+});
+
+test("native event stream normalizes plans, diffs, nested subagents, and child approvals", async () => {
+  const runtime = new CodexAppServerRuntime({
+    documentPath: "/tmp/plan.md",
+    cwd: "/tmp",
+    timeoutMs: 1_000
+  });
+  const liveUpdates = [];
+  runtime.threadOwners.set("thread-1", "xuanniao-thread");
+  const completed = runtime.waitForTurn("thread-1", "turn-1", {
+    onUpdate: (update) => liveUpdates.push(update)
+  });
+
+  runtime.handleNotification({
+    method: "turn/plan/updated",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      plan: [
+        { step: "Inspect", status: "completed" },
+        { step: "Implement", status: "inProgress" }
+      ]
+    }
+  });
+  runtime.handleNotification({
+    method: "turn/diff/updated",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      diff: "diff --git a/a.js b/a.js\n--- a/a.js\n+++ b/a.js\n@@ -1 +1 @@\n-old\n+new"
+    }
+  });
+
+  runtime.handleNotification({
+    method: "item/completed",
+    params: {
+      threadId: "thread-1",
+      turnId: "turn-1",
+      item: {
+        id: "spawn-1",
+        type: "collabAgentToolCall",
+        tool: "spawnAgent",
+        status: "completed",
+        senderThreadId: "thread-1",
+        receiverThreadIds: ["agent-1"],
+        prompt: "Inspect the implementation",
+        model: "gpt-worker",
+        reasoningEffort: "medium",
+        agentsStates: { "agent-1": { status: "running", message: null } }
+      }
+    }
+  });
+  runtime.handleNotification({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "agent-1",
+        parentThreadId: "thread-1",
+        agentNickname: "explorer",
+        agentRole: "explorer",
+        preview: "Inspect the implementation",
+        status: { type: "active", activeFlags: [] }
+      }
+    }
+  });
+
+  runtime.handleNotification({
+    method: "item/completed",
+    params: {
+      threadId: "agent-2",
+      turnId: "agent-turn-2",
+      item: {
+        id: "child-command",
+        type: "commandExecution",
+        status: "completed",
+        command: "npm test",
+        aggregatedOutput: "passed",
+        exitCode: 0
+      }
+    }
+  });
+  runtime.handleNotification({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "agent-2",
+        parentThreadId: "agent-1",
+        agentNickname: "tester",
+        agentRole: "worker",
+        preview: "Run tests",
+        status: { type: "active", activeFlags: [] }
+      }
+    }
+  });
+
+  const writes = [];
+  runtime.process = {
+    killed: false,
+    stdin: { writable: true, write: (line) => writes.push(JSON.parse(line)) }
+  };
+  runtime.handleServerRequest({
+    id: 73,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: "agent-1",
+      turnId: "agent-turn-1",
+      itemId: "approval-command",
+      command: "npm test"
+    }
+  });
+  const [approval] = runtime.listPermissionRequests();
+  assert.equal(approval.threadId, "xuanniao-thread");
+  assert.equal(approval.sourceThreadId, "agent-1");
+  assert.equal(approval.sourceAgentName, "explorer");
+  runtime.resolvePermissionRequest(approval.id, { optionId: "accept" });
+  assert.deepEqual(writes.at(-1), { id: 73, result: { decision: "accept" } });
+
+  runtime.handleNotification({
+    method: "item/completed",
+    params: {
+      threadId: "agent-1",
+      turnId: "agent-turn-1",
+      item: {
+        id: "agent-answer",
+        type: "agentMessage",
+        status: "completed",
+        text: "Inspection complete"
+      }
+    }
+  });
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: {
+      threadId: "agent-1",
+      turn: { id: "agent-turn-1", status: "completed" }
+    }
+  });
+  runtime.handleNotification({
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-1", turnId: "turn-1", itemId: "answer", delta: "Done." }
+  });
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "thread-1", turn: { id: "turn-1", status: "completed" } }
+  });
+
+  const result = await completed;
+  assert.equal(result.content, "Done.");
+  assert.deepEqual(result.updates.find((update) => update.type === "diff"), {
+    type: "diff",
+    status: "inProgress",
+    itemId: "turn-diff",
+    filesChanged: 1,
+    additions: 1,
+    deletions: 1
+  });
+  assert.equal(result.updates.find((update) => update.type === "plan")?.status, "inProgress");
+  assert.equal(result.updates.find((update) => update.agentThreadId === "agent-1" && update.type === "subagent")?.result, "Inspection complete");
+  assert.match(result.updates.find((update) => update.agentThreadId === "agent-1" && update.type === "subagent")?.startedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(result.updates.find((update) => update.agentThreadId === "agent-2" && update.type === "commandExecution")?.output, "passed");
+  assert.ok(liveUpdates.some((update) => update.agentThreadId === "agent-2" && update.type === "commandExecution"));
+});
+
+test("subagent approvals arriving before thread ownership are adopted by the root run", async () => {
+  const runtime = new CodexAppServerRuntime({ documentPath: "/tmp/plan.md", cwd: "/tmp", timeoutMs: 1_000 });
+  runtime.threadOwners.set("thread-root", "xuanniao-thread");
+  const writes = [];
+  runtime.process = {
+    killed: false,
+    stdin: { writable: true, write: (line) => writes.push(JSON.parse(line)) }
+  };
+  const completed = runtime.waitForTurn("thread-root", "turn-root");
+
+  runtime.handleServerRequest({
+    id: 81,
+    method: "item/commandExecution/requestApproval",
+    params: {
+      threadId: "agent-early",
+      turnId: "turn-agent-early",
+      itemId: "approval-early",
+      command: "npm test"
+    }
+  });
+  assert.equal(runtime.listPermissionRequests()[0].threadId, "agent-early");
+
+  runtime.handleNotification({
+    method: "thread/started",
+    params: {
+      thread: {
+        id: "agent-early",
+        parentThreadId: "thread-root",
+        agentNickname: "early-worker",
+        status: { type: "active", activeFlags: [] }
+      }
+    }
+  });
+
+  const [approval] = runtime.listPermissionRequests();
+  assert.equal(approval.threadId, "xuanniao-thread");
+  assert.equal(approval.sourceThreadId, "agent-early");
+  assert.equal(approval.sourceAgentName, "early-worker");
+  assert.equal(runtime.turns.get("turn-root").timer, null);
+  runtime.resolvePermissionRequest(approval.id, { optionId: "accept" });
+  assert.ok(runtime.turns.get("turn-root").timer);
+  assert.deepEqual(writes.at(-1), { id: 81, result: { decision: "accept" } });
+
+  runtime.handleNotification({
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-root", turnId: "turn-root", itemId: "answer", delta: "Done" }
+  });
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "thread-root", turn: { id: "turn-root", status: "completed" } }
+  });
+  await completed;
+});
+
+test("legacy collaboration items normalize to subagent lifecycle updates", async () => {
+  const runtime = new CodexAppServerRuntime({ documentPath: "/tmp/plan.md", cwd: "/tmp" });
+  const completed = runtime.waitForTurn("thread-legacy", "turn-legacy");
+  runtime.handleNotification({
+    method: "item/completed",
+    params: {
+      threadId: "thread-legacy",
+      turnId: "turn-legacy",
+      item: {
+        id: "legacy-spawn",
+        type: "collabToolCall",
+        tool: "spawn_agent",
+        status: "completed",
+        senderThreadId: "thread-legacy",
+        receiverThreadId: "legacy-agent",
+        prompt: "Legacy task",
+        agentStatus: "running"
+      }
+    }
+  });
+  runtime.handleNotification({
+    method: "item/agentMessage/delta",
+    params: { threadId: "thread-legacy", turnId: "turn-legacy", itemId: "answer", delta: "Done" }
+  });
+  runtime.handleNotification({
+    method: "turn/completed",
+    params: { threadId: "thread-legacy", turn: { id: "turn-legacy", status: "completed" } }
+  });
+
+  const result = await completed;
+  const subagent = result.updates.find((update) => update.agentThreadId === "legacy-agent");
+  assert.equal(subagent.type, "subagent");
+  assert.equal(subagent.task, "Legacy task");
+  assert.equal(subagent.agentStatus, "interrupted");
+  assert.equal(subagent.status, "failed");
 });
 
 test("native approvals remain pending until the user resolves them", () => {

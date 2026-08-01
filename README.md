@@ -17,7 +17,8 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 - **空间化导航**：支持无限画布、平移、缩放、节点焦点、面包屑和树形缩略图。
 - **受控文档修改**：Codex 可以返回限定范围的 replacement，由玄鸟应用并同步 Thread anchor。
 - **Codex 偏好**：设置页动态读取本机 Codex 模型，并按模型能力选择推理深度。
-- **执行过程可见**：实时展示命令、工具调用、文件修改、搜索和计划；正文完成后自动折叠，刷新后仍可展开。
+- **自然语言开发执行**：在原有节点输入框中直接要求实现、修复、重构、测试或构建；Codex 会检查项目、修改文件并验证，无需额外的“开始开发”按钮。
+- **执行过程可见**：所属节点输入框上方实时展示计划步骤、Diff 统计和 Subagent；正文完成后移入回复折叠留档，刷新后仍可展开。
 
 ## 界面
 
@@ -118,6 +119,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 5. 点击节点查看问题和回答；叶子节点可继续创建子节点，已有子节点的节点可创建并列分支。
 6. 在问题或回答中划选文字，基于精确引用继续追问。
 7. 明确使用“修改、改写、翻译、替换”等意图时，Codex 可以更新锚定的文档范围。
+8. 在节点输入框中用自然语言要求开发工作时，Codex 会在当前工作区执行；切换到其它节点后，进度卡不会全局悬浮，任务节点仍保留运行标记。
 
 ## 架构
 
@@ -190,9 +192,9 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 - 活动 Markdown 文档是受保护资源：ACP 文件写直接拒绝；所有 Agent 回合结束后还会校验 revision。无法归因的外部修改会保留原文件并报告冲突，不会用旧快照覆盖用户内容。
 - 文档切换会失效旧保存队列；保存请求同时携带文档路径和 revision，服务端拒绝落到其它活动文档。Thread metadata 通过临时文件和原子 rename 落盘。
 - 原生和 ACP turn 都使用活动空闲超时：输出、工具事件等活动会自动续期，等待用户审批时暂停计时。原生模式先发送 `turn/interrupt`，ACP 模式失效并重启 adapter，避免超时任务的迟到事件污染下一轮。
-- 每轮 Agent 请求使用独立运行 ID。命令、工具、文件、搜索、计划和公开 reasoning summary 通过 SSE 实时显示；最终步骤和耗时随 assistant message 持久化，正文出现后过程自动折叠。
+- 每轮 Agent 请求使用独立运行 ID。命令、工具、文件、搜索、计划、聚合 Diff 和公开 reasoning summary 通过 SSE 实时显示；原生 app-server 的 Subagent 生命周期及其计划、命令、文件、输出、结果和审批会归属到主任务。最终过程和耗时随 assistant message 持久化，正文出现后自动折叠。
 
-ACP 仍作为兼容传输保留，但不支持原生 thread fork，且同一 adapter 进程内的请求会串行执行。Local-first 表示文档和玄鸟元数据保存在本机；模型与网络行为取决于 Codex CLI 或所选 adapter 的配置。
+ACP 仍作为兼容传输保留，使用通用执行时间线降级，不提供原生计划、聚合 Diff 和 Subagent 详情；它也不支持原生 thread fork，且同一 adapter 进程内的请求会串行执行。Local-first 表示文档和玄鸟元数据保存在本机；模型与网络行为取决于 Codex CLI 或所选 adapter 的配置。
 
 ## 文档修改
 

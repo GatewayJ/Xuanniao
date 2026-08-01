@@ -85,6 +85,13 @@ export class AgentRunBroker {
     };
     run.nextSeq += 1;
     run.events.push(event);
+    const featuredKey = featuredEventKey(event);
+    if (featuredKey) {
+      run.featuredEvents.set(featuredKey, event);
+      while (run.featuredEvents.size > this.maxEvents) {
+        run.featuredEvents.delete(run.featuredEvents.keys().next().value);
+      }
+    }
     if (run.events.length > this.maxEvents) {
       run.events.splice(0, run.events.length - this.maxEvents);
     }
@@ -119,7 +126,7 @@ export class AgentRunBroker {
       durationMs: run.durationMs,
       error: run.error,
       context: { ...run.context },
-      events: run.events.map((event) => ({ ...event }))
+      events: snapshotEvents(run, this.maxEvents).map((event) => ({ ...event }))
     };
   }
 
@@ -167,6 +174,7 @@ export class AgentRunBroker {
       error: null,
       context: {},
       events: [],
+      featuredEvents: new Map(),
       nextSeq: 1,
       subscribers: new Set(),
       expiryTimer: null
@@ -213,4 +221,20 @@ function elapsedMs(startedAt, completedAt) {
   const start = Date.parse(startedAt || "");
   const end = Date.parse(completedAt || "");
   return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
+}
+
+function featuredEventKey(event) {
+  if (!event || !["plan", "diff", "subagent"].includes(event.type)) return null;
+  return [event.scope || "main", event.agentThreadId || "main", event.type, event.itemId || event.agentThreadId || event.type].join(":");
+}
+
+function snapshotEvents(run, limit) {
+  const featured = [...run.featuredEvents.values()];
+  const featuredSeqs = new Set(featured.map((event) => event.seq));
+  const recent = run.events.filter((event) => !featuredSeqs.has(event.seq));
+  const selected = [
+    ...featured,
+    ...recent.slice(-Math.max(0, limit - featured.length))
+  ];
+  return selected.sort((left, right) => (left.seq || 0) - (right.seq || 0));
 }

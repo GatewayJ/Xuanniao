@@ -130,6 +130,16 @@ export function agentRunForMessage(message: Message): AgentRunState | null {
   };
 }
 
+export function activeAgentRunMessage(messages: Message[]): Message | null {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role !== "assistant") continue;
+    const run = agentRunForMessage(message);
+    if (run?.status === "waiting" || run?.status === "running") return message;
+  }
+  return null;
+}
+
 export function coalesceAgentRunUpdates(updates: AgentRunUpdate[]): AgentRunUpdate[] {
   return updates.reduce<AgentRunUpdate[]>((current, update) => mergeAgentRunUpdate(current, update), []);
 }
@@ -157,10 +167,10 @@ function updatePendingRun(
 }
 
 function mergeAgentRunUpdate(events: AgentRunUpdate[], incoming: AgentRunUpdate): AgentRunUpdate[] {
-  const key = incoming.itemId ? `${incoming.type}:${incoming.itemId}` : null;
-  if (!key) return [...events, incoming].slice(-120);
-  const index = events.findIndex((event) => `${event.type}:${event.itemId}` === key);
-  if (index < 0) return [...events, normalizeDelta(incoming)].slice(-120);
+  const key = agentRunUpdateKey(incoming);
+  if (!key) return selectVisibleAgentRunUpdates([...events, incoming]);
+  const index = events.findIndex((event) => agentRunUpdateKey(event) === key);
+  if (index < 0) return selectVisibleAgentRunUpdates([...events, normalizeDelta(incoming)]);
 
   const previous = events[index];
   const next = [...events];
@@ -176,7 +186,27 @@ function mergeAgentRunUpdate(events: AgentRunUpdate[], incoming: AgentRunUpdate)
   };
   delete next[index].outputDelta;
   delete next[index].summaryDelta;
-  return next;
+  return selectVisibleAgentRunUpdates(next);
+}
+
+function selectVisibleAgentRunUpdates(events: AgentRunUpdate[], limit = 120): AgentRunUpdate[] {
+  if (events.length <= limit) return events;
+  const featured = events.filter((event) => isFeaturedAgentRunUpdate(event)).slice(-limit);
+  const selected = new Set(featured);
+  for (let index = events.length - 1; index >= 0 && selected.size < limit; index -= 1) {
+    selected.add(events[index]);
+  }
+  return events.filter((event) => selected.has(event));
+}
+
+function isFeaturedAgentRunUpdate(update: AgentRunUpdate): boolean {
+  return update.type === "plan" || update.type === "diff" || update.type === "subagent";
+}
+
+export function agentRunUpdateKey(update: AgentRunUpdate): string | null {
+  return update.itemId
+    ? `${update.scope || "main"}:${update.agentThreadId || "main"}:${update.type}:${update.itemId}`
+    : null;
 }
 
 function normalizeDelta(update: AgentRunUpdate): AgentRunUpdate {

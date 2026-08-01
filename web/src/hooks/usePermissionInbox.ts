@@ -138,6 +138,8 @@ function samePermissionRequest(
     left.id === right.id &&
     left.sessionId === right.sessionId &&
     left.threadId === right.threadId &&
+    left.sourceThreadId === right.sourceThreadId &&
+    left.sourceAgentName === right.sourceAgentName &&
     left.toolCallId === right.toolCallId &&
     left.title === right.title &&
     left.kind === right.kind &&

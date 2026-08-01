@@ -28,6 +28,23 @@ test("agent run broker replays snapshots and streams bounded updates", () => {
   broker.dispose();
 });
 
+test("agent run snapshots retain the latest plan, diff, and subagent lifecycle", () => {
+  const broker = new AgentRunBroker({ maxEvents: 4 });
+  broker.reserve("run_featured1");
+  broker.publish("run_featured1", { type: "plan", itemId: "plan", plan: [{ step: "实现", status: "inProgress" }] });
+  broker.publish("run_featured1", { type: "diff", itemId: "diff", filesChanged: 2 });
+  broker.publish("run_featured1", { type: "subagent", scope: "subagent", agentThreadId: "agent-1", agentStatus: "running" });
+  for (let index = 0; index < 8; index += 1) {
+    broker.publish("run_featured1", { type: "commandExecution", itemId: `command-${index}` });
+  }
+
+  const snapshot = broker.snapshot("run_featured1");
+
+  assert.deepEqual(snapshot.events.map((event) => event.type), ["plan", "diff", "subagent", "commandExecution"]);
+  assert.equal(snapshot.events.at(-1).itemId, "command-7");
+  broker.dispose();
+});
+
 test("agent run ids are optional but validated when present", () => {
   assert.equal(normalizeAgentRunId(null), null);
   assert.equal(normalizeAgentRunId("valid_run-123"), "valid_run-123");

@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  activeAgentRunMessage,
   agentRunForMessage,
   applyAgentRunSnapshot,
   applyAgentRunUpdate,
+  coalesceAgentRunUpdates,
   pendingAgentRunMeta,
   restorePendingAgentRun,
   resumableAgentRuns
@@ -129,3 +131,94 @@ test("answered questions are not considered resumable", () => {
 
   assert.deepEqual(resumableAgentRuns(threads), []);
 });
+
+test("agent run updates keep identical item ids isolated by subagent thread", () => {
+  const threads = fixture();
+  threads[0].messages = [{
+    id: "pending-agent-run",
+    role: "assistant",
+    content: "",
+    meta: pendingAgentRunMeta("run_12345678", "2026-08-01T10:00:00.000Z"),
+    createdAt: "2026-08-01T10:00:00.000Z"
+  }];
+
+  let updated = applyAgentRunUpdate(threads, "thread-1", "run_12345678", {
+    type: "commandExecution",
+    scope: "subagent",
+    agentThreadId: "agent-one",
+    itemId: "command-1",
+    outputDelta: "one"
+  });
+  updated = applyAgentRunUpdate(updated, "thread-1", "run_12345678", {
+    type: "commandExecution",
+    scope: "subagent",
+    agentThreadId: "agent-two",
+    itemId: "command-1",
+    outputDelta: "two"
+  });
+
+  const events = agentRunForMessage(updated[0].messages[0])?.events || [];
+  assert.equal(events.length, 2);
+  assert.deepEqual(events.map((event) => [event.agentThreadId, event.output]), [
+    ["agent-one", "one"],
+    ["agent-two", "two"]
+  ]);
+});
+
+test("long live runs retain plan, diff, and subagent progress", () => {
+  const events = coalesceAgentRunUpdates([
+    { type: "plan", itemId: "turn-plan", plan: [{ step: "实现", status: "inProgress" }] },
+    { type: "diff", itemId: "turn-diff", filesChanged: 2, additions: 10, deletions: 1 },
+    {
+      type: "subagent",
+      scope: "subagent",
+      itemId: "subagent:agent-1",
+      agentThreadId: "agent-1",
+      agentStatus: "running"
+    },
+    ...Array.from({ length: 120 }, (_, index) => ({
+      type: "commandExecution",
+      itemId: `command-${index}`,
+      command: `command ${index}`
+    }))
+  ]);
+
+  assert.equal(events.length, 120);
+  assert.deepEqual(events.slice(0, 3).map((event) => event.type), ["plan", "diff", "subagent"]);
+  assert.equal(events.at(-1)?.itemId, "command-119");
+});
+
+test("floating progress is selected only from the current node's active messages", () => {
+  const running = pendingAssistant("run_selected1");
+  const completed: Message = {
+    id: "assistant-completed",
+    role: "assistant",
+    content: "done",
+    meta: {
+      agentRun: {
+        id: "run_other001",
+        status: "completed",
+        startedAt: "2026-08-02T00:00:00.000Z",
+        completedAt: "2026-08-02T00:00:01.000Z",
+        durationMs: 1_000,
+        error: null,
+        events: []
+      }
+    },
+    createdAt: "2026-08-02T00:00:00.000Z"
+  };
+
+  assert.equal(activeAgentRunMessage([completed]), null);
+  assert.equal(activeAgentRunMessage([completed, running])?.id, running.id);
+  assert.equal(activeAgentRunMessage([]), null);
+});
+
+function pendingAssistant(runId: string): Message {
+  return {
+    id: `pending-agent-${runId}`,
+    role: "assistant",
+    content: "",
+    meta: pendingAgentRunMeta(runId, "2026-08-02T00:00:00.000Z"),
+    createdAt: "2026-08-02T00:00:00.000Z"
+  };
+}

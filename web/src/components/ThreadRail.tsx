@@ -9,6 +9,7 @@ import {
   type WheelEvent
 } from "react";
 import { createPortal } from "react-dom";
+import { activeAgentRunMessage } from "../agent-run";
 import { agentSettingsSummary } from "../agent-settings-view";
 import { useMessageSelection } from "../hooks/useMessageSelection";
 import { AgentRunTimeline } from "./AgentRunTimeline";
@@ -625,6 +626,7 @@ function ThreadDetailModal(props: {
   const messageCount = props.thread.messages.length;
   const nodeCount = nodes.length;
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
+  const activeRunMessage = selectedNode ? activeAgentRunMessage(selectedNode.messages) : null;
   const nodeCreationMode: NodeCreationMode = selectedNode && conversationNodeCanBranch(selectedNode)
     ? "branch"
     : "child";
@@ -1216,6 +1218,7 @@ function ThreadDetailModal(props: {
                         onRetryAssistant={props.onRetryAssistant}
                         onDeleteMessage={props.onDeleteMessage}
                         setEditText={props.setEditText}
+                        hideLiveAgentRun={message.id === activeRunMessage?.id}
                       />
                     ))}
                     {selectedNode && !selectedNode.messages.some((message) => message.role === "assistant") && (
@@ -1263,6 +1266,11 @@ function ThreadDetailModal(props: {
                       clearCapturedMessageSelection();
                     }}
                   >
+                    {activeRunMessage && (
+                      <div className="threadFocusAgentRun" aria-label="当前节点的 Codex 执行进度">
+                        <AgentRunTimeline message={activeRunMessage} variant="floating" />
+                      </div>
+                    )}
                     <div className="threadFocusComposerTopline">
                       <div className="threadCreationMode" aria-label="新节点创建方式">
                         <span>{nodeCreationMode === "branch" ? "分支" : "子节点"}</span>
@@ -1411,13 +1419,13 @@ function ConversationCanvasNode(props: {
   const hasSelectedOrigin = Boolean(messageBranchSelection(props.node.question));
   const statusLabel = {
     unanswered: "未回答",
-    thinking: "思考中…",
+    thinking: "Codex 执行中…",
     answered: "已回答",
     failed: "回答失败"
   }[status];
   return (
     <article
-      className={`threadCanvasNode ${props.root ? "root" : ""} ${props.active ? "active" : ""} kind-${kind}`}
+      className={`threadCanvasNode ${props.root ? "root" : ""} ${props.active ? "active" : ""} kind-${kind} status-${status}`}
       style={{
         left: props.x - THREAD_CANVAS_NODE_WIDTH / 2,
         top: props.y - THREAD_CANVAS_NODE_HEIGHT / 2,
@@ -1579,6 +1587,7 @@ function ThreadMessageDetail(props: {
   onRetryAssistant: (threadId: string, messageId: string) => void;
   onDeleteMessage: (threadId: string, messageId: string) => void;
   setEditText: (value: string) => void;
+  hideLiveAgentRun?: boolean;
 }) {
   const message = props.message;
   return (
@@ -1612,7 +1621,7 @@ function ThreadMessageDetail(props: {
           </div>
         ) : (
           <>
-            {message.role === "assistant" && <AgentRunTimeline message={message} />}
+            {message.role === "assistant" && !props.hideLiveAgentRun && <AgentRunTimeline message={message} />}
             {message.content && (
               <div className="messageContent" dangerouslySetInnerHTML={{ __html: renderMessageMarkdown(message.content) }} />
             )}
@@ -1654,6 +1663,9 @@ function PermissionRequestPanel(props: {
         <time>{formatMessageTime(props.request.createdAt)}</time>
       </div>
       <div className="permissionRequestTitle">{props.request.title}</div>
+      {props.request.sourceAgentName && (
+        <div className="permissionRequestSource">来自 Subagent · {props.request.sourceAgentName}</div>
+      )}
       {props.request.rawInput && <div className="permissionRequestDetail">{props.request.rawInput}</div>}
       <div className="permissionRequestActions">
         {allowOnce && (

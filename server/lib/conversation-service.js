@@ -322,7 +322,7 @@ export class ConversationService {
 
   publishAgentUpdate(progress, update) {
     progress.events.push(update);
-    if (progress.events.length > 120) progress.events.shift();
+    if (progress.events.length > 120) progress.events = selectProgressEvents(progress.events, 120);
     for (const runId of progress.runIds) this.agentRuns?.publish(runId, update);
   }
 
@@ -373,6 +373,20 @@ export class ConversationService {
       document: updatedDocument
     };
   }
+}
+
+function selectProgressEvents(events, limit) {
+  const latestFeatured = new Map();
+  for (const event of events) {
+    if (!["plan", "diff", "subagent"].includes(event?.type)) continue;
+    const key = [event.scope || "main", event.agentThreadId || "main", event.type, event.itemId || event.agentThreadId || event.type].join(":");
+    latestFeatured.set(key, event);
+  }
+  const selected = new Set(latestFeatured.values());
+  for (let index = events.length - 1; index >= 0 && selected.size < limit; index -= 1) {
+    selected.add(events[index]);
+  }
+  return events.filter((event) => selected.has(event));
 }
 
 function assistantMessageForAnswer(answer) {

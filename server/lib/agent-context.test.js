@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AGENT_DEVELOPER_INSTRUCTIONS,
   AgentContextLimitError,
   DocumentSnapshotCache,
   buildAgentPrompt,
@@ -18,6 +19,15 @@ const thread = {
   anchor: { start: 8, end: 23 },
   messages: [{ role: "user", content: "Earlier question" }]
 };
+
+test("developer instructions distinguish discussion from development execution", () => {
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /discussion.*without modifying files/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /implementation.*perform the requested work/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /maintain a concise execution plan/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /Use subagents only when the user explicitly requests/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /Do not create commits, push branches, or open pull requests/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /Do not modify the active Markdown document/i);
+});
 
 test("unchanged resumed turns avoid replaying the document and branch history", () => {
   const prompt = buildAgentPrompt({

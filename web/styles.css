@@ -1014,6 +1014,15 @@ body.resizing .splitter::before {
   min-width: 0;
 }
 
+.agentRunTimeline.floating {
+  background: rgba(255, 255, 255, 0.98);
+  border: 1px solid #d6e2f3;
+  border-radius: 12px;
+  box-shadow: 0 12px 30px rgba(30, 64, 175, 0.14);
+  margin: 0;
+  overflow: hidden;
+}
+
 .agentRunToggle {
   align-items: center;
   background: transparent;
@@ -1030,6 +1039,17 @@ body.resizing .splitter::before {
   width: 100%;
 }
 
+.agentRunTimeline.floating .agentRunToggle {
+  min-height: 42px;
+  padding: 7px 12px;
+}
+
+.agentRunTimeline.floating .agentRunDetails {
+  max-height: min(42vh, 420px);
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
 .agentRunToggle:hover {
   background: transparent;
   border-color: transparent;
@@ -1040,6 +1060,26 @@ body.resizing .splitter::before {
   color: #98a2b3;
   font-size: 11px;
   font-weight: 500;
+}
+
+.agentRunDiffStats {
+  color: #667085;
+  font-size: 11px;
+  font-weight: 550;
+}
+
+.agentRunDiffStats ins,
+.agentRunDiffStats del {
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.agentRunDiffStats ins {
+  color: #16874e;
+}
+
+.agentRunDiffStats del {
+  color: #c2413a;
 }
 
 .agentRunExecution {
@@ -1078,10 +1118,24 @@ body.resizing .splitter::before {
   padding: 0 0 1px 14px;
 }
 
+.agentRunDetails {
+  padding: 0 12px 10px;
+}
+
+.agentRunTimeline.inline .agentRunDetails {
+  padding-left: 0;
+  padding-right: 0;
+}
+
 .agentRunEmpty {
   color: #98a2b3;
   font-size: 11.5px;
   padding: 2px 0 8px;
+}
+
+.agentRunEmpty.active {
+  color: #667085;
+  padding: 3px 0 8px;
 }
 
 .agentRunStep {
@@ -1149,6 +1203,186 @@ body.resizing .splitter::before {
   padding-left: 18px;
 }
 
+.agentRunPrimaryPlan {
+  display: grid;
+  gap: 7px;
+  list-style: none;
+  margin: 2px 0 10px;
+  padding: 0;
+}
+
+.agentRunPrimaryPlan li {
+  align-items: start;
+  color: #475467;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 17px minmax(0, 1fr);
+  line-height: 17px;
+}
+
+.agentRunPrimaryPlan li.running {
+  color: #1d4f91;
+  font-weight: 650;
+}
+
+.agentRunPlanMarker {
+  align-items: center;
+  border: 1px solid #cdd5df;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 9px;
+  height: 15px;
+  justify-content: center;
+  margin-top: 1px;
+  width: 15px;
+}
+
+.agentRunPrimaryPlan li.running .agentRunPlanMarker {
+  border: 3px solid #d8e6ff;
+  box-shadow: inset 0 0 0 2px #4d7fc7;
+}
+
+.agentRunPrimaryPlan li.completed .agentRunPlanMarker {
+  border-color: #a6d8bd;
+  color: #147d45;
+}
+
+.agentRunSubagents {
+  border-top: 1px solid #edf0f5;
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+}
+
+.agentRunSubagent {
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.agentRunSubagent > summary {
+  align-items: center;
+  cursor: pointer;
+  display: grid;
+  gap: 8px;
+  grid-template-columns: 18px minmax(100px, 1fr) auto auto;
+  list-style: none;
+  min-height: 38px;
+  padding: 6px 9px;
+}
+
+.agentRunSubagent > summary::-webkit-details-marker,
+.agentRunActivity > summary::-webkit-details-marker {
+  display: none;
+}
+
+.agentRunSubagentState {
+  align-items: center;
+  border: 1px solid #cbd5e1;
+  border-radius: 999px;
+  color: #64748b;
+  display: inline-flex;
+  font-size: 10px;
+  height: 17px;
+  justify-content: center;
+  width: 17px;
+}
+
+.agentRunSubagent.completed .agentRunSubagentState {
+  border-color: #a6d8bd;
+  color: #147d45;
+}
+
+.agentRunSubagent.failed .agentRunSubagentState {
+  border-color: #f1a5a0;
+  color: var(--danger);
+}
+
+.agentRunSubagentIdentity {
+  display: grid;
+  min-width: 0;
+}
+
+.agentRunSubagentIdentity strong {
+  color: #344054;
+  font-size: 11.5px;
+}
+
+.agentRunSubagentIdentity small {
+  color: #7b8798;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agentRunSubagentMeta,
+.agentRunSubagentStatus {
+  color: #7b8798;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.agentRunSubagentBody {
+  border-top: 1px solid #e7ecf2;
+  padding: 9px 10px 2px 31px;
+}
+
+.agentRunSubagentDiff {
+  color: #667085;
+  font-size: 10.5px;
+  margin: 0 0 9px;
+}
+
+.agentRunSubagentDiff ins,
+.agentRunSubagentDiff del {
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.agentRunSubagentDiff ins {
+  color: #16874e;
+}
+
+.agentRunSubagentDiff del {
+  color: #c2413a;
+}
+
+.agentRunSubagentBody .agentRunStep {
+  margin-left: -23px;
+}
+
+.agentRunPlan.compact {
+  margin: 0 0 10px;
+}
+
+.agentRunActivity {
+  border-top: 1px solid #edf0f5;
+  margin-top: 8px;
+  padding-top: 7px;
+}
+
+.agentRunActivity > summary {
+  color: #7b8798;
+  cursor: pointer;
+  font-size: 10.5px;
+  list-style: none;
+  padding: 2px 0 6px;
+}
+
+.agentRunActivity > summary::before {
+  content: "›";
+  display: inline-block;
+  font-size: 16px;
+  margin-right: 5px;
+  transform: rotate(0deg);
+}
+
+.agentRunActivity[open] > summary::before {
+  transform: rotate(90deg);
+}
+
 .agentRunPlan li.completed {
   color: #147d45;
 }
@@ -1157,8 +1391,19 @@ body.resizing .splitter::before {
   color: var(--danger);
 }
 
+.threadFocusAgentRun {
+  margin: -2px 0 2px;
+  position: relative;
+  z-index: 2;
+}
+
 @keyframes agent-run-spin {
   to { transform: rotate(360deg); }
+}
+
+@keyframes agent-run-pulse {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
 }
 
 .permissionRequest {
@@ -1194,6 +1439,12 @@ body.resizing .splitter::before {
   line-height: 18px;
   margin-top: 5px;
   overflow-wrap: anywhere;
+}
+
+.permissionRequestSource {
+  color: #8b6b0f;
+  font-size: 10.5px;
+  margin-top: 3px;
 }
 
 .permissionRequestDetail {
@@ -2449,6 +2700,26 @@ body.resizing .splitter::before {
 .threadCanvasNode.active {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.15), 0 12px 28px rgba(13, 110, 253, 0.16);
+}
+
+.threadCanvasNode.status-thinking {
+  border-color: #72a2ee;
+  box-shadow: 0 0 0 3px rgba(63, 125, 219, 0.12), 0 10px 24px rgba(30, 64, 175, 0.13);
+}
+
+.threadCanvasNode.status-thinking .threadCanvasNodeTopline small {
+  color: #2867bd;
+}
+
+.threadCanvasNode.status-thinking .threadCanvasNodeTopline small::before {
+  animation: agent-run-pulse 1.2s ease-in-out infinite;
+  background: #3f7ddb;
+  border-radius: 999px;
+  content: "";
+  display: inline-block;
+  height: 6px;
+  margin-right: 4px;
+  width: 6px;
 }
 
 .threadCanvasNodeMain {

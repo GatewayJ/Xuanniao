@@ -87,6 +87,19 @@ export type AgentRunUpdate = {
   outputDelta?: string;
   exitCode?: number | null;
   durationMs?: number | null;
+  scope?: "main" | "subagent";
+  agentThreadId?: string;
+  parentAgentThreadId?: string;
+  agentName?: string;
+  agentRole?: string;
+  task?: string;
+  model?: string;
+  reasoningEffort?: string;
+  agentStatus?: string;
+  startedAt?: string;
+  filesChanged?: number;
+  additions?: number;
+  deletions?: number;
   title?: string;
   kind?: string;
   server?: string;
@@ -101,7 +114,6 @@ export type AgentRunUpdate = {
   path?: string;
   changes?: Array<{ path?: string; kind?: string; diff?: string }>;
   plan?: Array<{ step?: string; status?: string }>;
-  receiverThreadIds?: string[];
 };
 
 export type AgentRunSnapshot = {
@@ -137,6 +149,8 @@ export type PermissionRequest = {
   id: string;
   sessionId: string | null;
   threadId: string | null;
+  sourceThreadId?: string | null;
+  sourceAgentName?: string | null;
   toolCallId: string | null;
   title: string;
   kind: string | null;
