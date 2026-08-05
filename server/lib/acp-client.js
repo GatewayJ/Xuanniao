@@ -82,7 +82,8 @@ export class AcpDocumentAgent {
         structuredUserInput: false,
         mcpElicitation: false,
         dynamicClientTools: false,
-        modelSelection: false
+        modelSelection: false,
+        permissionSelection: false
       }
     };
   }

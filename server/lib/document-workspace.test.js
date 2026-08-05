@@ -136,7 +136,7 @@ test("document content rolls back when anchor persistence fails", async () => {
   }
 });
 
-test("selection replacement rolls back when the coordinated agent turn cannot commit", async () => {
+test("document edits roll back when the coordinated agent turn cannot commit", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-replacement-rollback-"));
   const documentPath = path.join(tempDir, "plan.md");
   const thread = {
@@ -154,10 +154,9 @@ test("selection replacement rolls back when the coordinated agent turn cannot co
     const original = await workspace.payload();
 
     await assert.rejects(
-      workspace.applySelectionReplacement({
+      workspace.applyDocumentEdits({
         expectedRevision: original.revision,
-        thread,
-        replacement: "changed",
+        edits: [{ oldText: "selected", newText: "changed" }],
         threadId: thread.id,
         agentTurn: {
           userMessageId: "question-1",
@@ -169,6 +168,110 @@ test("selection replacement rolls back when the coordinated agent turn cannot co
       /agent turn commit failed/
     );
     assert.equal(await readFile(documentPath, "utf8"), "before selected after");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("document edits can target content outside the discussion root and preserve its anchor", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-document-edits-"));
+  const documentPath = path.join(tempDir, "plan.md");
+  const content = "Feishu / Lark\n\n```mermaid\ngraph TD\n  A --> B\n```\n";
+  const thread = {
+    id: "thread-1",
+    selectedText: "Feishu / Lark",
+    anchor: { start: 0, end: 13, lineStart: 1, lineEnd: 1, blockId: null }
+  };
+  let savedPatches = [];
+  const store = {
+    async reconcileAnchors(reconciler) {
+      const update = await reconciler([thread]);
+      savedPatches = update.patches;
+      return update.patches;
+    }
+  };
+
+  try {
+    await writeFile(documentPath, content, "utf8");
+    const workspace = new DocumentWorkspace(documentPath, store);
+    const original = await workspace.payload();
+    const result = await workspace.applyDocumentEdits({
+      expectedRevision: original.revision,
+      edits: [{
+        oldText: "graph TD\n  A --> B",
+        newText: "graph TD\n  A --> B\n  B --> C"
+      }],
+      threadId: thread.id
+    });
+
+    assert.match(result.document.content, /B --> C/);
+    assert.equal(savedPatches[0].selectedText, "Feishu / Lark");
+    assert.equal(savedPatches[0].anchor.start, 0);
+    assert.equal(savedPatches[0].anchor.end, 13);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("document edits reject ambiguous targets without changing the file", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-ambiguous-edit-"));
+  const documentPath = path.join(tempDir, "plan.md");
+  const content = "same\nother\nsame\n";
+
+  try {
+    await writeFile(documentPath, content, "utf8");
+    const workspace = new DocumentWorkspace(documentPath, threadStoreStub());
+    const original = await workspace.payload();
+
+    await assert.rejects(
+      workspace.applyDocumentEdits({
+        expectedRevision: original.revision,
+        edits: [{ oldText: "same", newText: "changed" }],
+        threadId: "thread-1"
+      }),
+      /occurs exactly once/
+    );
+    assert.equal(await readFile(documentPath, "utf8"), content);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("multiple document edits remap a discussion anchor through every change", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-multiple-edits-"));
+  const documentPath = path.join(tempDir, "plan.md");
+  const content = "alpha root omega";
+  const thread = {
+    id: "thread-1",
+    selectedText: "root",
+    anchor: { start: 6, end: 10, lineStart: 1, lineEnd: 1, blockId: null }
+  };
+  let savedPatches = [];
+  const store = {
+    async reconcileAnchors(reconciler) {
+      const update = await reconciler([thread]);
+      savedPatches = update.patches;
+      return update.patches;
+    }
+  };
+
+  try {
+    await writeFile(documentPath, content, "utf8");
+    const workspace = new DocumentWorkspace(documentPath, store);
+    const original = await workspace.payload();
+    const result = await workspace.applyDocumentEdits({
+      expectedRevision: original.revision,
+      edits: [
+        { oldText: "alpha", newText: "alphabet" },
+        { oldText: "omega", newText: "end" }
+      ],
+      threadId: thread.id
+    });
+
+    assert.equal(result.document.content, "alphabet root end");
+    assert.equal(savedPatches[0].selectedText, "root");
+    assert.equal(savedPatches[0].anchor.start, 9);
+    assert.equal(savedPatches[0].anchor.end, 13);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

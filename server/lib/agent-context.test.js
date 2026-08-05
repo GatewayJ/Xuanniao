@@ -62,6 +62,22 @@ test("document creation turns request a safe structured Markdown draft", () => {
   assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /create-document output.*do not create or modify files/i);
 });
 
+test("document edit turns treat the discussion selection as context rather than an edit boundary", () => {
+  const prompt = buildAgentPrompt({
+    question: "直接修复文档中的 Mermaid 图",
+    document,
+    thread,
+    mode: "edit-document"
+  });
+
+  assert.match(prompt, /selected document text is discussion context only/i);
+  assert.match(prompt, /smallest exact edits needed anywhere/i);
+  assert.match(prompt, /<XUANNIAO_DOCUMENT_EDITS>/);
+  assert.match(prompt, /<XUANNIAO_OLD_TEXT>/);
+  assert.match(prompt, /<XUANNIAO_NEW_TEXT>/);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /does not limit which part.*may be edited/i);
+});
+
 test("small document edits use a compact exact splice", () => {
   const prompt = buildAgentPrompt({
     question: "Review the update",

@@ -8,14 +8,14 @@ export class ConversationService {
     document,
     agent,
     agentRuns = null,
-    controlledReplacement = false,
+    documentEdits = false,
     onAgentError = () => {}
   }) {
     this.threadStore = threadStore;
     this.document = document;
     this.agent = agent;
     this.agentRuns = agentRuns;
-    this.controlledReplacement = controlledReplacement;
+    this.documentEdits = documentEdits;
     this.onAgentError = onAgentError;
     this.activeReplies = new Map();
     this.activeThreadOperations = new Map();
@@ -219,10 +219,7 @@ export class ConversationService {
     );
     if (!question) throw new Error(`question message not found: ${questionMessageId}`);
     const thread = branchThreadForQuestion(storedThread, questionMessageId);
-    const editRequested =
-      this.controlledReplacement &&
-      wantsDocumentEdit(content) &&
-      canReplaceSelection(storedThread);
+    const editRequested = this.documentEdits && wantsDocumentEdit(content);
     let answer;
 
     try {
@@ -230,7 +227,7 @@ export class ConversationService {
         question: content,
         document: agentSnapshot.document,
         thread,
-        mode: editRequested ? "replace-selection" : "chat",
+        mode: editRequested ? "edit-document" : "chat",
         onUpdate: (update) => this.publishAgentUpdate(progress, update)
       });
 
@@ -257,31 +254,24 @@ export class ConversationService {
     }
 
     if (editRequested) {
-      const replacement = extractReplacement(answer.content);
-      if (replacement === null) {
+      const edits = extractDocumentEdits(answer.content);
+      if (edits === null) {
         return this.persistAgentFailure(
           threadId,
           questionMessageId,
-          new Error("Codex did not return a Xuanniao replacement block for the selected text."),
+          new Error("Codex did not return valid Xuanniao document edit blocks."),
           updatedDocument,
           thread.revision
         );
       }
       const message = assistantMessageForAnswer({
         ...answer,
-        content: [
-          "Applied this replacement to the document:",
-          "",
-          "```md",
-          replacement,
-          "```"
-        ].join("\n"),
+        content: `Applied ${edits.length} edit${edits.length === 1 ? "" : "s"} to the document.`,
         appliedEdit: true
       });
-      const applied = await this.document.applySelectionReplacement({
+      const applied = await this.document.applyDocumentEdits({
         expectedRevision: agentSnapshot.revision,
-        thread: storedThread,
-        replacement,
+        edits,
         threadId,
         agentTurn: {
           userMessageId: questionMessageId,
@@ -440,21 +430,76 @@ function agentFailureContent(errorMessage) {
 }
 
 function wantsDocumentEdit(text) {
-  return /修改|改成|改为|替换|翻译|英文|translate|rewrite|replace|change|edit|update/i.test(text);
+  const normalized = String(text || "").trim();
+  if (!normalized) return false;
+
+  let chineseCommand = normalized;
+  let explicitChineseRequest = false;
+  const politePrefix = /^(?:请你?|麻烦你?|帮我|替我|你)\s*/.exec(chineseCommand);
+  if (politePrefix) {
+    explicitChineseRequest = true;
+    chineseCommand = chineseCommand.slice(politePrefix[0].length);
+  }
+  const directPrefix = /^(?:直接|立即|马上|现在)\s*/.exec(chineseCommand);
+  if (directPrefix) {
+    explicitChineseRequest = true;
+    chineseCommand = chineseCommand.slice(directPrefix[0].length);
+  }
+
+  const chineseEditVerb = /^(?:修改|修复|调整|完善|补充|删除|改成|改为|替换|重写|翻译|翻成英文)/i;
+  const targetsDocument = /文档|本文|Markdown|Mermaid|这一段|这段|此段|这部分|此处|这里|正文|本节|这一节|该章节|这个段落|此段落|选中文字|选中内容|当前内容|文中的|文内/i.test(chineseCommand);
+  const translatesSelection = /^(?:翻译|翻成英文)/.test(chineseCommand);
+  if (!targetsDocument && !translatesSelection) return false;
+  if (/^(?:把|将)/.test(chineseCommand)) {
+    return /修改|修复|调整|完善|补充|删除|改成|改为|替换|重写|翻译|翻成英文/i.test(chineseCommand);
+  }
+  if (chineseEditVerb.test(chineseCommand)) {
+    if (explicitChineseRequest) return true;
+    return !/为什么|为何|怎么|怎样|如何|是否|能否|可否|会不会|有何|有什么|是什么意思|意味着什么/.test(chineseCommand);
+  }
+
+  const englishEditVerb = "(?:translate|rewrite|replace|change|edit|fix|update|delete|remove)";
+  if (!/\b(?:document|markdown|section|paragraph|heading|diagram|mermaid|table|selected text|current text)\b/i.test(normalized)) {
+    return false;
+  }
+  if (new RegExp(`^(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?${englishEditVerb}\\b`, "i").test(normalized)) {
+    return true;
+  }
+  if (new RegExp(`^i\\s+(?:want|need)\\s+you\\s+to\\s+${englishEditVerb}\\b`, "i").test(normalized)) {
+    return true;
+  }
+  if (new RegExp(`^(?:(?:please|directly)\\s+)+${englishEditVerb}\\b`, "i").test(normalized)) {
+    return true;
+  }
+  if (/^(?:how|why|when|where|what|should|is|are|do|does)\b/i.test(normalized)) {
+    return false;
+  }
+  return new RegExp(`^${englishEditVerb}\\b`, "i").test(normalized);
 }
 
-function canReplaceSelection(thread) {
-  const anchor = thread?.anchor || {};
-  return Number.isInteger(anchor.start) && Number.isInteger(anchor.end) && anchor.end > anchor.start;
+function extractDocumentEdits(content) {
+  const container = /^\s*<XUANNIAO_DOCUMENT_EDITS>([\s\S]*?)<\/XUANNIAO_DOCUMENT_EDITS>\s*$/i.exec(String(content || ""));
+  if (!container) return null;
+  const edits = [];
+  const editPattern = /<XUANNIAO_DOCUMENT_EDIT>([\s\S]*?)<\/XUANNIAO_DOCUMENT_EDIT>/gi;
+  let cursor = 0;
+  let match;
+  while ((match = editPattern.exec(container[1])) !== null) {
+    if (container[1].slice(cursor, match.index).trim()) return null;
+    const fields = /^\s*<XUANNIAO_OLD_TEXT>([\s\S]*?)<\/XUANNIAO_OLD_TEXT>\s*<XUANNIAO_NEW_TEXT>([\s\S]*?)<\/XUANNIAO_NEW_TEXT>\s*$/i.exec(match[1]);
+    if (!fields) return null;
+    const oldText = unwrapEditText(fields[1]);
+    if (!oldText) return null;
+    edits.push({ oldText, newText: unwrapEditText(fields[2]) });
+    if (edits.length > 32) return null;
+    cursor = editPattern.lastIndex;
+  }
+  if (container[1].slice(cursor).trim()) return null;
+  return edits.length > 0 ? edits : null;
 }
 
-function extractReplacement(content) {
-  const tagged = /<XUANNIAO_REPLACEMENT>\s*([\s\S]*?)\s*<\/XUANNIAO_REPLACEMENT>/i.exec(content);
-  if (tagged) return tagged[1].replace(/\n$/, "");
-
-  const fenced = /```(?:xuanniao-replacement|md|markdown)?\s*([\s\S]*?)```/i.exec(content);
-  if (fenced && !/^[+-]/m.test(fenced[1])) return fenced[1].replace(/\n$/, "");
-
-  const trimmed = content.trim();
-  return trimmed && !trimmed.includes("```") && trimmed.length < 20_000 ? trimmed : null;
+function unwrapEditText(value) {
+  return /^\r?\n/.test(value) && /\r?\n$/.test(value)
+    ? value.replace(/^\r?\n/, "").replace(/\r?\n$/, "")
+    : value;
 }

@@ -128,6 +128,8 @@ test("document creation runs in a fresh read-only native session", async () => {
   const threadStart = runtime.calls.find(({ method }) => method === "thread/start");
   const turnStart = runtime.calls.find(({ method }) => method === "turn/start");
   assert.equal(threadStart.params.sandbox, "read-only");
+  assert.equal(threadStart.params.approvalPolicy, "on-request");
+  assert.equal(threadStart.params.approvalsReviewer, "user");
   assert.match(turnStart.params.input[0].text, /Do not create or modify any file/i);
 });
 
@@ -151,7 +153,9 @@ test("native child branches fork from the exact parent turn", async () => {
       threadId: "parent-thread",
       lastTurnId: "parent-turn",
       cwd: "/tmp",
-      sandbox: "danger-full-access",
+      approvalPolicy: "on-request",
+      approvalsReviewer: "user",
+      sandbox: "workspace-write",
       developerInstructions: AGENT_DEVELOPER_INSTRUCTIONS
     }
   });
@@ -279,6 +283,52 @@ test("native runtime lists paginated models and applies settings to the next tur
   assert.equal(defaultTurnStart.params.effort, "low");
   assert.equal(defaultTurn.model, "gpt-fast");
   assert.equal(defaultTurn.reasoningEffort, "low");
+});
+
+test("native runtime maps every permission mode to Codex thread settings", async () => {
+  const cases = [
+    ["request-approval", "on-request", "user", "workspace-write"],
+    ["auto-review", "on-request", "auto_review", "workspace-write"],
+    ["full-access", "never", "user", "danger-full-access"],
+    ["custom", null, null, null]
+  ];
+
+  for (const [permissionMode, approvalPolicy, approvalsReviewer, sandbox] of cases) {
+    const runtime = new StubRuntime();
+    runtime.configure({ permissionMode });
+    await runtime.createThread({ id: `thread-${permissionMode}` });
+    const params = runtime.calls.find(({ method }) => method === "thread/start").params;
+    assert.equal(params.approvalPolicy, approvalPolicy);
+    assert.equal(params.approvalsReviewer, approvalsReviewer);
+    assert.equal(params.sandbox, sandbox);
+  }
+});
+
+test("changing permission mode starts a fresh semantic session on the next turn", async () => {
+  const runtime = new StubRuntime();
+  const thread = {
+    id: "permission-thread",
+    sessionKey: "permission-thread:root",
+    agentSession: null,
+    parentAgentSession: null,
+    selectedText: "Details.",
+    anchor: {},
+    messages: []
+  };
+  const first = await runtime.runTurn({ question: "First", document, thread });
+
+  runtime.calls = [];
+  runtime.configure({ permissionMode: "auto-review" });
+  const second = await runtime.runTurn({
+    question: "Second",
+    document,
+    thread: { ...thread, agentSession: first.session }
+  });
+
+  assert.notEqual(second.session.sessionId, first.session.sessionId);
+  const threadStart = runtime.calls.find(({ method }) => method === "thread/start");
+  assert.equal(threadStart.params.approvalsReviewer, "auto_review");
+  assert.equal(threadStart.params.sandbox, "workspace-write");
 });
 
 test("unified diff summaries count aggregate files and changed lines", () => {

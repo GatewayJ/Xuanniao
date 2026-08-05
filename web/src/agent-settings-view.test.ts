@@ -7,8 +7,10 @@ test("agent settings summary reports the effective model and reasoning depth", (
   assert.equal(agentSettingsSummary({
     transport: "codex-app-server",
     modelSelectionSupported: true,
+    permissionSelectionSupported: true,
     model: "gpt-sol",
     reasoningEffort: "max",
+    permissionMode: "auto-review",
     models: [{
       id: "gpt-sol",
       model: "gpt-sol",
@@ -19,7 +21,7 @@ test("agent settings summary reports the effective model and reasoning depth", (
       supportedReasoningEfforts: []
     }],
     catalogError: null
-  }), "GPT Sol · Max");
+  }), "GPT Sol · Max · 替我审批");
   assert.equal(effortLabel("xhigh"), "极高");
 });
 
@@ -27,8 +29,10 @@ test("agent settings summary resolves Codex defaults", () => {
   assert.equal(agentSettingsSummary({
     transport: "codex-app-server",
     modelSelectionSupported: true,
+    permissionSelectionSupported: true,
     model: null,
     reasoningEffort: null,
+    permissionMode: "request-approval",
     models: [{
       id: "gpt-default",
       model: "gpt-default",
@@ -39,5 +43,5 @@ test("agent settings summary resolves Codex defaults", () => {
       supportedReasoningEfforts: []
     }],
     catalogError: null
-  }), "GPT Default · 中");
+  }), "GPT Default · 中 · 请求批准");
 });

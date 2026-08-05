@@ -41,6 +41,8 @@ test("HTTP server starts without Agent availability and reports failed turns exp
     const settings = await jsonRequest(`${baseUrl}/api/settings`);
     assert.equal(settings.response.status, 200);
     assert.equal(settings.payload.modelSelectionSupported, true);
+    assert.equal(settings.payload.permissionSelectionSupported, true);
+    assert.equal(settings.payload.permissionMode, "request-approval");
     assert.deepEqual(settings.payload.models, []);
     assert.match(settings.payload.catalogError, /xuanniao-missing-codex-command/);
 

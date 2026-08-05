@@ -16,8 +16,8 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 - **局部上下文**：每个节点继承祖先上下文，不会混入无关兄弟分支。
 - **选区追问**：可以在节点的问题或回答中划选文字，直接创建带引用的追问。
 - **空间化导航**：支持无限画布、平移、缩放、节点焦点、面包屑和树形缩略图。
-- **受控文档修改**：Codex 可以返回限定范围的 replacement，由玄鸟应用并同步 Thread anchor。
-- **Codex 偏好**：设置页动态读取本机 Codex 模型，并按模型能力选择推理深度。
+- **受控文档修改**：Codex 可以对文档任意位置返回精确编辑提案，由玄鸟应用并同步 Thread anchor。
+- **Codex 偏好**：设置页动态读取本机 Codex 模型，并按模型能力选择推理深度和权限模式。
 - **自然语言开发执行**：在原有节点输入框中直接要求实现、修复、重构、测试或构建；Codex 会检查项目、修改文件并验证，无需额外的“开始开发”按钮。
 - **执行过程可见**：所属节点输入框上方实时展示计划步骤、Diff 统计和 Subagent；正文完成后移入回复折叠留档，刷新后仍可展开。
 
@@ -133,7 +133,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
                                       │
 ┌──────────────────────────── Node HTTP Server ───────────────────────────┐
 │ document I/O · append-only thread tree · metadata persistence           │
-│ Agent Runtime · approval broker · context policy · replacement apply    │
+│ Agent Runtime · approval broker · context policy · document edit apply  │
 └────────────────────────── semantic runtime API ──────────────────────────┘
                                       │
               Codex app-server (native)  ·  ACP adapter (compatibility)
@@ -201,25 +201,28 @@ ACP 仍作为兼容传输保留，使用通用执行时间线降级，不提供�
 
 ## 文档修改
 
-当用户明确要求修改文档时，玄鸟要求 Codex 返回：
+文档选区只负责创建讨论树根节点和提供上下文，不限制可编辑范围。当用户明确要求修改文档时，玄鸟要求 Codex 返回一个或多个精确编辑提案：
 
 ```text
-<XUANNIAO_REPLACEMENT>
-replacement markdown here
-</XUANNIAO_REPLACEMENT>
+<XUANNIAO_DOCUMENT_EDITS>
+<XUANNIAO_DOCUMENT_EDIT>
+<XUANNIAO_OLD_TEXT>exact existing Markdown</XUANNIAO_OLD_TEXT>
+<XUANNIAO_NEW_TEXT>replacement Markdown</XUANNIAO_NEW_TEXT>
+</XUANNIAO_DOCUMENT_EDIT>
+</XUANNIAO_DOCUMENT_EDITS>
 ```
 
-服务端解析 replacement，校验生成回答时的文档 revision，再协调提交 Markdown、Thread anchor、回答和 session；元数据提交失败时回滚 Markdown。revision 已变化时拒绝覆盖；完整删除锚定范围时，对应 Thread 也会删除。
+服务端要求旧文本在当前文档中唯一且多个编辑不重叠，校验生成回答时的 document revision，再协调提交 Markdown、所有 Thread anchor、回答和 session；元数据提交失败时回滚 Markdown。Codex 仍不能通过文件工具直接改活动文档。
 
 ## 配置
 
-Agent 默认使用 Codex app-server 与完全访问沙箱：
+Agent 默认使用 Codex app-server，并在访问工作区外文件或互联网时请求批准：
 
 ```bash
 make run
 ```
 
-应用顶栏的“设置”可以选择 Codex 模型和推理深度。模型目录来自当前 `codex app-server`，只显示每个模型实际支持的推理选项；保存后从下一轮提问生效，不会中断正在执行的任务。偏好保存在 `~/xuanniao/settings.json`，重启和切换文档后继续使用。
+应用顶栏的“设置”可以选择 Codex 模型、推理深度和权限模式。权限支持“请求批准”“替我审批”“完全访问权限”和“自定义 (config.toml)”；保存后从下一轮提问生效，不会中断正在执行的任务。偏好保存在 `~/xuanniao/settings.json`，重启和切换文档后继续使用。
 
 只读模式：
 
@@ -233,10 +236,11 @@ XUANNIAO_AGENT_MODE=read-only make run
 XUANNIAO_CODEX_CMD="/path/to/codex app-server" \
 XUANNIAO_CODEX_MODEL="<model-id>" \
 XUANNIAO_CODEX_REASONING_EFFORT="high" \
+XUANNIAO_AGENT_PERMISSION_MODE="auto-review" \
 npm start -- prd.md
 ```
 
-环境变量是首次启动且尚无设置文件时的默认值；一旦在设置页保存，以本机设置文件为准。选择“跟随 Codex 默认”会显式清除环境变量提供的模型或推理深度覆盖。
+环境变量是首次启动且尚无设置文件时的默认值；一旦在设置页保存，以本机设置文件为准。选择“跟随 Codex 默认”会显式清除环境变量提供的模型或推理深度覆盖，选择“自定义”会让 Codex 使用 `config.toml` 中的权限。旧的 `XUANNIAO_AGENT_MODE` 仍用于 ACP，并作为原生 Codex 自定义模式的兼容覆盖。文档精确编辑默认启用；设置 `XUANNIAO_CONTROLLED_REPLACEMENT=0` 可禁用。
 
 切换到 ACP 兼容模式：
 
@@ -309,9 +313,9 @@ npm run web:build
 ## 当前限制
 
 - Thread 使用本地 JSON 持久化，适合当前单用户工作流，后续可以迁移到 SQLite。
-- 文档修改采用锚定范围 replacement，还不是完整的 patch review 工作流。
+- 文档修改支持与讨论锚点无关的精确编辑提案，但还没有 diff 确认和 undo 工作流。
 - 当前是单用户、单 Server 实例、单活动文档。
-- 完全访问是默认模式，但活动 Markdown 文档始终由 Xuanniao 文档事务保护；其它仓库写入能力由 Runtime 沙箱和审批策略控制。
+- 请求批准是默认模式，活动 Markdown 文档始终由 Xuanniao 文档事务保护；其它仓库写入能力由 Runtime 沙箱和审批策略控制。
 - 当前 Runtime 尚未提供 Codex `request_user_input` 表单、MCP elicitation 和动态 client tool UI；这些能力会在 health capability 中明确报告为 `false`，Agent 仍可退回普通文本提问。
 
 ---
@@ -331,7 +335,7 @@ Key capabilities:
 - incremental document context and ancestor-only branch recovery
 - user-mediated command, file, and permission approvals
 - Markdown, code block, and Mermaid rendering
-- controlled selected-range document replacement
+- controlled document-wide exact edit proposals independent from discussion anchors
 
 Quick start:
 

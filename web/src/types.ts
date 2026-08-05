@@ -205,11 +205,15 @@ export type AgentModelOption = {
   supportedReasoningEfforts: AgentReasoningOption[];
 };
 
+export type AgentPermissionMode = "request-approval" | "auto-review" | "full-access" | "custom";
+
 export type AgentSettingsPayload = {
   transport: string;
   modelSelectionSupported: boolean;
+  permissionSelectionSupported: boolean;
   model: string | null;
   reasoningEffort: string | null;
+  permissionMode: AgentPermissionMode;
   models: AgentModelOption[];
   catalogError: string | null;
 };

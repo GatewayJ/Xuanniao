@@ -19,10 +19,10 @@ export function createAgentRuntime({ documentPath, cwd, env = process.env, setti
   const agentSettings = settings === undefined
     ? runtimeAgentSettingsFromEnv(env)
     : normalizeAgentSettings(settings);
+  const accessMode = normalizeAgentMode(env.XUANNIAO_AGENT_MODE);
   const common = {
     documentPath,
     cwd,
-    accessMode: normalizeAgentMode(env.XUANNIAO_AGENT_MODE),
     timeoutMs: numberFromEnv(env.XUANNIAO_AGENT_TIMEOUT_MS, 600_000),
     contextMaxChars: integerFromEnv(env.XUANNIAO_AGENT_CONTEXT_MAX_CHARS, 1_500_000),
     snapshotCacheEntries: integerFromEnv(env.XUANNIAO_AGENT_SNAPSHOT_CACHE_ENTRIES, 32),
@@ -33,6 +33,7 @@ export function createAgentRuntime({ documentPath, cwd, env = process.env, setti
   if (transport === "acp") {
     runtime = new AcpDocumentAgent({
       ...common,
+      accessMode,
       commandLine: env.XUANNIAO_ACP_CMD ?? "codex-acp",
       timeoutMs: numberFromEnv(env.XUANNIAO_ACP_TIMEOUT_MS, common.timeoutMs)
     });
@@ -41,7 +42,9 @@ export function createAgentRuntime({ documentPath, cwd, env = process.env, setti
       ...common,
       commandLine: env.XUANNIAO_CODEX_CMD ?? "codex app-server",
       model: agentSettings.model,
-      reasoningEffort: agentSettings.reasoningEffort
+      reasoningEffort: agentSettings.reasoningEffort,
+      permissionMode: agentSettings.permissionMode,
+      legacyAccessMode: optionalString(env.XUANNIAO_AGENT_MODE) ? accessMode : null
     });
   }
   return assertAgentRuntime(runtime);
@@ -50,7 +53,9 @@ export function createAgentRuntime({ documentPath, cwd, env = process.env, setti
 export function runtimeAgentSettingsFromEnv(env = process.env) {
   return normalizeAgentSettings({
     model: optionalString(env.XUANNIAO_CODEX_MODEL),
-    reasoningEffort: optionalString(env.XUANNIAO_CODEX_REASONING_EFFORT)
+    reasoningEffort: optionalString(env.XUANNIAO_CODEX_REASONING_EFFORT),
+    permissionMode: optionalString(env.XUANNIAO_AGENT_PERMISSION_MODE)
+      || (optionalString(env.XUANNIAO_AGENT_MODE) ? "custom" : undefined)
   });
 }
 

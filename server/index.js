@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createAgentRuntime, runtimeAgentSettingsFromEnv, runtimeCommand } from "./lib/agent-runtime.js";
-import { validateAgentSettingsSelection } from "./lib/agent-settings.js";
+import { parseAgentSettingsUpdate, validateAgentSettingsSelection } from "./lib/agent-settings.js";
 import { AgentSettingsStore } from "./lib/agent-settings-store.js";
 import { atomicWriteText } from "./lib/atomic-file.js";
 import { ConversationService } from "./lib/conversation-service.js";
@@ -65,28 +65,51 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/settings" && req.method === "PUT") {
-      if (context.agent.status().capabilities.modelSelection !== true) {
+      const body = await readJson(req);
+      const requestedSettings = parseAgentSettingsUpdate(body);
+      const capabilities = context.agent.status().capabilities;
+      const modelSettingsChanged = requestedSettings.model !== agentSettings.model
+        || requestedSettings.reasoningEffort !== agentSettings.reasoningEffort;
+      const permissionChanged = requestedSettings.permissionMode !== agentSettings.permissionMode;
+      if (permissionChanged && capabilities.permissionSelection !== true) {
+        throw new HttpRequestError(
+          409,
+          "权限设置仅支持原生 Codex transport。",
+          "AGENT_SETTINGS_UNSUPPORTED"
+        );
+      }
+      if (modelSettingsChanged && capabilities.modelSelection !== true) {
         throw new HttpRequestError(
           409,
           "模型和推理深度设置仅支持原生 Codex transport。",
-          "MODEL_SELECTION_UNSUPPORTED"
+          "AGENT_SETTINGS_UNSUPPORTED"
         );
       }
-      const body = await readJson(req);
-      let models;
-      try {
-        models = await context.agent.listModels();
-      } catch (error) {
-        throw new HttpRequestError(
-          503,
-          `暂时无法读取 Codex 模型列表：${error instanceof Error ? error.message : String(error)}`,
-          "MODEL_CATALOG_UNAVAILABLE"
-        );
+
+      let models = [];
+      let catalogError = null;
+      let nextSettings = requestedSettings;
+      if (capabilities.modelSelection === true) {
+        try {
+          models = await context.agent.listModels();
+          if (modelSettingsChanged) {
+            nextSettings = validateAgentSettingsSelection(requestedSettings, models);
+          }
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (modelSettingsChanged) {
+            throw new HttpRequestError(
+              503,
+              `暂时无法读取 Codex 模型列表：${message}`,
+              "MODEL_CATALOG_UNAVAILABLE"
+            );
+          }
+          catalogError = message;
+        }
       }
-      const nextSettings = validateAgentSettingsSelection(body, models);
       agentSettings = await settingsStore.save(nextSettings);
       activeDocument.agent.configure(agentSettings);
-      return sendJson(res, 200, settingsPayload(activeDocument.agent, models, null));
+      return sendJson(res, 200, settingsPayload(activeDocument.agent, models, catalogError));
     }
 
     if (url.pathname === "/api/files" && req.method === "GET") {
@@ -355,8 +378,10 @@ function settingsPayload(agent, models, catalogError) {
   return {
     transport: status.transport,
     modelSelectionSupported: status.capabilities.modelSelection === true,
+    permissionSelectionSupported: status.capabilities.permissionSelection === true,
     model: agentSettings.model,
     reasoningEffort: agentSettings.reasoningEffort,
+    permissionMode: agentSettings.permissionMode,
     models,
     catalogError
   };
@@ -377,7 +402,7 @@ async function createDocumentContext(filePath) {
       document,
       agent,
       agentRuns,
-      controlledReplacement: process.env.XUANNIAO_CONTROLLED_REPLACEMENT === "1",
+      documentEdits: process.env.XUANNIAO_CONTROLLED_REPLACEMENT !== "0",
       onAgentError: (event) => {
         console.error(JSON.stringify({
           level: "error",

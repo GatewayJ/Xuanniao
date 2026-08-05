@@ -96,25 +96,25 @@ export class DocumentWorkspace {
     });
   }
 
-  async applySelectionReplacement({
+  async applyDocumentEdits({
     expectedRevision,
-    thread,
-    replacement,
+    edits,
     threadId,
     agentTurn = null
   }) {
     return this.withMutation(async () => {
       const before = await this.snapshot();
       assertRevision(before, expectedRevision);
-      const edit = selectionReplacement(before.content, thread, replacement);
-      await atomicWriteText(this.filePath, edit.content);
+      const resolvedEdits = resolveDocumentEdits(before.content, edits);
+      const content = applyResolvedDocumentEdits(before.content, resolvedEdits);
+      await atomicWriteText(this.filePath, content);
 
       try {
         const reconcile = (currentThreads) => {
-          const remapped = remapThreadsForReplacement(
+          const remapped = remapThreadsForDocumentEdits(
             currentThreads,
             before.content,
-            edit,
+            resolvedEdits,
             threadId
           );
           return {
@@ -132,10 +132,10 @@ export class DocumentWorkspace {
               assistantMessage: null,
               threads: await this.threadStore.reconcileAnchors(reconcile)
             };
-        this.recordControlledContent(edit.content);
+        this.recordControlledContent(content);
         return {
-          document: payloadFor(this.filePath, edit.content),
-          edit,
+          document: payloadFor(this.filePath, content),
+          edits: resolvedEdits,
           threads: committed.threads,
           assistantMessage: committed.assistantMessage
         };
@@ -284,26 +284,67 @@ function assertRevision(snapshot, expectedRevision) {
   }
 }
 
-function selectionReplacement(content, thread, replacement) {
-  const anchor = thread.anchor || {};
-  let start = anchor.start;
-  let end = anchor.end;
-  const selectedText = String(thread.selectedText || "");
-
-  if (!Number.isInteger(start) || !Number.isInteger(end) || end <= start || content.slice(start, end) !== selectedText) {
-    const first = selectedText ? content.indexOf(selectedText) : -1;
-    const last = selectedText ? content.lastIndexOf(selectedText) : -1;
-    if (first < 0 || first !== last) {
-      throw new DocumentConflictError("Selected text no longer matches the document. Re-select the text and create a new comment thread.", documentRevision(content));
+function resolveDocumentEdits(content, edits) {
+  if (!Array.isArray(edits) || edits.length === 0 || edits.length > 32) {
+    throw new DocumentConflictError("Codex must propose between 1 and 32 document edits.", documentRevision(content));
+  }
+  const resolved = edits.map((candidate) => {
+    const oldText = typeof candidate?.oldText === "string" ? candidate.oldText : "";
+    const newText = typeof candidate?.newText === "string" ? candidate.newText : "";
+    if (!oldText || oldText === newText) {
+      throw new DocumentConflictError("Codex proposed an empty or unchanged document edit.", documentRevision(content));
     }
-    start = first;
-    end = first + selectedText.length;
+    const start = content.indexOf(oldText);
+    if (start < 0 || start !== content.lastIndexOf(oldText)) {
+      throw new DocumentConflictError(
+        "Codex document edits must target text that occurs exactly once in the current document.",
+        documentRevision(content)
+      );
+    }
+    return { start, end: start + oldText.length, oldText, newText };
+  }).sort((left, right) => left.start - right.start);
+
+  for (let index = 1; index < resolved.length; index += 1) {
+    if (resolved[index].start < resolved[index - 1].end) {
+      throw new DocumentConflictError("Codex proposed overlapping document edits.", documentRevision(content));
+    }
+  }
+  return resolved;
+}
+
+function applyResolvedDocumentEdits(content, edits) {
+  let result = content;
+  for (const edit of [...edits].reverse()) {
+    result = `${result.slice(0, edit.start)}${edit.newText}${result.slice(edit.end)}`;
+  }
+  return result;
+}
+
+function remapThreadsForDocumentEdits(threads, content, edits, preservedThreadId) {
+  let currentThreads = threads;
+  let currentContent = content;
+  const deletedThreadIds = [];
+
+  for (const proposed of [...edits].reverse()) {
+    const nextContent = `${currentContent.slice(0, proposed.start)}${proposed.newText}${currentContent.slice(proposed.end)}`;
+    const remapped = remapThreadsForReplacement(
+      currentThreads,
+      currentContent,
+      {
+        start: proposed.start,
+        end: proposed.end,
+        replacement: proposed.newText,
+        content: nextContent
+      },
+      preservedThreadId
+    );
+    currentThreads = remapped.threads;
+    deletedThreadIds.push(...remapped.deletedThreadIds);
+    currentContent = nextContent;
   }
 
   return {
-    start,
-    end,
-    replacement,
-    content: `${content.slice(0, start)}${replacement}${content.slice(end)}`
+    threads: currentThreads,
+    deletedThreadIds: [...new Set(deletedThreadIds)]
   };
 }

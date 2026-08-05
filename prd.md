@@ -58,11 +58,11 @@
 | 消息管理 | 已实现 | 编辑用户消息、重跑回复、重试 Codex、删除消息、删除 thread |
 | Thread/文档联动 | 已实现 | 标记选区、激活跳转、侧栏与文档滚动位置同步 |
 | Mermaid 查看 | 已实现 | Preview 本地渲染、横向查看、全屏缩放 |
-| Agent 访问模式 | 已实现 | 默认 `full-access`，可切换为 `read-only`；命令、文件和额外权限请求进入浏览器审批 |
-| Codex 模型设置 | 已实现 | 设置页动态读取 `model/list`；模型与推理深度持久化，并从下一轮提问生效 |
+| Agent 访问模式 | 已实现 | 设置页支持请求批准、自动审批、完全访问和 `config.toml` 自定义；命令、文件和额外权限请求进入浏览器审批 |
+| Codex 设置 | 已实现 | 设置页动态读取 `model/list`；模型、推理深度与权限模式持久化，并从下一轮提问生效 |
 | Agent session 恢复 | 已实现 | 原生模式保存 thread/turn ID 并调用 `thread/resume`；ACP 兼容模式使用 `session/load` |
-| Agent 直接修改文件 | 已实现 | Runtime 可按沙箱和审批策略修改文件；返回后重新读取当前文档并校准 thread |
-| 受控选区替换 | 实验性、默认关闭 | `XUANNIAO_CONTROLLED_REPLACEMENT=1` 时按意图识别并替换当前选区 |
+| Agent 修改仓库文件 | 已实现 | Runtime 可按沙箱和审批策略修改活动 Markdown 之外的仓库文件 |
+| 受控文档精确编辑 | 已实现、默认开启 | 选区仅定义讨论根节点；Codex 可对文档任意唯一文本区域提出精确编辑，由统一事务应用 |
 | Patch/Diff 审核 | 未实现 | 没有 patch 数据模型、diff preview、确认后 apply 流程 |
 | 实时流式回复 | 部分实现 | Agent 工具、计划和状态通过 SSE 实时传递；assistant 正文仍随最终 HTTP 响应返回 |
 | Tool Call 展示 | 已实现 | 执行中自动展开命令、文件、MCP、搜索和计划；正文返回后折叠，刷新后仍可展开 |
@@ -193,7 +193,7 @@ flowchart LR
 | 会话领域模型 | `server/lib/conversation-model.js` | 问题放置、状态迁移、分支校验和 session 失效 |
 | 文档事务 | `server/lib/document-workspace.js` | revision、原子保存、canonical anchor 与活动文档保护 |
 | Runtime 组合 | `server/lib/agent-runtime.js` | 传输选择、公共配置归一化和应用边界 |
-| Agent 设置 | `server/lib/agent-settings.js` | 模型目录归一化、模型与推理深度能力校验 |
+| Agent 设置 | `server/lib/agent-settings.js` | 模型目录归一化、模型与推理深度能力校验、权限模式校验 |
 | 设置存储 | `server/lib/agent-settings-store.js` | 全局 Codex 偏好的原子持久化 |
 | JSONL 进程 | `server/lib/json-line-rpc-process.js` | 子进程、请求关联、超时、退出处理和 stderr 诊断 |
 | Codex Runtime | `server/lib/codex-app-server-runtime.js` | app-server 子进程、thread/turn、fork/resume、事件和审批 |
@@ -264,7 +264,9 @@ sequenceDiagram
 文档写入统一收口到 `DocumentWorkspace`：
 
 1. Browser 通过 `PUT /api/document` 保存完整 Markdown。
-2. 开启 `XUANNIAO_CONTROLLED_REPLACEMENT=1` 后，Server 解析 Codex replacement 并通过同一事务入口替换选区。
+2. 选区只定义讨论树根节点和对话上下文，不定义编辑边界。
+3. 用户明确要求修改文档时，Server 解析 Codex 的精确 old-text/new-text 编辑提案；目标可以位于文档任意位置。
+4. `DocumentWorkspace` 校验 base revision、目标文本唯一性和编辑不重叠，再原子提交 Markdown、所有 Thread anchor、回答和 Agent session。
 
 活动 Markdown 是受保护资源：ACP 文件写直接拒绝；每个 Agent turn 前后记录文档快照，发现绕过事务的直接写入时保留当前文件并返回冲突，避免旧快照覆盖未知外部修改。full-access Codex 仍缺少操作系统级单文件隔离，因此该 turn 后校验是保护层而不是内核强制边界。
 
@@ -297,7 +299,7 @@ spawn codex app-server
   → turn/completed
 ```
 
-原生 Runtime 不覆盖 Codex 的 approval policy，继续使用 Codex CLI 和组织策略；玄鸟只根据访问模式设置 `read-only` 或 `danger-full-access` sandbox。设置页通过 `model/list` 获取当前目录，并在后续 `thread/start` / `turn/start` 传递已保存的模型与推理深度；没有覆盖时交给 Codex 默认值。修改设置只更新 Runtime 的后续回合参数，不销毁活动 session，也不中断正在运行的 turn。
+原生 Runtime 将设置页的权限模式映射到 Codex 的 approval policy、审批者和 sandbox：“请求批准”为 `on-request + user + workspace-write`，“替我审批”为 `on-request + auto_review + workspace-write`，“完全访问权限”为 `never + danger-full-access`，“自定义”清除玄鸟覆盖并使用 `config.toml`。设置页通过 `model/list` 获取当前目录，并在后续 `thread/start` / `turn/start` 传递已保存的模型与推理深度。修改设置不中断正在运行的 turn；权限变化后，下一轮会使用新策略建立语义 session，并从本地分支历史恢复上下文。文档创建 session 始终覆盖为只读 sandbox。
 
 ### 6.3 Session 与树一致性
 
@@ -523,14 +525,15 @@ Node Server 检测到 `web/dist/index.html` 时会提供构建后的静态资源
 
 ### 11.4 环境变量
 
-模型和推理深度也可以在应用设置页中选择，持久化路径为 `~/xuanniao/settings.json`。环境变量仅作为设置文件不存在时的初始默认值；保存设置后，本机设置优先。
+模型、推理深度和权限模式也可以在应用设置页中选择，持久化路径为 `~/xuanniao/settings.json`。环境变量仅作为设置文件不存在时的初始默认值；保存设置后，本机设置优先。
 
 | 变量 | 默认值 | 作用 |
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | Node Server 地址 |
 | `PORT` | `4173` | Node Server 端口 |
 | `XUANNIAO_AGENT_TRANSPORT` | `codex` | `codex` 原生模式或 `acp` 兼容模式 |
-| `XUANNIAO_AGENT_MODE` | `full-access` | `full-access` 或 `read-only` |
+| `XUANNIAO_AGENT_PERMISSION_MODE` | `request-approval` | `request-approval`、`auto-review`、`full-access` 或 `custom` |
+| `XUANNIAO_AGENT_MODE` | `full-access` | ACP 访问模式；原生 Codex 自定义权限的兼容覆盖，可为 `full-access` 或 `read-only` |
 | `XUANNIAO_AGENT_TIMEOUT_MS` | `600000` | 原生与 ACP turn 活动空闲超时 |
 | `XUANNIAO_CODEX_CMD` | `codex app-server` | 原生 Codex app-server 命令 |
 | `XUANNIAO_CODEX_MODEL` | 未设置 | 可选模型覆盖；默认使用 Codex 配置 |
@@ -538,7 +541,7 @@ Node Server 检测到 `web/dist/index.html` 时会提供构建后的静态资源
 | `XUANNIAO_ACP_CMD` | `codex-acp` | ACP 兼容 adapter 命令 |
 | `XUANNIAO_ACP_TIMEOUT_MS` | 通用超时 | ACP 活动空闲超时覆盖 |
 | `XUANNIAO_ACP_SKIP_AUTH` | 未设置 | 设置为 `1` 时允许 adapter 使用已有认证 |
-| `XUANNIAO_CONTROLLED_REPLACEMENT` | 未设置 | 设置为 `1` 时启用实验性选区替换 |
+| `XUANNIAO_CONTROLLED_REPLACEMENT` | 未设置 | 兼容开关；文档精确编辑默认开启，设置为 `0` 时禁用 |
 | `XUANNIAO_AGENT_CONTEXT_MAX_CHARS` | `1500000` | Agent 单次上下文字符上限 |
 | `XUANNIAO_AGENT_SNAPSHOT_CACHE_ENTRIES` | `32` | 文档快照 LRU 最大条目数 |
 | `XUANNIAO_UNSAFE_ALLOW_REMOTE` | 未设置 | 设置为 `1` 时显式允许非回环监听 |
@@ -561,10 +564,10 @@ npm run check
 - Node test runner 单元测试
 - Vite production build
 
-截至当前代码，146 个测试全部通过。覆盖范围包括：
+截至当前代码，190 个测试全部通过。覆盖范围包括：
 
 - 原生 Codex session start/resume/fork、事件归并、审批挂起和上下文去重
-- Codex 模型目录分页、设置能力校验、环境变量回退和原子持久化
+- Codex 模型目录分页、模型与权限设置校验、权限协议映射、环境变量回退和原子持久化
 - ACP 模式映射、文件写权限、session new/load/fallback、审批和启动失败
 - ThreadStore 路径、AgentSession 迁移、树变更失效规则和 anchor 删除同步
 - 增量文档 splice、branch-only 上下文和文档 hash
@@ -590,11 +593,11 @@ npm run check
 
 ### 13.1 Agent 直接文件写入仍在事务边界之外
 
-Browser 保存、Thread 创建和实验性 replacement 已收口到 `DocumentWorkspace`，统一执行 revision 校验、原子写入和 anchor 同步。ACP 直接写活动文档会被拒绝；Agent turn 后若发现无法归因的外部修改，会保留当前文件并返回冲突，不再用旧快照覆盖。但 `danger-full-access` 不能提供操作系统级单文件隔离，Agent 仍可能绕过应用事务写入活动文档，因此下一阶段应把受控 edit proposal 设为唯一写入路径。
+Browser 保存、Thread 创建和 Codex 文档精确编辑已收口到 `DocumentWorkspace`，统一执行 revision 校验、原子写入和 anchor 同步。ACP 直接写活动文档会被拒绝；Agent turn 后若发现无法归因的外部修改，会保留当前文件并返回冲突，不再用旧快照覆盖。但 `danger-full-access` 不能提供操作系统级单文件隔离，因此 turn 后校验仍是保护层而不是内核强制边界。
 
 ### 13.2 外部修改缺少主动通知
 
-Document payload 已携带 SHA-256 revision；Browser 保存和 replacement 使用 compare-and-swap，外部修改不会被静默覆盖。目前仍没有文件 watcher，冲突只能在下一次保存或 Agent 完成后的校准阶段被发现。
+Document payload 已携带 SHA-256 revision；Browser 保存和文档精确编辑使用 compare-and-swap，外部修改不会被静默覆盖。目前仍没有文件 watcher，冲突只能在下一次保存或 Agent 完成后的校准阶段被发现。
 
 ### 13.3 默认 full-access 范围过大
 
@@ -616,7 +619,7 @@ Runtime 已避免在未变化的连续 turn 重发完整文档和历史，并增
 
 ### Phase 1：稳定当前 MVP
 
-1. 已引入统一 `DocumentWorkspace`，把 Browser 保存和受控 replacement 收口为一个入口：
+1. 已引入统一 `DocumentWorkspace`，把 Browser 保存和 Codex 文档精确编辑收口为一个入口：
 
 ```text
 load current revision
@@ -636,8 +639,8 @@ load current revision
 
 ### Phase 2：实现受控 AI 修改
 
-1. Codex 返回结构化 edit proposal，而不是直接写文件。
-2. proposal 保存 base revision、目标范围、replacement 和统一 diff。
+1. 已实现：Codex 返回结构化 edit proposal，而不是直接写活动 Markdown。
+2. 已实现：proposal 携带 base revision，并以唯一 old-text/new-text 描述一个或多个不重叠目标范围。
 3. Browser 展示 diff，用户确认后才调用统一 mutation 入口。
 4. 支持 reject、apply、undo 和 snapshot。
 5. 对 Agent 直接写当前文档的能力默认关闭；full-access 保留给明确授权的仓库级任务。

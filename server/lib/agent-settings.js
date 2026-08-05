@@ -1,4 +1,12 @@
-const settingsVersion = 1;
+const settingsVersion = 2;
+export const DEFAULT_AGENT_PERMISSION_MODE = "request-approval";
+export const AGENT_PERMISSION_MODES = Object.freeze([
+  "request-approval",
+  "auto-review",
+  "full-access",
+  "custom"
+]);
+const agentPermissionModes = new Set(AGENT_PERMISSION_MODES);
 
 export class AgentSettingsValidationError extends Error {
   constructor(message, code) {
@@ -14,7 +22,11 @@ export function normalizeAgentSettings(value, fallback = {}) {
   return {
     version: settingsVersion,
     model: optionalSetting(candidate.model, fallback.model),
-    reasoningEffort: optionalSetting(candidate.reasoningEffort, fallback.reasoningEffort)
+    reasoningEffort: optionalSetting(candidate.reasoningEffort, fallback.reasoningEffort),
+    permissionMode: normalizeAgentPermissionMode(
+      candidate.permissionMode,
+      fallback.permissionMode
+    )
   };
 }
 
@@ -25,8 +37,20 @@ export function parseAgentSettingsUpdate(value) {
   return {
     version: settingsVersion,
     model: parseOptionalSetting(value.model, "model"),
-    reasoningEffort: parseOptionalSetting(value.reasoningEffort, "reasoningEffort")
+    reasoningEffort: parseOptionalSetting(value.reasoningEffort, "reasoningEffort"),
+    permissionMode: normalizeAgentPermissionMode(value.permissionMode)
   };
+}
+
+export function normalizeAgentPermissionMode(value, fallback = DEFAULT_AGENT_PERMISSION_MODE) {
+  const normalized = cleanString(value) || cleanString(fallback) || DEFAULT_AGENT_PERMISSION_MODE;
+  if (!agentPermissionModes.has(normalized)) {
+    throw new AgentSettingsValidationError(
+      `Unsupported permission mode: ${normalized}`,
+      "INVALID_PERMISSION_MODE"
+    );
+  }
+  return normalized;
 }
 
 export function normalizeModelCatalog(value) {

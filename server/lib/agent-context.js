@@ -16,10 +16,11 @@ export const AGENT_DEVELOPER_INSTRUCTIONS = [
   "Follow applicable repository instructions. Preserve unrelated user changes and stay within the requested scope.",
   "Do not create commits, push branches, or open pull requests unless the user explicitly requests that action.",
   "Do not modify the active Markdown document with filesystem tools. Xuanniao owns writes to that document so it can enforce revision checks and keep anchors consistent.",
+  "The selected document text anchors the discussion tree and provides context. It does not limit which part of the active document may be edited.",
   "When Xuanniao requests create-document output, inspect relevant sources as needed but do not create or modify files; return the proposed path and complete Markdown in the required Xuanniao document blocks so the application can validate and persist it.",
   "For normal chat replies, return Markdown-compatible plain text. Use fenced code blocks for code, XML, JSON, logs, and protocol examples.",
   "After development work, summarize the outcome, changed files, verification performed, and any remaining risks or blockers.",
-  "When the user explicitly requests a controlled selection replacement, return only the replacement Markdown wrapped in <XUANNIAO_REPLACEMENT> and </XUANNIAO_REPLACEMENT>."
+  "When Xuanniao requests controlled document edits, return exact old-text/new-text edit blocks in the required Xuanniao document-edit protocol."
 ].join("\n");
 
 export function documentHash(content) {
@@ -89,15 +90,21 @@ export function buildAgentPrompt({
 
   sections.push("", "Current user question:", question);
 
-  if (mode === "replace-selection") {
+  if (mode === "edit-document") {
     sections.push(
       "",
-      "Return only the replacement Markdown for the selected document text, wrapped exactly like this:",
-      "<XUANNIAO_REPLACEMENT>",
-      "replacement markdown here",
-      "</XUANNIAO_REPLACEMENT>",
-      "",
-      "Do not include an explanation, diff markers, or surrounding document text."
+      "Propose the smallest exact edits needed anywhere in the active Markdown document.",
+      "The selected document text is discussion context only; do not treat it as the edit boundary.",
+      "For each edit, copy a non-empty, uniquely occurring old-text region exactly from the current document and provide its replacement.",
+      "Place the exact text immediately inside each OLD_TEXT and NEW_TEXT tag without wrapper-only whitespace.",
+      "Use multiple edit blocks when the changes are separate. Do not modify the file with filesystem tools.",
+      "Return only this protocol, with no explanation or code fence:",
+      "<XUANNIAO_DOCUMENT_EDITS>",
+      "<XUANNIAO_DOCUMENT_EDIT>",
+      "<XUANNIAO_OLD_TEXT>exact existing Markdown</XUANNIAO_OLD_TEXT>",
+      "<XUANNIAO_NEW_TEXT>replacement Markdown</XUANNIAO_NEW_TEXT>",
+      "</XUANNIAO_DOCUMENT_EDIT>",
+      "</XUANNIAO_DOCUMENT_EDITS>"
     );
   }
 

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { effortLabel, findEffectiveModel } from "../agent-settings-view";
-import type { AgentModelOption, AgentSettingsPayload } from "../types";
+import { effortLabel, findEffectiveModel, permissionModeLabel } from "../agent-settings-view";
+import type { AgentModelOption, AgentPermissionMode, AgentSettingsPayload } from "../types";
 
 type SettingsModalProps = {
   open: boolean;
@@ -10,22 +10,28 @@ type SettingsModalProps = {
   saving: boolean;
   error: string;
   onClose: () => void;
-  onSave: (model: string | null, reasoningEffort: string | null) => void;
+  onSave: (
+    model: string | null,
+    reasoningEffort: string | null,
+    permissionMode: AgentPermissionMode
+  ) => void;
 };
 
 export function SettingsModal({ open, data, loading, saving, error, onClose, onSave }: SettingsModalProps) {
   const [model, setModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("");
+  const [permissionMode, setPermissionMode] = useState<AgentPermissionMode>("request-approval");
 
   useEffect(() => {
     if (!open || !data) return;
     const nextModel = data.model || "";
     const effectiveModel = findEffectiveModel(data.models, nextModel);
-    const effortSupported = effectiveModel?.supportedReasoningEfforts.some(
+    const effortSupported = !data.reasoningEffort || !effectiveModel || effectiveModel.supportedReasoningEfforts.some(
       (option) => option.reasoningEffort === data.reasoningEffort
     );
     setModel(nextModel);
     setReasoningEffort(effortSupported ? data.reasoningEffort || "" : "");
+    setPermissionMode(data.permissionMode);
   }, [open, data]);
 
   useEffect(() => {
@@ -41,12 +47,18 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
   const supportedEfforts = effectiveModel?.supportedReasoningEfforts || [];
   const selectedEffort = supportedEfforts.find((option) => option.reasoningEffort === reasoningEffort);
   const unavailableModel = Boolean(model && !effectiveModel);
+  const modelSettingsChanged = Boolean(
+    data && (model !== (data.model || "") || reasoningEffort !== (data.reasoningEffort || ""))
+  );
   const canSave = Boolean(
-    data?.modelSelectionSupported &&
+    data?.permissionSelectionSupported &&
     !loading &&
     !saving &&
-    !data.catalogError &&
-    !unavailableModel
+    (!modelSettingsChanged || (
+      data.modelSelectionSupported &&
+      !data.catalogError &&
+      !unavailableModel
+    ))
   );
 
   if (!open) return null;
@@ -74,18 +86,18 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
           <nav className="settingsNav" aria-label="设置分类">
             <button type="button" className="active" aria-current="page">
               <span className="settingsNavIcon">C</span>
-              <span><strong>Codex</strong><small>模型与推理</small></span>
+              <span><strong>Codex</strong><small>模型、推理与权限</small></span>
             </button>
           </nav>
 
           <form className="settingsContent" onSubmit={(event) => {
             event.preventDefault();
-            if (canSave) onSave(model || null, reasoningEffort || null);
+            if (canSave) onSave(model || null, reasoningEffort || null, permissionMode);
           }}>
             <div className="settingsIntro">
               <div>
                 <span className="settingsEyebrow">Codex</span>
-                <h3>模型与推理深度</h3>
+                <h3>模型、推理与权限</h3>
                 <p>设置会用于下一轮提问，正在执行的任务不会中断。</p>
               </div>
               {data && <span className="settingsTransport">{transportLabel(data.transport)}</span>}
@@ -97,7 +109,58 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
               <div className="settingsError" role="alert">无法读取模型列表：{data.catalogError}</div>
             )}
             {data && !data.modelSelectionSupported && (
-              <div className="settingsNotice">当前使用 ACP 兼容模式。请切换到原生 Codex transport 后再选择模型。</div>
+              <div className="settingsNotice">当前使用 ACP 兼容模式。请切换到原生 Codex transport 后再修改这些设置。</div>
+            )}
+
+            {data && (
+              <section className="settingsSection permissionSettingsSection" aria-labelledby="permission-setting-label">
+                <div className="settingsSectionHeading">
+                  <div>
+                    <h4 id="permission-setting-label">应如何批准 Codex 操作？</h4>
+                    <p>控制 Codex 对文件系统和互联网的访问方式。</p>
+                  </div>
+                  <span>{permissionModeLabel(permissionMode)}</span>
+                </div>
+                <div className="permissionOptions" aria-disabled={!data.permissionSelectionSupported}>
+                  <PermissionModeOption
+                    mode="request-approval"
+                    checked={permissionMode === "request-approval"}
+                    title="请求批准"
+                    description="编辑工作区外文件和使用互联网时始终询问"
+                    icon="✋"
+                    disabled={!data.permissionSelectionSupported}
+                    onChange={setPermissionMode}
+                  />
+                  <PermissionModeOption
+                    mode="auto-review"
+                    checked={permissionMode === "auto-review"}
+                    title="替我审批"
+                    description="仅对检测到的风险操作请求批准"
+                    icon="◇"
+                    disabled={!data.permissionSelectionSupported}
+                    onChange={setPermissionMode}
+                  />
+                  <PermissionModeOption
+                    mode="full-access"
+                    checked={permissionMode === "full-access"}
+                    title="完全访问权限"
+                    description="可不受限制地访问互联网和您电脑上的任何文件"
+                    icon="!"
+                    tone="danger"
+                    disabled={!data.permissionSelectionSupported}
+                    onChange={setPermissionMode}
+                  />
+                  <PermissionModeOption
+                    mode="custom"
+                    checked={permissionMode === "custom"}
+                    title="自定义 (config.toml)"
+                    description="使用 Codex config.toml 中定义的权限"
+                    icon="⚙"
+                    disabled={!data.permissionSelectionSupported}
+                    onChange={setPermissionMode}
+                  />
+                </div>
+              </section>
             )}
 
             {data && data.modelSelectionSupported && (
@@ -208,6 +271,44 @@ function ModelOption({ checked, title, description, badge, invalid = false, onCh
       <span className="modelOptionMark" aria-hidden="true" />
       <span className="modelOptionText"><strong>{title}</strong><small>{description}</small></span>
       {badge && <span className="modelOptionBadge">{badge}</span>}
+    </label>
+  );
+}
+
+type PermissionModeOptionProps = {
+  mode: AgentPermissionMode;
+  checked: boolean;
+  title: string;
+  description: string;
+  icon: string;
+  tone?: "default" | "danger";
+  disabled: boolean;
+  onChange: (mode: AgentPermissionMode) => void;
+};
+
+function PermissionModeOption({
+  mode,
+  checked,
+  title,
+  description,
+  icon,
+  tone = "default",
+  disabled,
+  onChange
+}: PermissionModeOptionProps) {
+  return (
+    <label className={`permissionOption${checked ? " active" : ""}${tone === "danger" ? " danger" : ""}${disabled ? " disabled" : ""}`}>
+      <input
+        type="radio"
+        name="codex-permission-mode"
+        value={mode}
+        checked={checked}
+        disabled={disabled}
+        onChange={() => onChange(mode)}
+      />
+      <span className="permissionOptionIcon" aria-hidden="true">{icon}</span>
+      <span className="permissionOptionText"><strong>{title}</strong><small>{description}</small></span>
+      <span className="permissionOptionCheck" aria-hidden="true">{checked ? "✓" : ""}</span>
     </label>
   );
 }

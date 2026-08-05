@@ -4457,6 +4457,109 @@ body.resizing .splitter::before {
   padding: 0 7px;
 }
 
+.permissionOptions {
+  display: grid;
+  gap: 6px;
+}
+
+.permissionOption {
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  cursor: pointer;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 34px minmax(0, 1fr) 22px;
+  min-height: 60px;
+  padding: 8px 12px;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.permissionOption:hover {
+  background: #f7f8fa;
+  border-color: #e3e7ec;
+}
+
+.permissionOption:focus-within {
+  outline: 2px solid rgba(13, 110, 253, 0.35);
+  outline-offset: 2px;
+}
+
+.permissionOption.active {
+  background: #f1f2f4;
+  border-color: #e0e3e7;
+}
+
+.permissionOption.danger {
+  color: #ed5b1a;
+}
+
+.permissionOption.danger:hover,
+.permissionOption.danger.active {
+  background: #fff7f1;
+  border-color: #ffd1b8;
+}
+
+.permissionOption.disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.permissionOption input {
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+  position: absolute;
+  width: 1px;
+}
+
+.permissionOptionIcon {
+  align-items: center;
+  border: 1px solid currentColor;
+  border-radius: 9px;
+  color: #596273;
+  display: inline-flex;
+  font-size: 16px;
+  font-weight: 700;
+  height: 30px;
+  justify-content: center;
+  line-height: 1;
+  width: 30px;
+}
+
+.permissionOption.danger .permissionOptionIcon {
+  color: #ed5b1a;
+}
+
+.permissionOptionText {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.permissionOptionText strong {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.permissionOptionText small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.permissionOption.danger .permissionOptionText small {
+  color: #ed5b1a;
+}
+
+.permissionOptionCheck {
+  color: #57606f;
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1;
+  text-align: center;
+}
+
 .reasoningEffortControl {
   display: grid;
   gap: 6px;

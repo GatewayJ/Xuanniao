@@ -10,12 +10,12 @@ function createHarness({
   completeAgentError = null,
   runTurn = null,
   agentRuns = null,
-  controlledReplacement = false,
+  documentEdits = false,
   addMessageBarrier = null
 } = {}) {
   let completeAgentCalls = 0;
   const completeAgentRevisions = [];
-  const replacementCalls = [];
+  const documentEditCalls = [];
   const messages = [{
     id: "root",
     role: "user",
@@ -115,8 +115,8 @@ function createHarness({
     async verifyAgentSnapshot() {
       return null;
     },
-    async applySelectionReplacement(input) {
-      replacementCalls.push(input);
+    async applyDocumentEdits(input) {
+      documentEditCalls.push(input);
       const saved = {
         ...input.agentTurn.message,
         id: "assistant",
@@ -126,7 +126,7 @@ function createHarness({
       };
       messages.push(saved);
       return {
-        document: { path: "/tmp/plan.md", content: input.replacement, revision: "updated" },
+        document: { path: "/tmp/plan.md", content: input.edits[0].newText, revision: "updated" },
         assistantMessage: saved,
         threads: [thread]
       };
@@ -151,12 +151,12 @@ function createHarness({
       document,
       agent,
       agentRuns,
-      controlledReplacement
+      documentEdits
     }),
     messages,
     completeAgentCalls: () => completeAgentCalls,
     completeAgentRevisions,
-    replacementCalls
+    documentEditCalls
   };
 }
 
@@ -392,11 +392,68 @@ test("conversation persistence errors are not misreported as agent failures", as
   assert.equal(messages.some((message) => message.role === "assistant"), false);
 });
 
-test("controlled replacement delegates document and answer persistence to one commit", async () => {
-  const { service, completeAgentCalls, replacementCalls } = createHarness({
-    controlledReplacement: true,
+test("document edits are independent from the discussion root selection", async () => {
+  let turnInput = null;
+  const { service, completeAgentCalls, documentEditCalls } = createHarness({
+    documentEdits: true,
+    runTurn: async (input) => {
+      turnInput = input;
+      return {
+        content: [
+          "<XUANNIAO_DOCUMENT_EDITS>",
+          "<XUANNIAO_DOCUMENT_EDIT>",
+          "<XUANNIAO_OLD_TEXT>",
+          "mermaid diagram",
+          "</XUANNIAO_OLD_TEXT>",
+          "<XUANNIAO_NEW_TEXT>",
+          "updated diagram",
+          "</XUANNIAO_NEW_TEXT>",
+          "</XUANNIAO_DOCUMENT_EDIT>",
+          "</XUANNIAO_DOCUMENT_EDITS>"
+        ].join("\n"),
+        stopReason: "completed",
+        transport: "test",
+        updates: [],
+        session: null
+      };
+    }
+  });
+
+  const result = await service.addQuestion("thread-1", {
+    content: "直接修复文档中的 Mermaid 图",
+    parentMessageId: "root",
+    askAgent: true
+  });
+
+  assert.equal(result.agentOutcome, "completed");
+  assert.equal(result.document.content, "updated diagram");
+  assert.equal(completeAgentCalls(), 0);
+  assert.equal(turnInput.mode, "edit-document");
+  assert.equal(turnInput.thread.selectedText, "root");
+  assert.equal(documentEditCalls.length, 1);
+  assert.deepEqual(documentEditCalls[0].edits, [{
+    oldText: "mermaid diagram",
+    newText: "updated diagram"
+  }]);
+  assert.equal(documentEditCalls[0].agentTurn.message.meta.appliedEdit, true);
+  assert.match(documentEditCalls[0].agentTurn.expectedBranchRevision, /^[a-f0-9]{64}$/);
+});
+
+test("document edits reject a partially malformed multi-edit protocol", async () => {
+  const { service, completeAgentCalls, documentEditCalls } = createHarness({
+    documentEdits: true,
     runTurn: async () => ({
-      content: "```xuanniao-replacement\nupdated\n```",
+      content: [
+        "<XUANNIAO_DOCUMENT_EDITS>",
+        "<XUANNIAO_DOCUMENT_EDIT>",
+        "<XUANNIAO_OLD_TEXT>first</XUANNIAO_OLD_TEXT>",
+        "<XUANNIAO_NEW_TEXT>updated first</XUANNIAO_NEW_TEXT>",
+        "</XUANNIAO_DOCUMENT_EDIT>",
+        "<XUANNIAO_DOCUMENT_EDIT>",
+        "<XUANNIAO_OLD_TEXT>second</XUANNIAO_OLD_TEXT>",
+        "<XUANNIAO_NEW_TEXT>updated second</XUANNIAO_NEW_TEXT>",
+        "</XUANNIAO_DOCUMENT_EDITS>"
+      ].join("\n"),
       stopReason: "completed",
       transport: "test",
       updates: [],
@@ -405,17 +462,77 @@ test("controlled replacement delegates document and answer persistence to one co
   });
 
   const result = await service.addQuestion("thread-1", {
-    content: "修改这一段",
+    content: "直接修改文档",
+    parentMessageId: "root",
+    askAgent: true
+  });
+
+  assert.equal(result.agentOutcome, "failed");
+  assert.equal(result.assistantMessage.error, true);
+  assert.equal(completeAgentCalls(), 1);
+  assert.equal(documentEditCalls.length, 0);
+});
+
+test("reviewing an existing update remains a discussion instead of a document edit", async () => {
+  let turnMode = null;
+  const { service } = createHarness({
+    documentEdits: true,
+    runTurn: async (input) => {
+      turnMode = input.mode;
+      return {
+        content: "reviewed",
+        stopReason: "completed",
+        transport: "test",
+        updates: [],
+        session: null
+      };
+    }
+  });
+
+  const result = await service.addQuestion("thread-1", {
+    content: "Review the update",
     parentMessageId: "root",
     askAgent: true
   });
 
   assert.equal(result.agentOutcome, "completed");
-  assert.equal(result.document.content, "updated");
-  assert.equal(completeAgentCalls(), 0);
-  assert.equal(replacementCalls.length, 1);
-  assert.equal(replacementCalls[0].agentTurn.message.meta.appliedEdit, true);
-  assert.match(replacementCalls[0].agentTurn.expectedBranchRevision, /^[a-f0-9]{64}$/);
+  assert.equal(turnMode, "chat");
+});
+
+test("questions that mention edit verbs remain discussions", async () => {
+  const questions = [
+    "解释一下为什么删除这段会出错",
+    "修改这一段会有什么影响？",
+    "How should I fix this?",
+    "请修改设置页面的权限选项",
+    "Please fix the settings page"
+  ];
+
+  for (const content of questions) {
+    let turnMode = null;
+    const { service } = createHarness({
+      documentEdits: true,
+      runTurn: async (input) => {
+        turnMode = input.mode;
+        return {
+          content: "explained",
+          stopReason: "completed",
+          transport: "test",
+          updates: [],
+          session: null
+        };
+      }
+    });
+
+    const result = await service.addQuestion("thread-1", {
+      content,
+      parentMessageId: "root",
+      askAgent: true
+    });
+
+    assert.equal(result.agentOutcome, "completed", content);
+    assert.equal(turnMode, "chat", content);
+  }
 });
 
 test("threads and messages cannot be deleted while an agent reply is active", async () => {

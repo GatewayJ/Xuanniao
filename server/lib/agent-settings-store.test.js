@@ -13,11 +13,16 @@ test("agent settings store falls back, persists, and reloads atomically", async 
 
   try {
     assert.deepEqual(await store.load({ model: "env-model", reasoningEffort: "low" }), {
-      version: 1,
+      version: 2,
       model: "env-model",
-      reasoningEffort: "low"
+      reasoningEffort: "low",
+      permissionMode: "request-approval"
     });
-    const saved = await store.save({ model: "saved-model", reasoningEffort: "high" });
+    const saved = await store.save({
+      model: "saved-model",
+      reasoningEffort: "high",
+      permissionMode: "full-access"
+    });
     assert.deepEqual(await store.load({ model: "env-model" }), saved);
     assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), saved);
   } finally {

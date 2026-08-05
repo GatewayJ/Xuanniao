@@ -30,14 +30,16 @@ const catalog = [
 
 test("agent settings preserve explicit defaults while accepting environment fallbacks", () => {
   assert.deepEqual(normalizeAgentSettings({}, { model: "fallback", reasoningEffort: "high" }), {
-    version: 1,
+    version: 2,
     model: "fallback",
-    reasoningEffort: "high"
+    reasoningEffort: "high",
+    permissionMode: "request-approval"
   });
   assert.deepEqual(normalizeAgentSettings({ model: null, reasoningEffort: null }, { model: "fallback" }), {
-    version: 1,
+    version: 2,
     model: null,
-    reasoningEffort: null
+    reasoningEffort: null,
+    permissionMode: "request-approval"
   });
 });
 
@@ -57,14 +59,16 @@ test("model catalog removes hidden, duplicate, and malformed entries", () => {
 
 test("settings validation uses the selected model reasoning capabilities", () => {
   assert.deepEqual(validateAgentSettingsSelection({ model: "gpt-deep", reasoningEffort: "high" }, catalog), {
-    version: 1,
+    version: 2,
     model: "gpt-deep",
-    reasoningEffort: "high"
+    reasoningEffort: "high",
+    permissionMode: "request-approval"
   });
   assert.deepEqual(validateAgentSettingsSelection({ model: null, reasoningEffort: "medium" }, catalog), {
-    version: 1,
+    version: 2,
     model: null,
-    reasoningEffort: "medium"
+    reasoningEffort: "medium",
+    permissionMode: "request-approval"
   });
   assert.throws(
     () => validateAgentSettingsSelection({ model: "missing", reasoningEffort: null }, catalog),
@@ -75,6 +79,10 @@ test("settings validation uses the selected model reasoning capabilities", () =>
     /does not support/
   );
   assert.throws(() => parseAgentSettingsUpdate({ model: 42 }), /string or null/);
+  assert.throws(
+    () => parseAgentSettingsUpdate({ permissionMode: "unrestricted-ish" }),
+    /Unsupported permission mode/
+  );
 });
 
 test("settings validation canonicalizes a catalog id to its model name", () => {
@@ -84,8 +92,16 @@ test("settings validation canonicalizes a catalog id to its model name", () => {
     displayName: "Canonical",
     supportedReasoningEfforts: [{ reasoningEffort: "low" }]
   }]), {
-    version: 1,
+    version: 2,
     model: "canonical-model",
-    reasoningEffort: "low"
+    reasoningEffort: "low",
+    permissionMode: "request-approval"
   });
+});
+
+test("agent settings persist an explicit permission mode", () => {
+  assert.equal(
+    parseAgentSettingsUpdate({ model: null, reasoningEffort: null, permissionMode: "auto-review" }).permissionMode,
+    "auto-review"
+  );
 });

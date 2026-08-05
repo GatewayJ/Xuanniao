@@ -1,4 +1,4 @@
-import type { AgentModelOption, AgentSettingsPayload } from "./types";
+import type { AgentModelOption, AgentPermissionMode, AgentSettingsPayload } from "./types";
 
 const effortLabels: Record<string, string> = {
   minimal: "最低",
@@ -27,5 +27,12 @@ export function agentSettingsSummary(settings: AgentSettingsPayload | null): str
   const model = findEffectiveModel(settings.models, settings.model || "");
   const modelLabel = model?.displayName || settings.model || "Codex 默认模型";
   const effort = settings.reasoningEffort || model?.defaultReasoningEffort;
-  return `${modelLabel} · ${effort ? effortLabel(effort) : "默认深度"}`;
+  return `${modelLabel} · ${effort ? effortLabel(effort) : "默认深度"} · ${permissionModeLabel(settings.permissionMode)}`;
+}
+
+export function permissionModeLabel(mode: AgentPermissionMode): string {
+  if (mode === "request-approval") return "请求批准";
+  if (mode === "auto-review") return "替我审批";
+  if (mode === "full-access") return "完全访问";
+  return "自定义权限";
 }

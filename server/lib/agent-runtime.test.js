@@ -56,9 +56,10 @@ test("persisted runtime settings override environment values including explicit 
     XUANNIAO_CODEX_MODEL: "env-model",
     XUANNIAO_CODEX_REASONING_EFFORT: "high"
   }), {
-    version: 1,
+    version: 2,
     model: "env-model",
-    reasoningEffort: "high"
+    reasoningEffort: "high",
+    permissionMode: "request-approval"
   });
 
   const runtime = createAgentRuntime({
@@ -72,4 +73,14 @@ test("persisted runtime settings override environment values including explicit 
   });
   assert.equal(runtime.status().model, null);
   assert.equal(runtime.status().reasoningEffort, null);
+  assert.equal(runtime.status().permissionMode, "request-approval");
+});
+
+test("permission mode can be configured by environment with legacy access mode compatibility", () => {
+  assert.equal(runtimeAgentSettingsFromEnv({
+    XUANNIAO_AGENT_PERMISSION_MODE: "auto-review"
+  }).permissionMode, "auto-review");
+  assert.equal(runtimeAgentSettingsFromEnv({
+    XUANNIAO_AGENT_MODE: "read-only"
+  }).permissionMode, "custom");
 });

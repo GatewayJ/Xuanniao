@@ -700,7 +700,9 @@ export function App() {
         saving={agentSettings.settingsSaving}
         error={agentSettings.settingsError}
         onClose={agentSettings.closeSettings}
-        onSave={(model, reasoningEffort) => void agentSettings.saveSettings(model, reasoningEffort)}
+        onSave={(model, reasoningEffort, permissionMode) => (
+          void agentSettings.saveSettings(model, reasoningEffort, permissionMode)
+        )}
       />
       {selectionAsk && (
         <SelectionAskPopover
