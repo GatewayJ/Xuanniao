@@ -182,7 +182,8 @@ export class CodexAppServerRuntime {
     const lockKey = thread.sessionKey || thread.id;
     return this.withSessionLock(lockKey, async () => {
       await this.ensureInitialized();
-      const session = await this.ensureThread(thread);
+      const turnAccessMode = mode === "create-document" ? "read-only" : this.accessMode;
+      const session = await this.ensureThread(thread, turnAccessMode);
       const effectiveSettings = await this.resolveTurnSettings(session);
       const hash = documentHash(document.content);
       const previousDocument = this.documentSnapshots.get(session.sessionId);
@@ -196,7 +197,7 @@ export class CodexAppServerRuntime {
         document,
         thread,
         mode,
-        accessMode: this.accessMode,
+        accessMode: turnAccessMode,
         includeDocument,
         includeHistory,
         history,
@@ -316,7 +317,10 @@ export class CodexAppServerRuntime {
     }
   }
 
-  async ensureThread(thread) {
+  async ensureThread(thread, accessMode = this.accessMode) {
+    if (accessMode !== this.accessMode) {
+      return this.createThread(thread, accessMode);
+    }
     const stored = sessionForAdapter(thread.agentSession, adapterName);
     if (stored) {
       if (!this.loadedThreads.has(stored.sessionId)) {
@@ -324,7 +328,7 @@ export class CodexAppServerRuntime {
           const resumed = await this.request("thread/resume", this.threadParams({ threadId: stored.sessionId }));
           this.rememberThreadSettings(stored.sessionId, resumed);
         } catch {
-          return this.createThread(thread);
+          return this.createThread(thread, accessMode);
         }
         this.loadedThreads.add(stored.sessionId);
       }
@@ -357,19 +361,19 @@ export class CodexAppServerRuntime {
           historyMode: "forked"
         };
       } catch {
-        return this.createThread(thread);
+        return this.createThread(thread, accessMode);
       }
     }
 
-    return this.createThread(thread);
+    return this.createThread(thread, accessMode);
   }
 
-  async createThread(thread) {
+  async createThread(thread, accessMode = this.accessMode) {
     const started = await this.request(
       "thread/start",
       this.threadParams({
         developerInstructions: AGENT_DEVELOPER_INSTRUCTIONS
-      })
+      }, accessMode)
     );
     const sessionId = started?.thread?.id;
     if (!sessionId) {
@@ -399,11 +403,11 @@ export class CodexAppServerRuntime {
     return this.threadSettings.get(sessionId) || { model: null, reasoningEffort: null };
   }
 
-  threadParams(params) {
+  threadParams(params, accessMode = this.accessMode) {
     return compactObject({
       ...params,
       cwd: this.cwd,
-      sandbox: this.accessMode === "read-only" ? "read-only" : "danger-full-access",
+      sandbox: accessMode === "read-only" ? "read-only" : "danger-full-access",
       model: this.model,
       developerInstructions: AGENT_DEVELOPER_INSTRUCTIONS
     });

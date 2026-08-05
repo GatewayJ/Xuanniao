@@ -30,6 +30,16 @@ export const api = {
     body: { path },
     signal
   }),
+  createDocument: (
+    command: { instruction: string; directory: string | null; fileName: string | null },
+    agentRunId: string,
+    signal?: AbortSignal
+  ) =>
+    request<{ document: DocumentPayload; threads: Thread[]; files: MarkdownFile[] }>("/api/document/create", {
+      method: "POST",
+      body: { ...command, agentRunId },
+      signal
+    }),
   saveDocument: (
     documentPath: string,
     content: string,

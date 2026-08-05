@@ -3841,6 +3841,158 @@ body.resizing .splitter::before {
   width: min(760px, calc(100vw - 48px));
 }
 
+.newDocumentBackdrop {
+  z-index: 26;
+}
+
+.newDocumentModal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 28px 70px rgba(31, 35, 41, 0.24);
+  display: grid;
+  gap: 16px;
+  max-height: min(820px, calc(100vh - 48px));
+  overflow: auto;
+  padding: 20px;
+  width: min(720px, calc(100vw - 48px));
+}
+
+.newDocumentPrompt {
+  display: grid;
+  gap: 7px;
+}
+
+.newDocumentPrompt > span,
+.newDocumentDestination > span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.newDocumentPrompt textarea {
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  line-height: 1.55;
+  min-height: 150px;
+  outline: 0;
+  padding: 12px 13px;
+  resize: vertical;
+  width: 100%;
+}
+
+.newDocumentPrompt textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.12);
+}
+
+.newDocumentDestination {
+  background: var(--panel-strong);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+}
+
+.newDocumentDestinationHeader {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+}
+
+.newDocumentDestinationHeader > span,
+.newDocumentDestinationField > span {
+  color: var(--muted-strong);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.newDocumentDestinationHeader button {
+  font-size: 11px;
+  min-height: 26px;
+  padding: 0 8px;
+}
+
+.newDocumentDestinationField {
+  display: grid;
+  gap: 5px;
+}
+
+.newDocumentDestinationField > div {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.newDocumentDestinationField input {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  min-height: 36px;
+  outline: 0;
+  padding: 0 10px;
+  width: 100%;
+}
+
+.newDocumentDestinationField input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.1);
+}
+
+.newDocumentDestination small,
+.newDocumentFooter > span {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.newDocumentPermissions {
+  display: grid;
+  gap: 8px;
+}
+
+.newDocumentFooter {
+  align-items: center;
+  border-top: 1px solid var(--line);
+  display: flex;
+  gap: 16px;
+  justify-content: space-between;
+  padding-top: 14px;
+}
+
+.newDocumentFooter > div {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.directoryPickerBackdrop {
+  z-index: 28;
+}
+
+.directoryPickerModal {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 28px 70px rgba(31, 35, 41, 0.26);
+  display: grid;
+  gap: 14px;
+  max-height: min(680px, calc(100vh - 48px));
+  padding: 18px;
+  width: min(620px, calc(100vw - 48px));
+}
+
+.directoryPickerToolbar {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.directoryList {
+  min-height: 160px;
+}
+
 .fileModalHeader {
   align-items: flex-start;
   display: flex;

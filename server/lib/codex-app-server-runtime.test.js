@@ -108,6 +108,29 @@ test("native runtime persists a semantic session and avoids unchanged context re
   assert.doesNotMatch(resumedPrompt, /<XUANNIAO_BRANCH_HISTORY>/);
 });
 
+test("document creation runs in a fresh read-only native session", async () => {
+  const runtime = new StubRuntime();
+  await runtime.runTurn({
+    question: "Create an issue analysis document",
+    document: { path: "/tmp", title: "New document", content: "" },
+    thread: {
+      id: "document-creation-run_12345678",
+      sessionKey: "document-creation-run_12345678",
+      agentSession: null,
+      parentAgentSession: null,
+      selectedText: "",
+      anchor: {},
+      messages: []
+    },
+    mode: "create-document"
+  });
+
+  const threadStart = runtime.calls.find(({ method }) => method === "thread/start");
+  const turnStart = runtime.calls.find(({ method }) => method === "turn/start");
+  assert.equal(threadStart.params.sandbox, "read-only");
+  assert.match(turnStart.params.input[0].text, /Do not create or modify any file/i);
+});
+
 test("native child branches fork from the exact parent turn", async () => {
   const runtime = new StubRuntime();
   const session = await runtime.ensureThread({

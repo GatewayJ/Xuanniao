@@ -10,6 +10,7 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 
 - **Local-first**：Markdown 原文件和讨论元数据保存在本地。
 - **Markdown-native**：使用 CodeMirror 编辑源文本，以 markdown-it 和 Mermaid 渲染预览。
+- **自然语言新建文档**：无需预先准备 Markdown；描述分析或写作任务，Codex 会检查相关仓库与资料并生成首版文档。
 - **文本锚定**：Thread 绑定文档选区，并随编辑自动更新位置。
 - **树形讨论**：每个问题都是节点；叶子继续形成子节点，非叶节点创建独立分支，既有路径不会被重排。
 - **局部上下文**：每个节点继承祖先上下文，不会混入无关兄弟分支。
@@ -112,14 +113,15 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 
 ## 使用流程
 
-1. 打开本地 Markdown 文件。
-2. 在 Edit 或 Preview 中选择一段文字。
-3. 点击“选中文字提问”，在选区旁的提问框中创建根 Thread 并向 Codex 提问。
-4. 从评论栏打开 Thread，进入讨论树画布。
-5. 点击节点查看问题和回答；叶子节点可继续创建子节点，已有子节点的节点可创建并列分支。
-6. 在问题或回答中划选文字，基于精确引用继续追问。
-7. 明确使用“修改、改写、翻译、替换”等意图时，Codex 可以更新锚定的文档范围。
-8. 在节点输入框中用自然语言要求开发工作时，Codex 会在当前工作区执行；切换到其它节点后，进度卡不会全局悬浮，任务节点仍保留运行标记。
+1. 点击顶栏“新建”，用自然语言描述文档目标；例如“创建文档，分析 Issue #123 的意图，并根据当前代码仓库给出解决方案”。也可以直接打开已有 Markdown。
+2. 可选保存目录和文件名；留空时由 Codex 自动决定。新建流程以只读方式检查工作区和引用来源，将首版 Markdown 保存到工作区内且不会覆盖已有文件，然后自动打开。
+3. 在 Edit 或 Preview 中选择一段文字。
+4. 点击“选中文字提问”，在选区旁的提问框中创建根 Thread 并向 Codex 提问。
+5. 从评论栏打开 Thread，进入讨论树画布。
+6. 点击节点查看问题和回答；叶子节点可继续创建子节点，已有子节点的节点可创建并列分支。
+7. 在问题或回答中划选文字，基于精确引用继续追问。
+8. 明确使用“修改、改写、翻译、替换”等意图时，Codex 可以更新锚定的文档范围。
+9. 在节点输入框中用自然语言要求开发工作时，Codex 会在当前工作区执行；切换到其它节点后，进度卡不会全局悬浮，任务节点仍保留运行标记。
 
 ## 架构
 
@@ -139,7 +141,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 
 | 层 | 主要文件 | 职责 |
 | --- | --- | --- |
-| UI 组合 | `web/src/App.tsx` | 组合文档、讨论、权限和文件浏览能力 |
+| UI 组合 | `web/src/App.tsx` | 组合文档创建、编辑、讨论、权限和文件浏览能力 |
 | 浏览器用例 | `web/src/hooks/useDocumentSession.ts`, `useConversationCommands.ts`, `usePermissionInbox.ts` | 文档保存事务、会话命令和权限收件箱 |
 | 文档编辑 | `web/src/ThreadEditor.ts` | CodeMirror、选区、装饰和 anchor remap |
 | 树形交互 | `web/src/components/ThreadRail.tsx` | 评论栏、无限画布、节点焦点和内联追问 |
@@ -152,6 +154,7 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 | 应用服务 | `server/lib/conversation-service.js` | 会话命令、Agent 回合和受控文档修改编排 |
 | 运行事件 | `server/lib/agent-run-broker.js` | 有界 Agent 事件缓存、SSE 订阅和终态保留 |
 | 文档事务 | `server/lib/document-workspace.js` | revision、原子写、锚点校验和活动文档保护 |
+| 文档创建 | `server/lib/document-creation-service.js` | 自然语言生成、可选目录与文件名、只读 Agent 回合、路径校验和防覆盖落盘 |
 | 持久化 | `server/lib/thread-store.js` | Thread JSON 读写、迁移和并发串行化 |
 | Runtime 组合 | `server/lib/agent-runtime.js` | 传输选择、配置归一化和应用边界 |
 | JSONL 基础设施 | `server/lib/json-line-rpc-process.js` | 子进程、请求关联、超时和诊断缓冲 |

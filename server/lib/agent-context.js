@@ -16,6 +16,7 @@ export const AGENT_DEVELOPER_INSTRUCTIONS = [
   "Follow applicable repository instructions. Preserve unrelated user changes and stay within the requested scope.",
   "Do not create commits, push branches, or open pull requests unless the user explicitly requests that action.",
   "Do not modify the active Markdown document with filesystem tools. Xuanniao owns writes to that document so it can enforce revision checks and keep anchors consistent.",
+  "When Xuanniao requests create-document output, inspect relevant sources as needed but do not create or modify files; return the proposed path and complete Markdown in the required Xuanniao document blocks so the application can validate and persist it.",
   "For normal chat replies, return Markdown-compatible plain text. Use fenced code blocks for code, XML, JSON, logs, and protocol examples.",
   "After development work, summarize the outcome, changed files, verification performed, and any remaining risks or blockers.",
   "When the user explicitly requests a controlled selection replacement, return only the replacement Markdown wrapped in <XUANNIAO_REPLACEMENT> and </XUANNIAO_REPLACEMENT>."
@@ -39,6 +40,15 @@ export function buildAgentPrompt({
   previousDocument = null,
   maxChars = defaultAgentContextMaxChars
 }) {
+  if (mode === "create-document") {
+    return buildDocumentCreationPrompt({
+      question,
+      workspaceRoot: document.path,
+      accessMode,
+      maxChars
+    });
+  }
+
   const sections = [
     `Document path: ${document.path}`,
     `Document title: ${document.title}`,
@@ -92,6 +102,39 @@ export function buildAgentPrompt({
   }
 
   const prompt = sections.join("\n");
+  if (prompt.length > maxChars) {
+    throw new AgentContextLimitError(prompt.length, maxChars);
+  }
+  return prompt;
+}
+
+function buildDocumentCreationPrompt({ question, workspaceRoot, accessMode, maxChars }) {
+  const prompt = [
+    `Workspace root: ${workspaceRoot}`,
+    "",
+    accessMode === "read-only"
+      ? "Runtime policy: read-only. Inspect as needed, but do not perform mutating operations."
+      : "Runtime policy: you may inspect the workspace and referenced sources, but this document-creation turn must not modify files.",
+    "",
+    "Create a complete, useful Markdown document from the following natural-language request.",
+    "Use the current workspace as the default code repository. If the request identifies another accessible repository, use that repository as the source instead.",
+    "Inspect code, issues, and other relevant sources when they are available and needed. Clearly label assumptions when a referenced source cannot be accessed.",
+    "Choose a concise relative Markdown path inside the workspace. Use a subdirectory only when the request clearly implies one.",
+    "Do not create or modify any file. Xuanniao will validate and save the result.",
+    "",
+    "Current user request:",
+    question,
+    "",
+    "Return only these two blocks, with no explanation or code fence:",
+    "<XUANNIAO_DOCUMENT_PATH>",
+    "relative/path/to-document.md",
+    "</XUANNIAO_DOCUMENT_PATH>",
+    "<XUANNIAO_DOCUMENT_CONTENT>",
+    "# Complete document title",
+    "",
+    "Complete Markdown document content",
+    "</XUANNIAO_DOCUMENT_CONTENT>"
+  ].join("\n");
   if (prompt.length > maxChars) {
     throw new AgentContextLimitError(prompt.length, maxChars);
   }

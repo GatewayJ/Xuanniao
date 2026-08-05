@@ -44,6 +44,24 @@ test("unchanged resumed turns avoid replaying the document and branch history", 
   assert.match(prompt, /Current user question:\nFollow up/);
 });
 
+test("document creation turns request a safe structured Markdown draft", () => {
+  const prompt = buildAgentPrompt({
+    question: "创建文档，分析 issue 123 并根据当前仓库给出解决方案",
+    document: { path: "/tmp/repository", title: "New document", content: "" },
+    thread: { selectedText: "", anchor: {}, messages: [] },
+    mode: "create-document"
+  });
+
+  assert.match(prompt, /Workspace root: \/tmp\/repository/);
+  assert.match(prompt, /must not modify files/i);
+  assert.match(prompt, /<XUANNIAO_DOCUMENT_PATH>/);
+  assert.match(prompt, /<XUANNIAO_DOCUMENT_CONTENT>/);
+  assert.match(prompt, /issue 123/);
+  assert.doesNotMatch(prompt, /<XUANNIAO_DOCUMENT>/);
+  assert.doesNotMatch(prompt, /Selected document text/);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /create-document output.*do not create or modify files/i);
+});
+
 test("small document edits use a compact exact splice", () => {
   const prompt = buildAgentPrompt({
     question: "Review the update",

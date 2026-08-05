@@ -47,6 +47,7 @@
 | 能力 | 状态 | 当前实现 |
 | --- | --- | --- |
 | 打开 Markdown | 已实现 | 启动时指定文件；应用内按目录浏览；支持绝对路径和 workspace 外文件 |
+| 自然语言创建 Markdown | 已实现 | 顶栏“新建”接收自然语言任务，可选保存目录和文件名；Codex 以只读会话检查工作区并返回结构化首稿；服务端校验路径、防止覆盖并自动打开新文档 |
 | Markdown 编辑 | 已实现 | CodeMirror 6 源码编辑、语法高亮、自动换行、编辑器内 undo/redo |
 | 自动保存 | 已实现 | 编辑停止 1 秒后保存；切换文档或询问 Codex 前先 flush；支持手动 Save |
 | Preview | 已实现 | markdown-it 渲染；禁用原始 HTML；支持 Mermaid |
@@ -74,7 +75,11 @@
 
 ```mermaid
 flowchart LR
-  Start[启动本地服务] --> Open[打开 Markdown]
+  Start[启动本地服务] --> Entry{开始方式}
+  Entry --> Open[打开 Markdown]
+  Entry --> Describe[自然语言描述新文档]
+  Describe --> Generate[Codex 只读分析并生成首稿]
+  Generate --> Open
   Open --> Edit[Edit / Preview / Outline]
   Edit --> Select[选择文本]
   Select --> Ask[Ask Selection]
@@ -83,6 +88,8 @@ flowchart LR
   Runtime --> Reply[保存并展示回复]
   Reply --> Edit
 ```
+
+用户无需提前创建空 Markdown。点击顶栏“新建”后，可以用自然语言同时描述文档类型、Issue、参考代码仓库和期望结构，也可以从工作区目录树选择保存目录并填写文件名；任一项留空时由 Codex 自动决定。创建回合强制使用只读 Agent 能力；服务端只允许在当前 workspace 内写入新的 Markdown 文件，拒绝路径穿越、符号链接逃逸和覆盖已有文件，成功后自动切换到新文档。生成计划与工具过程通过现有 Agent Run SSE 展示，权限请求在创建弹窗内处理。
 
 用户在 Edit 或 Preview 中选中文本后，点击右侧“选中文字提问”，通过选区旁的内嵌提问框输入问题。相同范围已有 thread 时会复用该 thread。
 
@@ -124,7 +131,7 @@ flowchart LR
 
 ```text
 ┌──────────────────────────── Browser / React ────────────────────────────┐
-│ TopBar / DocumentPane / ThreadRail / FilePickerModal / DiagramViewer     │
+│ TopBar / NewDocumentModal / DocumentPane / ThreadRail / FilePickerModal  │
 │ App.tsx：页面组合；业务流程下沉到 document/conversation/permission hooks │
 │ MarkdownThreadEditor：CodeMirror、选区、Decoration、编辑后 anchor remap   │
 │ markdown.ts：Markdown/消息渲染与按需加载 Mermaid                          │

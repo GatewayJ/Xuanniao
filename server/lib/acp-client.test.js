@@ -58,6 +58,25 @@ test("full access writes arbitrary files while read-only rejects writes", async 
   }
 });
 
+test("document creation turns deny ACP writes even in a full-access workspace", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-create-read-only-"));
+  const documentPath = path.join(tempDir, "document.md");
+  const otherPath = path.join(tempDir, "other.md");
+  await writeFile(documentPath, "document", "utf8");
+  const agent = createAgent(documentPath, "full-access");
+  agent.activeTurn = { readOnly: true };
+
+  try {
+    await assert.rejects(
+      agent.writeTextFile({ path: otherPath, content: "denied" }),
+      /write denied in read-only mode/
+    );
+  } finally {
+    agent.dispose();
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("permission requests are surfaced to the approval broker", async () => {
   const agent = createAgent("/tmp/document.md", "full-access");
   const options = [
@@ -222,6 +241,40 @@ test("each thread creates or loads its own persisted ACP session", async () => {
     {
       method: "session/load",
       params: { sessionId: "stored-session", cwd: "/tmp", mcpServers: [] }
+    }
+  ]);
+});
+
+test("document creation switches the ACP session to read-only before prompting", async () => {
+  class StubAgent extends AcpDocumentAgent {
+    constructor() {
+      super({
+        documentPath: "/tmp/document.md",
+        cwd: "/tmp",
+        commandLine: "codex-acp",
+        accessMode: "full-access",
+        timeoutMs: 1000
+      });
+      this.calls = [];
+    }
+
+    async ensureInitialized() {}
+
+    async request(method, params) {
+      this.calls.push({ method, params });
+      return method === "session/new" ? { sessionId: "creation-session" } : {};
+    }
+  }
+
+  const agent = new StubAgent();
+  const session = await agent.ensureThreadSession({ id: "document-creation-run_12345678" }, "read-only");
+
+  assert.equal(session.sessionId, "creation-session");
+  assert.deepEqual(agent.calls, [
+    { method: "session/new", params: { cwd: "/tmp", mcpServers: [] } },
+    {
+      method: "session/set_mode",
+      params: { sessionId: "creation-session", modeId: "read-only" }
     }
   ]);
 });

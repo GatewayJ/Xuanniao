@@ -12,6 +12,7 @@ import { atomicWriteText } from "./lib/atomic-file.js";
 import { ConversationService } from "./lib/conversation-service.js";
 import { AgentRunBroker, interruptedAgentRunSnapshot, normalizeAgentRunId } from "./lib/agent-run-broker.js";
 import { normalizeConversationMetaPatch } from "./lib/conversation-model.js";
+import { DocumentCreationService } from "./lib/document-creation-service.js";
 import { DocumentWorkspace } from "./lib/document-workspace.js";
 import { browseMarkdownDirectory } from "./lib/file-browser.js";
 import { HttpRequestError, assertSafeHostBinding, assertTrustedRequest, setSecurityHeaders } from "./lib/http-security.js";
@@ -118,6 +119,21 @@ const server = createServer(async (req, res) => {
         document: await opened.document.payload(),
         threads: await opened.threadStore.list(),
         files: await listMarkdownFiles(opened.path)
+      });
+    }
+
+    if (url.pathname === "/api/document/create" && req.method === "POST") {
+      const body = await readJson(req);
+      const created = await createAndSwitchDocument(context, {
+        instruction: body.instruction,
+        directory: body.directory,
+        fileName: body.fileName,
+        agentRunId: normalizeAgentRunId(body.agentRunId)
+      });
+      return sendJson(res, 201, {
+        document: await created.document.payload(),
+        threads: await created.threadStore.list(),
+        files: await listMarkdownFiles(created.path)
       });
     }
 
@@ -375,12 +391,33 @@ async function createDocumentContext(filePath) {
 }
 
 async function switchDocument(nextPath) {
-  const run = documentSwitchLock.then(
-    () => performDocumentSwitch(nextPath),
-    () => performDocumentSwitch(nextPath)
-  );
+  return withDocumentSwitchLock(() => performDocumentSwitch(nextPath));
+}
+
+function withDocumentSwitchLock(operation) {
+  const run = documentSwitchLock.then(operation, operation);
   documentSwitchLock = run.catch(() => {});
   return run;
+}
+
+function createAndSwitchDocument(context, command) {
+  return withDocumentSwitchLock(async () => {
+    if (context !== activeDocument) {
+      throw new HttpRequestError(
+        409,
+        "The active document changed before document creation started; retry from the current document.",
+        "DOCUMENT_CONTEXT_CHANGED"
+      );
+    }
+    const service = new DocumentCreationService({
+      workspaceRoot,
+      agent: context.agent,
+      document: context.document,
+      agentRuns
+    });
+    const created = await service.create(command);
+    return performDocumentSwitch(created.path);
+  });
 }
 
 async function performDocumentSwitch(nextPath) {

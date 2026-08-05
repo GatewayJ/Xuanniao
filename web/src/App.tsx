@@ -2,9 +2,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { ViewUpdate } from "@codemirror/view";
 import { api } from "./api";
+import { coalesceAgentRunUpdates, createAgentRunId } from "./agent-run";
 import { DiagramViewer } from "./components/DiagramViewer";
 import { DocumentPane, type Mode } from "./components/DocumentPane";
 import { FilePickerModal } from "./components/FilePickerModal";
+import { NewDocumentModal, type NewDocumentCommand } from "./components/NewDocumentModal";
 import { SelectionAskPopover } from "./components/SelectionAskPopover";
 import { SettingsModal } from "./components/SettingsModal";
 import { ThreadRail } from "./components/ThreadRail";
@@ -25,9 +27,15 @@ import {
   orderThreads,
   titleForSelection
 } from "./thread-utils";
-import type { FileBrowserPayload, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
+import type { AgentRunSnapshot, FileBrowserPayload, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 const EXPLICIT_THREAD_ACTIVATION_HOLD_MS = 2500;
+const emptyFileBrowser: FileBrowserPayload = {
+  directory: "",
+  parent: null,
+  selectedPath: null,
+  entries: []
+};
 
 export function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
@@ -35,10 +43,17 @@ export function App() {
   const [mode, setMode] = useState<Mode>("edit");
   const [status, setStatus] = useState("正在加载");
   const [filePickerOpen, setFilePickerOpen] = useState(false);
+  const [newDocumentOpen, setNewDocumentOpen] = useState(false);
+  const [newDocumentCreating, setNewDocumentCreating] = useState(false);
+  const [newDocumentError, setNewDocumentError] = useState("");
+  const [newDocumentRun, setNewDocumentRun] = useState<AgentRunSnapshot | null>(null);
   const [workspaceRoot, setWorkspaceRoot] = useState("");
-  const [fileBrowser, setFileBrowser] = useState<FileBrowserPayload>({ directory: "", parent: null, selectedPath: null, entries: [] });
+  const [fileBrowser, setFileBrowser] = useState<FileBrowserPayload>(emptyFileBrowser);
   const [fileBrowserLoading, setFileBrowserLoading] = useState(false);
   const [fileBrowserError, setFileBrowserError] = useState("");
+  const [directoryBrowser, setDirectoryBrowser] = useState<FileBrowserPayload>(emptyFileBrowser);
+  const [directoryBrowserLoading, setDirectoryBrowserLoading] = useState(false);
+  const [directoryBrowserError, setDirectoryBrowserError] = useState("");
   const [diagramViewer, setDiagramViewer] = useState<{ title: string; svg: string } | null>(null);
   const [threadSpatialLayout, setThreadSpatialLayout] = useState<ThreadSpatialLayout | null>(null);
   const [selectionAsk, setSelectionAsk] = useState<{
@@ -56,6 +71,9 @@ export function App() {
   const explicitThreadActivationTimerRef = useRef<number | null>(null);
   const explicitlyActivatedThreadIdRef = useRef<string | null>(null);
   const openDocumentRequestRef = useRef<AbortController | null>(null);
+  const newDocumentRequestRef = useRef<AbortController | null>(null);
+  const newDocumentRunCloseRef = useRef<(() => void) | null>(null);
+  const directoryBrowseRequestRef = useRef(0);
   const threadsRef = useRef<Thread[]>([]);
   const activeThreadIdRef = useRef<string | null>(null);
   const modeRef = useRef<Mode>("edit");
@@ -111,6 +129,9 @@ export function App() {
       window.clearTimeout(explicitThreadActivationTimerRef.current);
     }
     openDocumentRequestRef.current?.abort();
+    newDocumentRequestRef.current?.abort();
+    newDocumentRunCloseRef.current?.();
+    directoryBrowseRequestRef.current += 1;
   }, []);
 
   useEffect(() => {
@@ -249,6 +270,70 @@ export function App() {
     await browseFiles(documentData?.path || workspaceRoot);
   }
 
+  function openNewDocumentCreator() {
+    setFilePickerOpen(false);
+    setNewDocumentError("");
+    setNewDocumentRun(null);
+    directoryBrowseRequestRef.current += 1;
+    setDirectoryBrowser(emptyFileBrowser);
+    setDirectoryBrowserError("");
+    setNewDocumentOpen(true);
+  }
+
+  async function createDocument(command: NewDocumentCommand) {
+    if (newDocumentCreating) return;
+    const controller = new AbortController();
+    const agentRunId = createAgentRunId();
+    newDocumentRequestRef.current?.abort();
+    newDocumentRunCloseRef.current?.();
+    newDocumentRequestRef.current = controller;
+    setNewDocumentCreating(true);
+    setNewDocumentError("");
+    setNewDocumentRun(null);
+    setStatus("正在创建文档");
+
+    try {
+      if (documentData && !await documentSession.flushDocumentSave()) return;
+      const reserved = await api.reserveAgentRun(agentRunId, controller.signal);
+      setNewDocumentRun(reserved);
+      newDocumentRunCloseRef.current = api.subscribeAgentRun(agentRunId, {
+        onSnapshot: setNewDocumentRun,
+        onUpdate: (update) => setNewDocumentRun((current) => current ? {
+          ...current,
+          status: current.status === "waiting" ? "running" : current.status,
+          events: coalesceAgentRunUpdates([...current.events, update])
+        } : current),
+        onComplete: setNewDocumentRun
+      }, controller.signal);
+
+      const payload = await api.createDocument(command, agentRunId, controller.signal);
+      if (newDocumentRequestRef.current !== controller) return;
+      documentSession.loadDocument(payload.document, true, true);
+      conversation.resetConversationEditor();
+      setSelectionAsk(null);
+      setSelectionQuestion("");
+      setFilePickerOpen(false);
+      setNewDocumentOpen(false);
+      setMode("edit");
+      const loadedThreads = await conversation.resumeAgentRuns(payload.threads);
+      if (newDocumentRequestRef.current !== controller) return;
+      setActiveThreadId(loadedThreads[0]?.id || null);
+      setStatus("新文档已创建");
+    } catch (error) {
+      if (controller.signal.aborted) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setNewDocumentError(message);
+      setStatus(message);
+    } finally {
+      if (newDocumentRequestRef.current === controller) {
+        newDocumentRunCloseRef.current?.();
+        newDocumentRunCloseRef.current = null;
+        newDocumentRequestRef.current = null;
+        setNewDocumentCreating(false);
+      }
+    }
+  }
+
   async function browseFiles(targetPath: string) {
     if (!targetPath.trim()) return;
     setFileBrowserLoading(true);
@@ -259,6 +344,24 @@ export function App() {
       setFileBrowserError(error instanceof Error ? error.message : String(error));
     } finally {
       setFileBrowserLoading(false);
+    }
+  }
+
+  async function browseDocumentDirectories(targetPath: string) {
+    if (!targetPath.trim()) return;
+    const requestId = directoryBrowseRequestRef.current + 1;
+    directoryBrowseRequestRef.current = requestId;
+    setDirectoryBrowserLoading(true);
+    setDirectoryBrowserError("");
+    try {
+      const payload = await api.browseFiles(targetPath);
+      if (directoryBrowseRequestRef.current === requestId) setDirectoryBrowser(payload);
+    } catch (error) {
+      if (directoryBrowseRequestRef.current === requestId) {
+        setDirectoryBrowserError(error instanceof Error ? error.message : String(error));
+      }
+    } finally {
+      if (directoryBrowseRequestRef.current === requestId) setDirectoryBrowserLoading(false);
     }
   }
 
@@ -519,6 +622,7 @@ export function App() {
       <TopBar
         documentPath={documentData?.path || "正在加载…"}
         status={status}
+        onCreateDocument={openNewDocumentCreator}
         onOpenFileManager={() => void openFileManager()}
         onOpenSettings={() => void agentSettings.openSettings()}
         onSave={() => void documentSession.saveDocument()}
@@ -572,6 +676,22 @@ export function App() {
         onClose={() => setFilePickerOpen(false)}
         onBrowse={(path) => void browseFiles(path)}
         onOpenFile={(path) => void openDocument(path)}
+      />
+      <NewDocumentModal
+        open={newDocumentOpen}
+        workspaceRoot={workspaceRoot}
+        creating={newDocumentCreating}
+        error={newDocumentError}
+        run={newDocumentRun}
+        directoryBrowser={directoryBrowser}
+        directoryLoading={directoryBrowserLoading}
+        directoryError={directoryBrowserError}
+        permissionRequests={permissionRequests}
+        resolvingPermissionIds={resolvingPermissionIds}
+        onClose={() => setNewDocumentOpen(false)}
+        onBrowseDirectory={(path) => void browseDocumentDirectories(path)}
+        onCreate={(command) => void createDocument(command)}
+        onResolvePermission={resolvePermissionRequest}
       />
       <SettingsModal
         open={agentSettings.settingsOpen}

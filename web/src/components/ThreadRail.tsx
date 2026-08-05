@@ -15,6 +15,7 @@ import { useMessageSelection } from "../hooks/useMessageSelection";
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { useRenderedPreview } from "../hooks/useRenderedPreview";
 import { renderMessageMarkdown } from "../markdown";
+import { formatRelativeTime } from "../relative-time";
 import { resolveThreadAnchor } from "../thread-anchors";
 import {
   THREAD_CANVAS_NODE_HEIGHT,
@@ -33,7 +34,8 @@ import {
   conversationNodeStatus,
   flattenConversationTree
 } from "../thread-tree";
-import type { AgentSettingsPayload, BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, PermissionOption, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
+import type { AgentSettingsPayload, BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
+import { PermissionRequestPanel } from "./PermissionRequestPanel";
 
 const THREAD_PANE_DIVIDER_WIDTH = 6;
 
@@ -1599,7 +1601,7 @@ function ThreadMessageDetail(props: {
       <div className="messageBody">
         <div className="messageRole">
           <span className="messageMeta">
-            {message.role === "assistant" ? "Codex" : "你"} <time>{formatMessageTime(message.createdAt)}</time>
+            {message.role === "assistant" ? "Codex" : "你"} <time>{formatRelativeTime(message.createdAt)}</time>
             {message.role === "assistant" && !message.id.startsWith("pending-") && (
               <button type="button" onClick={() => props.onRetryAssistant(props.threadId, message.id)}>重试</button>
             )}
@@ -1641,64 +1643,6 @@ function questionSummary(content: string): string {
   const normalized = content.replace(/\s+/g, " ").trim();
   if (!normalized) return "未命名问题";
   return normalized.length > 72 ? `${normalized.slice(0, 72)}…` : normalized;
-}
-
-function PermissionRequestPanel(props: {
-  request: PermissionRequest;
-  resolving: boolean;
-  onResolve: (requestId: string, optionId: string | null) => void;
-}) {
-  const allowOnce = optionByKind(props.request.options, "allow_once");
-  const allowAlways = optionByKind(props.request.options, "allow_always");
-  const rejectOnce = optionByKind(props.request.options, "reject_once");
-  const rejectAlways = optionByKind(props.request.options, "reject_always");
-  const fallbackOptions = props.request.options.filter((option) => (
-    option !== allowOnce && option !== allowAlways && option !== rejectOnce && option !== rejectAlways
-  ));
-
-  return (
-    <section className="permissionRequest">
-      <div className="permissionRequestHeader">
-        <span>权限请求</span>
-        <time>{formatMessageTime(props.request.createdAt)}</time>
-      </div>
-      <div className="permissionRequestTitle">{props.request.title}</div>
-      {props.request.sourceAgentName && (
-        <div className="permissionRequestSource">来自 Subagent · {props.request.sourceAgentName}</div>
-      )}
-      {props.request.rawInput && <div className="permissionRequestDetail">{props.request.rawInput}</div>}
-      <div className="permissionRequestActions">
-        {allowOnce && (
-          <button type="button" className="primaryButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, allowOnce.optionId)}>
-            允许一次
-          </button>
-        )}
-        {allowAlways && (
-          <button type="button" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, allowAlways.optionId)}>
-            始终允许
-          </button>
-        )}
-        {rejectOnce && (
-          <button type="button" className="dangerButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, rejectOnce.optionId)}>
-            拒绝一次
-          </button>
-        )}
-        {rejectAlways && (
-          <button type="button" className="dangerButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, rejectAlways.optionId)}>
-            始终拒绝
-          </button>
-        )}
-        {fallbackOptions.map((option) => (
-          <button key={option.optionId} type="button" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, option.optionId)}>
-            {labelForPermissionOption(option)}
-          </button>
-        ))}
-        <button type="button" className="ghostButton" disabled={props.resolving} onClick={() => props.onResolve(props.request.id, null)}>
-          取消
-        </button>
-      </div>
-    </section>
-  );
 }
 
 type ThreadPlacementInput = {
@@ -1781,34 +1725,4 @@ function shallowEqualNumberRecord(left: Record<string, number>, right: Record<st
   const rightKeys = Object.keys(right);
   if (leftKeys.length !== rightKeys.length) return false;
   return leftKeys.every((key) => left[key] === right[key]);
-}
-
-function optionByKind(options: PermissionOption[], kind: string): PermissionOption | null {
-  return options.find((option) => option.kind === kind) || null;
-}
-
-function labelForPermissionOption(option: PermissionOption): string {
-  const knownLabels: Record<string, string> = {
-    allow_once: "允许一次",
-    allow_always: "始终允许",
-    reject_once: "拒绝一次",
-    reject_always: "始终拒绝"
-  };
-  const knownLabel = knownLabels[option.kind];
-  if (knownLabel) return knownLabel;
-  const label = option.name.trim();
-  if (label) return label;
-  return option.kind.replace(/_/g, " ");
-}
-
-function formatMessageTime(value: string): string {
-  const timestamp = new Date(value).getTime();
-  if (!Number.isFinite(timestamp)) return "";
-  const seconds = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
-  if (seconds < 60) return "刚刚";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes} 分钟`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} 小时`;
-  return `${Math.floor(hours / 24)} 天`;
 }

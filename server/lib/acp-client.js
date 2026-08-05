@@ -121,7 +121,8 @@ export class AcpDocumentAgent {
   }
 
   async promptViaAcp({ question, document, thread, mode, onUpdate }) {
-    const session = await this.ensureThreadSession(thread);
+    const turnAccessMode = mode === "create-document" ? "read-only" : this.accessMode;
+    const session = await this.ensureThreadSession(thread, turnAccessMode);
     const hash = documentHash(document.content);
     const previousDocument = this.documentSnapshots.get(session.sessionId);
     const includeDocument = session.documentHash !== hash;
@@ -134,6 +135,7 @@ export class AcpDocumentAgent {
       updates: [],
       updateIndexes: new Map(),
       onUpdate,
+      readOnly: turnAccessMode === "read-only",
       startedAt: Date.now()
     };
     this.activeTurn = turn;
@@ -149,7 +151,7 @@ export class AcpDocumentAgent {
               document,
               thread,
               mode,
-              accessMode: this.accessMode,
+              accessMode: turnAccessMode,
               includeDocument,
               includeHistory: session.historyMode === "fresh" || unsyncedMessages.length > 0,
               history: session.historyMode === "fresh" ? thread.messages || [] : unsyncedMessages,
@@ -224,11 +226,12 @@ export class AcpDocumentAgent {
     this.initialized = true;
   }
 
-  async ensureThreadSession(thread) {
+  async ensureThreadSession(thread, accessMode = this.accessMode) {
     await this.ensureInitialized();
     const sessionKey = thread.sessionKey || thread.id;
     const activeSession = this.threadSessions.get(sessionKey);
     if (activeSession) {
+      await this.enforceSessionAccessMode(activeSession.sessionId, accessMode);
       return { ...activeSession, historyMode: "inherited" };
     }
 
@@ -261,12 +264,22 @@ export class AcpDocumentAgent {
       sessionId = session.sessionId;
     }
 
+    await this.enforceSessionAccessMode(sessionId, accessMode);
+
     const active = {
       sessionId,
       documentHash: historyMode === "inherited" ? stored?.documentHash || null : null
     };
     this.threadSessions.set(sessionKey, active);
     return { ...active, historyMode };
+  }
+
+  async enforceSessionAccessMode(sessionId, accessMode) {
+    if (accessMode === this.accessMode) return;
+    await this.request("session/set_mode", {
+      sessionId,
+      modeId: acpAgentMode(accessMode)
+    });
   }
 
   async startProcess() {
@@ -485,7 +498,7 @@ export class AcpDocumentAgent {
 
   async writeTextFile(params) {
     const requestedPath = path.resolve(String(params.path || ""));
-    if (this.accessMode !== "full-access") {
+    if (this.accessMode !== "full-access" || this.activeTurn?.readOnly) {
       throw new Error(`write denied in read-only mode: ${requestedPath}`);
     }
     if (requestedPath === this.documentPath) {
