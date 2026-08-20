@@ -17,8 +17,9 @@ import { useConversationCommands } from "./hooks/useConversationCommands";
 import { useDocumentSession } from "./hooks/useDocumentSession";
 import { usePermissionInbox } from "./hooks/usePermissionInbox";
 import { useThreadPaneWidth } from "./hooks/useThreadPaneWidth";
+import { selectionContextForPreview } from "./preview-selection";
 import { MarkdownThreadEditor, nearestThreadForLine } from "./ThreadEditor";
-import { anchorContextForRange, locateTextInMarkdown, resolveThreadAnchor } from "./thread-anchors";
+import { canonicalizeSelection, resolveThreadAnchor } from "./thread-anchors";
 import { remapThreadsForChange } from "./thread-anchor-remap";
 import { buildPreviewThreadLayout } from "./thread-spatial";
 import {
@@ -30,6 +31,22 @@ import {
 import type { AgentRunSnapshot, FileBrowserPayload, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 const EXPLICIT_THREAD_ACTIVATION_HOLD_MS = 2500;
+type SelectionViewportRect = {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+  width: number;
+  height: number;
+};
+type SelectionAskState = {
+  selection: SelectionContext;
+  anchorRect: SelectionViewportRect | null;
+};
+type CapturedPreviewSelection = SelectionAskState & {
+  content: string;
+};
+
 const emptyFileBrowser: FileBrowserPayload = {
   directory: "",
   parent: null,
@@ -56,11 +73,9 @@ export function App() {
   const [directoryBrowserError, setDirectoryBrowserError] = useState("");
   const [diagramViewer, setDiagramViewer] = useState<{ title: string; svg: string } | null>(null);
   const [threadSpatialLayout, setThreadSpatialLayout] = useState<ThreadSpatialLayout | null>(null);
-  const [selectionAsk, setSelectionAsk] = useState<{
-    selection: SelectionContext;
-    anchorRect: { left: number; top: number; right: number; bottom: number; width: number; height: number } | null;
-  } | null>(null);
+  const [selectionAsk, setSelectionAsk] = useState<SelectionAskState | null>(null);
   const [selectionQuestion, setSelectionQuestion] = useState("");
+  const [selectionAskError, setSelectionAskError] = useState("");
   const [creatingSelectionThread, setCreatingSelectionThread] = useState(false);
   const selectionAskRef = useRef(selectionAsk);
   const selectionQuestionRef = useRef(selectionQuestion);
@@ -68,6 +83,7 @@ export function App() {
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MarkdownThreadEditor | null>(null);
   const previewRef = useRef<HTMLElement | null>(null);
+  const previewSelectionRef = useRef<CapturedPreviewSelection | null>(null);
   const scrollSyncFrameRef = useRef<number | null>(null);
   const explicitThreadActivationTimerRef = useRef<number | null>(null);
   const explicitlyActivatedThreadIdRef = useRef<string | null>(null);
@@ -116,7 +132,12 @@ export function App() {
 
   useEffect(() => {
     modeRef.current = mode;
+    previewSelectionRef.current = null;
   }, [mode]);
+
+  useEffect(() => {
+    previewSelectionRef.current = null;
+  }, [documentData?.path, documentData?.content]);
 
   useEffect(() => {
     void loadAll();
@@ -435,30 +456,15 @@ export function App() {
       return null;
     }
 
-    const range = selection.getRangeAt(0);
-    if (!root.contains(range.startContainer) || !root.contains(range.endContainer)) {
-      return null;
-    }
+    return selectionContextForPreview(root, selection.getRangeAt(0), content);
+  }
 
-    const selectedText = selection.toString().replace(/\s+/g, " ").trim();
-    if (!selectedText) {
-      return null;
-    }
-
-    const previewLines = sourceLinesForPreviewRange(root, range);
-    const located = locateTextInMarkdown(content, selectedText, previewLines.lineStart);
-
-    return {
-      selectedText,
-      anchor: {
-        start: located?.start ?? null,
-        end: located?.end ?? null,
-        lineStart: located?.lineStart ?? previewLines.lineStart,
-        lineEnd: located?.lineEnd ?? previewLines.lineEnd,
-        blockId: null,
-        ...(located ? anchorContextForRange(content, located.start, located.end) : {})
-      }
-    };
+  function capturePreviewSelection() {
+    const selection = currentPreviewSelection();
+    const content = documentData?.content;
+    previewSelectionRef.current = selection && content
+      ? { selection, anchorRect: currentSelectionRect(), content }
+      : null;
   }
 
   async function openOrCreateThread(selection = currentSelection()) {
@@ -468,14 +474,23 @@ export function App() {
       return null;
     }
 
-    const existing = findThreadForSelection(threads, selection, documentData?.content);
+    if (!await documentSession.flushDocumentSave()) return null;
+    if (!documentSession.isDocumentSessionCurrent(operation)) return null;
+    const content = editorRef.current?.getContent() ?? documentData?.content;
+    const canonicalSelection = content ? canonicalizeSelection(content, selection) : null;
+    if (!canonicalSelection) {
+      const message = "选中文字已变化或无法映射到 Markdown 源文档，请重新选择";
+      setSelectionAskError(message);
+      setStatus(message);
+      return null;
+    }
+
+    const existing = findThreadForSelection(threads, canonicalSelection, content);
     if (existing) {
       activateThread(existing);
       return existing;
     }
 
-    if (!await documentSession.flushDocumentSave()) return null;
-    if (!documentSession.isDocumentSessionCurrent(operation)) return null;
     const expectedRevision = documentSession.currentRevision();
     const documentPath = documentSession.currentPath();
     if (!expectedRevision || !documentPath) {
@@ -485,9 +500,9 @@ export function App() {
 
     const created = await api.createThread({
       documentPath,
-      title: titleForSelection(selection.selectedText),
-      selectedText: selection.selectedText,
-      anchor: selection.anchor,
+      title: titleForSelection(canonicalSelection.selectedText),
+      selectedText: canonicalSelection.selectedText,
+      anchor: canonicalSelection.anchor,
       expectedRevision
     }, operation.signal);
     if (!documentSession.isDocumentSessionCurrent(operation)) return null;
@@ -497,14 +512,22 @@ export function App() {
   }
 
   function askSelection() {
-    const selection = currentSelection();
+    const capturedPreviewSelection = mode === "preview" &&
+      previewSelectionRef.current?.content === documentData?.content
+      ? previewSelectionRef.current
+      : null;
+    const selection = currentSelection() || capturedPreviewSelection?.selection || null;
     if (!selection) {
       setStatus("请先选择一段文字");
       return;
     }
 
-    setSelectionAsk({ selection, anchorRect: currentSelectionRect() });
+    setSelectionAsk({
+      selection,
+      anchorRect: currentSelectionRect() || capturedPreviewSelection?.anchorRect || null
+    });
     setSelectionQuestion("");
+    setSelectionAskError("");
   }
 
   async function submitSelectionQuestion() {
@@ -546,7 +569,9 @@ export function App() {
       );
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") return;
-      setStatus(error instanceof Error ? error.message : String(error));
+      const message = error instanceof Error ? error.message : String(error);
+      setSelectionAskError(message);
+      setStatus(message);
     } finally {
       finishSubmission();
     }
@@ -653,6 +678,7 @@ export function App() {
           onModeChange={setMode}
           onNavigateToLine={navigateToLine}
           onPreviewScroll={syncPreviewScroll}
+          onPreviewSelectionChange={capturePreviewSelection}
         />
         <div className="splitter" role="separator" onPointerDown={startResize} />
         <ThreadRail
@@ -725,11 +751,13 @@ export function App() {
           selectedText={selectionAsk.selection.selectedText}
           anchorRect={selectionAsk.anchorRect}
           question={selectionQuestion}
+          error={selectionAskError}
           creating={creatingSelectionThread}
           onQuestionChange={setSelectionQuestion}
           onCancel={() => {
             setSelectionAsk(null);
             setSelectionQuestion("");
+            setSelectionAskError("");
           }}
           onSubmit={() => void submitSelectionQuestion()}
         />
@@ -751,37 +779,4 @@ function remapThreadsForEditorChange(threads: Thread[], update: ViewUpdate) {
     update.changes,
     preservedThreadId
   );
-}
-
-type SourceLines = {
-  lineStart: number | null;
-  lineEnd: number | null;
-};
-
-function sourceLinesForPreviewRange(root: HTMLElement, range: Range): SourceLines {
-  const lines = [...root.querySelectorAll<HTMLElement>("[data-source-line]")]
-    .filter((block) => range.intersectsNode(block))
-    .map((block) => Number(block.dataset.sourceLine))
-    .filter((line) => Number.isInteger(line));
-
-  if (lines.length === 0) {
-    const start = sourceLineForNode(range.startContainer);
-    const end = sourceLineForNode(range.endContainer);
-    return {
-      lineStart: start,
-      lineEnd: end ?? start
-    };
-  }
-
-  return {
-    lineStart: Math.min(...lines),
-    lineEnd: Math.max(...lines)
-  };
-}
-
-function sourceLineForNode(node: Node): number | null {
-  const element = node instanceof HTMLElement ? node : node.parentElement;
-  const sourceBlock = element?.closest<HTMLElement>("[data-source-line]");
-  const line = Number(sourceBlock?.dataset.sourceLine);
-  return Number.isInteger(line) ? line : null;
 }

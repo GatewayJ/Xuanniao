@@ -4,26 +4,44 @@ const md = new MarkdownIt({ html: false, linkify: true, typographer: true });
 const messageMd = new MarkdownIt({ html: false, linkify: true, typographer: true, breaks: true });
 let mermaidPromise: Promise<typeof import("mermaid").default> | null = null;
 
+type MarkdownRenderEnvironment = {
+  sourceLineOffsets: number[];
+  sourceLength: number;
+};
+
 const defaultFence = md.renderer.rules.fence;
 md.renderer.rules.fence = (tokens, idx, options, env, self) => {
   const token = tokens[idx];
-  const sourceLine = sourceLineAttribute(token);
+  const sourceRange = sourceRangeAttributes(token, env as MarkdownRenderEnvironment | undefined);
   if (token.info.trim().split(/\s+/)[0] === "mermaid") {
-    return `<div class="mermaidBlock"${sourceLine} data-mermaid="${encodeURIComponent(token.content)}"></div>`;
+    return `<div class="mermaidBlock"${sourceRange} data-mermaid="${encodeURIComponent(token.content)}"></div>`;
   }
   const rendered = defaultFence ? defaultFence(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
-  return sourceLine ? `<div class="previewFence"${sourceLine}>${rendered}</div>` : rendered;
+  return sourceRange ? `<div class="previewFence"${sourceRange}>${rendered}</div>` : rendered;
 };
 
-addSourceLineRule("heading_open");
-addSourceLineRule("paragraph_open");
-addSourceLineRule("blockquote_open");
-addSourceLineRule("bullet_list_open");
-addSourceLineRule("ordered_list_open");
-addSourceLineRule("list_item_open");
+for (const ruleName of [
+  "heading_open",
+  "paragraph_open",
+  "blockquote_open",
+  "bullet_list_open",
+  "ordered_list_open",
+  "list_item_open",
+  "table_open",
+  "thead_open",
+  "tbody_open",
+  "tr_open",
+  "th_open",
+  "td_open"
+]) {
+  addSourceRangeRule(ruleName);
+}
 
 export function renderMarkdown(content: string): string {
-  return md.render(content);
+  return md.render(content, {
+    sourceLineOffsets: lineOffsets(content),
+    sourceLength: content.length
+  } satisfies MarkdownRenderEnvironment);
 }
 
 export function renderMessageMarkdown(content: string): string {
@@ -82,19 +100,47 @@ function sizeMermaidSvg(block: HTMLElement) {
   svg.style.height = "auto";
 }
 
-function addSourceLineRule(ruleName: string) {
+function addSourceRangeRule(ruleName: string) {
   const defaultRule = md.renderer.rules[ruleName];
   md.renderer.rules[ruleName] = (tokens, idx, options, env, self) => {
     const token = tokens[idx];
-    const line = token.map?.[0];
-    if (typeof line === "number") {
-      token.attrSet("data-source-line", String(line + 1));
+    const [lineStart, lineEnd] = token.map || [];
+    const renderEnvironment = env as MarkdownRenderEnvironment | undefined;
+    if (typeof lineStart === "number") {
+      token.attrSet("data-source-line", String(lineStart + 1));
+      const start = renderEnvironment?.sourceLineOffsets[lineStart];
+      const end = typeof lineEnd === "number"
+        ? renderEnvironment?.sourceLineOffsets[lineEnd] ?? renderEnvironment?.sourceLength
+        : undefined;
+      if (typeof start === "number" && typeof end === "number") {
+        token.attrSet("data-source-start", String(start));
+        token.attrSet("data-source-end", String(end));
+      }
     }
     return defaultRule ? defaultRule(tokens, idx, options, env, self) : self.renderToken(tokens, idx, options);
   };
 }
 
-function sourceLineAttribute(token: { map: [number, number] | null }): string {
-  const line = token.map?.[0];
-  return typeof line === "number" ? ` data-source-line="${line + 1}"` : "";
+function sourceRangeAttributes(
+  token: { map: [number, number] | null },
+  environment?: MarkdownRenderEnvironment
+): string {
+  const [lineStart, lineEnd] = token.map || [];
+  if (typeof lineStart !== "number") return "";
+  const start = environment?.sourceLineOffsets[lineStart];
+  const end = typeof lineEnd === "number"
+    ? environment?.sourceLineOffsets[lineEnd] ?? environment?.sourceLength
+    : undefined;
+  const range = typeof start === "number" && typeof end === "number"
+    ? ` data-source-start="${start}" data-source-end="${end}"`
+    : "";
+  return ` data-source-line="${lineStart + 1}"${range}`;
+}
+
+function lineOffsets(content: string): number[] {
+  const offsets = [0];
+  for (let index = 0; index < content.length; index += 1) {
+    if (content[index] === "\n") offsets.push(index + 1);
+  }
+  return offsets;
 }

@@ -1,4 +1,4 @@
-import type { Thread } from "./types";
+import type { SelectionContext, Thread } from "./types";
 
 export type MarkdownTextLocation = {
   start: number;
@@ -42,22 +42,8 @@ export function compareThreadsByAnchor(left: Thread, right: Thread, content?: st
 }
 
 export function locateTextInMarkdown(content: string, selectedText: string, lineHint: number | null, anchor?: Thread["anchor"]): MarkdownTextLocation | null {
-  const needle = normalizeSearchText(selectedText);
-  if (!needle) return null;
-
-  const haystack = normalizeWithOffsets(content);
-  const matches: Array<{ start: number; end: number }> = [];
-  let index = haystack.text.indexOf(needle);
-  while (index >= 0) {
-    const start = haystack.offsets[index];
-    const end = haystack.offsets[index + needle.length - 1] + 1;
-    matches.push({ start, end });
-    index = haystack.text.indexOf(needle, index + 1);
-  }
-
-  if (matches.length === 0) {
-    return null;
-  }
+  const matches = textMatchesInMarkdown(content, selectedText);
+  if (matches.length === 0) return null;
 
   const best = matches.sort((left, right) => {
     const leftLineDistance = lineHint === null ? 0 : Math.abs(lineNumberAt(content, left.start) - lineHint);
@@ -74,12 +60,59 @@ export function locateTextInMarkdown(content: string, selectedText: string, line
   };
 }
 
+export function locateUniqueTextInMarkdown(
+  content: string,
+  selectedText: string,
+  lineHint: number | null
+): MarkdownTextLocation | null {
+  const matches = textMatchesInMarkdown(content, selectedText);
+  if (matches.length === 0) return null;
+  const candidates = Number.isInteger(lineHint)
+    ? matches.filter((match) => lineNumberAt(content, match.start) === lineHint)
+    : matches;
+  const unique = candidates.length === 1
+    ? candidates[0]
+    : candidates.length === 0 && matches.length === 1
+      ? matches[0]
+      : null;
+  return unique
+    ? {
+        ...unique,
+        lineStart: lineNumberAt(content, unique.start),
+        lineEnd: lineNumberAt(content, unique.end)
+      }
+    : null;
+}
+
 export function lineNumberAt(content: string, offset: number): number {
   return content.slice(0, Math.max(offset, 0)).split(/\r?\n/).length;
 }
 
 export function normalizeSearchText(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+export function canonicalizeSelection(content: string, selection: SelectionContext): SelectionContext | null {
+  const start = selection.anchor.start;
+  const end = selection.anchor.end;
+  const validExplicitRange = Number.isInteger(start) && Number.isInteger(end) &&
+    start !== null && end !== null && start >= 0 && end > start && end <= content.length &&
+    normalizeSearchText(content.slice(start, end)) === normalizeSearchText(selection.selectedText);
+  const located = validExplicitRange
+    ? { start, end }
+    : locateTextInMarkdown(content, selection.selectedText, selection.anchor.lineStart, selection.anchor);
+  if (!located) return null;
+  return {
+    selectedText: content.slice(located.start, located.end),
+    anchor: {
+      ...selection.anchor,
+      start: located.start,
+      end: located.end,
+      lineStart: lineNumberAt(content, located.start),
+      lineEnd: lineNumberAt(content, located.end),
+      ...anchorContextForRange(content, located.start, located.end)
+    }
+  };
 }
 
 export function anchorContextForRange(content: string, start: number, end: number): Pick<Thread["anchor"], "contextBefore" | "contextAfter"> {
@@ -168,4 +201,20 @@ function normalizeWithOffsets(value: string): { text: string; offsets: number[] 
   }
 
   return { text: text.join(""), offsets };
+}
+
+function textMatchesInMarkdown(content: string, selectedText: string): Array<{ start: number; end: number }> {
+  const needle = normalizeSearchText(selectedText);
+  if (!needle) return [];
+  const haystack = normalizeWithOffsets(content);
+  const matches: Array<{ start: number; end: number }> = [];
+  let index = haystack.text.indexOf(needle);
+  while (index >= 0) {
+    matches.push({
+      start: haystack.offsets[index],
+      end: haystack.offsets[index + needle.length - 1] + 1
+    });
+    index = haystack.text.indexOf(needle, index + 1);
+  }
+  return matches;
 }

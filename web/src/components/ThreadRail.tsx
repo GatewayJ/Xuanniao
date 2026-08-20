@@ -235,7 +235,14 @@ export function ThreadRail(props: ThreadRailProps) {
             <h2>讨论</h2>
             <p>{props.threads.length} 个文档锚点</p>
           </div>
-          <button type="button" className="primaryButton" onClick={props.onAskSelection}>选中文字提问</button>
+          <button
+            type="button"
+            className="primaryButton"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={props.onAskSelection}
+          >
+            选中文字提问
+          </button>
         </div>
         <div className="threadList threadListSpatial" ref={listRef} onScroll={handleListScroll} onWheel={handleListWheel}>
           {props.threads.length === 0 && <div className="emptyState">暂无讨论。请先在文档中选择文字。</div>}

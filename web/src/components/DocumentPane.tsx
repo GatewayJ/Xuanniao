@@ -12,6 +12,7 @@ type DocumentPaneProps = {
   onModeChange: (mode: Mode) => void;
   onNavigateToLine: (line: number) => void;
   onPreviewScroll: () => void;
+  onPreviewSelectionChange: () => void;
 };
 
 export function DocumentPane({
@@ -22,7 +23,8 @@ export function DocumentPane({
   previewRef,
   onModeChange,
   onNavigateToLine,
-  onPreviewScroll
+  onPreviewScroll,
+  onPreviewSelectionChange
 }: DocumentPaneProps) {
   const headings = documentData?.blocks.filter((block) => block.type === "heading") || [];
   const activeHeading = nearestHeadingForLine(headings, activeThread?.anchor.lineStart ?? null);
@@ -38,7 +40,12 @@ export function DocumentPane({
         <div className="selectionInfo">{activeThread ? `讨论位于第 ${activeThread.anchor.lineStart || "-"} 行` : "当前没有活动讨论"}</div>
       </div>
       <div className={mode === "edit" ? "editorHost" : "editorHost hidden"} ref={editorHostRef} />
-      <article className={mode === "preview" ? "preview" : "preview hidden"} ref={previewRef} onScroll={onPreviewScroll} />
+      <article
+        className={mode === "preview" ? "preview" : "preview hidden"}
+        ref={previewRef}
+        onMouseUp={onPreviewSelectionChange}
+        onScroll={onPreviewScroll}
+      />
       <aside className={mode === "outline" ? "outline" : "outline hidden"}>
         <div className="outlineHeader">
           <div>

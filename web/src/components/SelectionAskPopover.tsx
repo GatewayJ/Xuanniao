@@ -14,6 +14,7 @@ type SelectionAskPopoverProps = {
   selectedText: string;
   anchorRect: ViewportRect | null;
   question: string;
+  error: string;
   creating: boolean;
   onQuestionChange: (value: string) => void;
   onCancel: () => void;
@@ -99,6 +100,7 @@ export function SelectionAskPopover(props: SelectionAskPopoverProps) {
             }
           }}
         />
+        {props.error && <p className="selectionAskError" role="alert">{props.error}</p>}
         <footer>
           <span>⌘/Ctrl + Enter 发送</span>
           <div>
