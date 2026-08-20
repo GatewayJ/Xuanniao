@@ -35,6 +35,10 @@ type ConversationCommandOptions = {
   isDocumentSessionCurrent: (operation: DocumentSessionOperation) => boolean;
 };
 
+type ConversationSendOptions = {
+  onQueued?: () => void;
+};
+
 export function useConversationCommands({
   threadsRef,
   setThreads,
@@ -50,11 +54,12 @@ export function useConversationCommands({
   const [editText, setEditText] = useState("");
   const sendRegistryRef = useRef(new ConversationSendRegistry());
 
-  async function send(command: ConversationMessageCommand): Promise<boolean> {
+  async function send(
+    command: ConversationMessageCommand,
+    options: ConversationSendOptions = {}
+  ): Promise<boolean> {
     const operation = captureDocumentSession();
-    const thread = threadsRef.current.find((item) => item.id === command.threadId);
     const content = command.content.trim();
-    if (!thread) return false;
     if (!content) {
       setStatus("请先输入内容");
       return false;
@@ -79,6 +84,7 @@ export function useConversationCommands({
         : () => {};
       let payload;
       try {
+        options.onQueued?.();
         payload = await api.sendMessage(command.threadId, {
           content,
           askAgent: command.askAgent,

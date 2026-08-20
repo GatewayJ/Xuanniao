@@ -64,6 +64,7 @@ export function App() {
   const [creatingSelectionThread, setCreatingSelectionThread] = useState(false);
   const selectionAskRef = useRef(selectionAsk);
   const selectionQuestionRef = useRef(selectionQuestion);
+  const selectionSubmissionRef = useRef<symbol | null>(null);
   const editorHostRef = useRef<HTMLDivElement | null>(null);
   const editorRef = useRef<MarkdownThreadEditor | null>(null);
   const previewRef = useRef<HTMLElement | null>(null);
@@ -509,30 +510,45 @@ export function App() {
   async function submitSelectionQuestion() {
     if (!selectionAsk || !selectionQuestion.trim() || creatingSelectionThread) return;
     const submittedSelection = selectionAsk;
+    const submission = Symbol("selection-question");
+    selectionSubmissionRef.current = submission;
     setCreatingSelectionThread(true);
+
+    const finishSubmission = () => {
+      if (selectionSubmissionRef.current !== submission) return;
+      selectionSubmissionRef.current = null;
+      setCreatingSelectionThread(false);
+    };
+
     try {
       const thread = await openOrCreateThread(selectionAsk.selection);
       if (!thread) return;
       const question = selectionQuestion;
-      const sent = await conversation.send({
-        threadId: thread.id,
-        content: question,
-        draftKey: null,
-        askAgent: true
-      });
-      if (
-        sent &&
-        selectionAskRef.current === submittedSelection &&
-        selectionQuestionRef.current === question
-      ) {
-        setSelectionAsk(null);
-        setSelectionQuestion("");
-      }
+      await conversation.send(
+        {
+          threadId: thread.id,
+          content: question,
+          draftKey: null,
+          askAgent: true
+        },
+        {
+          onQueued: () => {
+            if (
+              selectionAskRef.current === submittedSelection &&
+              selectionQuestionRef.current === question
+            ) {
+              setSelectionAsk(null);
+              setSelectionQuestion("");
+            }
+            finishSubmission();
+          }
+        }
+      );
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") return;
       setStatus(error instanceof Error ? error.message : String(error));
     } finally {
-      setCreatingSelectionThread(false);
+      finishSubmission();
     }
   }
 

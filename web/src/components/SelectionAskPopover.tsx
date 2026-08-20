@@ -104,7 +104,7 @@ export function SelectionAskPopover(props: SelectionAskPopoverProps) {
           <div>
             <button type="button" onClick={props.onCancel}>取消</button>
             <button type="submit" className="primaryButton" disabled={!props.question.trim() || props.creating}>
-              {props.creating ? "正在创建…" : "询问 Codex"}
+              {props.creating ? "正在提交…" : "询问 Codex"}
             </button>
           </div>
         </footer>
