@@ -135,6 +135,7 @@ test("document creation runs in a fresh read-only native session", async () => {
 
 test("native child branches fork from the exact parent turn", async () => {
   const runtime = new StubRuntime();
+  runtime.documentSnapshots.set("parent-thread", "a newer document snapshot");
   const session = await runtime.ensureThread({
     id: "xuanniao-thread",
     agentSession: null,
@@ -159,6 +160,7 @@ test("native child branches fork from the exact parent turn", async () => {
       developerInstructions: AGENT_DEVELOPER_INSTRUCTIONS
     }
   });
+  assert.equal(runtime.documentSnapshots.get(session.sessionId), undefined);
 });
 
 test("native resumed threads refresh Xuanniao developer instructions", async () => {

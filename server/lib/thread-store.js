@@ -10,6 +10,7 @@ import {
   deleteConversationMessage,
   hasAssistantReply,
   normalizeAgentSession,
+  prepareConversationAgentTurn,
   removeAssistantReply,
   updateConversationMessage,
   updateConversationAgentRun,
@@ -74,6 +75,16 @@ export class ThreadStore {
       const saved = appendConversationMessage(thread, message, { id: randomUUID(), now });
       await this.write(data);
       return saved;
+    });
+  }
+
+  async prepareAgentTurn(threadId, userMessageId) {
+    return this.withMutation(async () => {
+      const data = await this.read();
+      const thread = requireThread(data, threadId);
+      const changed = prepareConversationAgentTurn(thread, userMessageId);
+      if (changed) await this.write(data);
+      return thread;
     });
   }
 
@@ -316,7 +327,8 @@ function normalizeStoredMessages(messages) {
       ...stored,
       nodeId: typeof message.nodeId === "string" && message.nodeId ? message.nodeId : message.role === "user" ? message.id : parentId || previousNodeId,
       parentId,
-      agentSession: normalizeAgentSession(message.agentSession, acpSessionId)
+      agentSession: normalizeAgentSession(message.agentSession, acpSessionId),
+      agentSessionClaim: normalizeAgentSession(message.agentSessionClaim)
     };
     if (message.role === "user") {
       previousQuestionId = message.id;

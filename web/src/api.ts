@@ -90,6 +90,15 @@ export const api = {
         signal
       }
     ),
+  reviseMessage: (threadId: string, messageId: string, body: { content: string; askAgent?: boolean; agentRunId?: string | null }, signal?: AbortSignal) =>
+    request<{ message: Message; assistantMessage: Message | null; agentOutcome: AgentOutcome; threads: Thread[]; document?: DocumentPayload | null }>(
+      `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/revisions`,
+      {
+        method: "POST",
+        body,
+        signal
+      }
+    ),
   updateMessageMeta: (threadId: string, messageId: string, body: { nodeKind: ConversationNodeKind }, signal?: AbortSignal) =>
     request<{ message: Message; threads: Thread[] }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}/meta`,

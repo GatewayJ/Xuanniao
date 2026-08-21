@@ -39,12 +39,14 @@ export function branchThreadForQuestion(thread, questionMessageId) {
     }
   }
   const parentRoot = currentRoot.parentId ? nodeRoots.get(currentRoot.parentId) : null;
-  const agentSession = currentRoot.agentSession || null;
+  const agentSession = currentRoot.agentSession || currentRoot.agentSessionClaim || null;
   const lastSyncedMessageIndex = findLastSyncedMessageIndex(currentNodeMessages, agentSession);
 
   return {
     ...thread,
-    sessionKey: `${thread.id}:${currentNodeId}`,
+    sessionKey: agentSession
+      ? `agent:${agentSession.adapter}:${agentSession.sessionId}`
+      : `${thread.id}:${currentNodeId}`,
     agentSession,
     parentAgentSession: parentRoot?.agentSession || null,
     branchSelection: normalizeBranchSelection(question.meta?.branchSelection),

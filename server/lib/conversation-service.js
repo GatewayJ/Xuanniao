@@ -1,4 +1,9 @@
-import { ConversationConflictError, planConversationQuestion } from "./conversation-model.js";
+import {
+  ConversationConflictError,
+  ConversationRuleError,
+  planConversationQuestion,
+  planConversationRevision
+} from "./conversation-model.js";
 import { branchThreadForQuestion } from "./thread-tree.js";
 import { normalizeAgentRunId } from "./agent-run-broker.js";
 
@@ -63,6 +68,48 @@ export class ConversationService {
     };
   }
 
+  reviseQuestion(threadId, messageId, command) {
+    return this.withThreadOperation(
+      threadId,
+      () => this.reviseQuestionWithinOperation(threadId, messageId, command)
+    );
+  }
+
+  async reviseQuestionWithinOperation(threadId, messageId, command) {
+    const agentRunId = normalizeAgentRunId(command.agentRunId);
+    const thread = await this.threadStore.get(threadId);
+    const planned = planConversationRevision(thread, messageId, command);
+    const message = await this.threadStore.addMessage(threadId, {
+      ...planned.message,
+      meta: {
+        ...(planned.message.meta || {}),
+        ...(planned.askAgent && agentRunId ? { agentRunId } : {})
+      }
+    });
+
+    if (!planned.askAgent) {
+      return {
+        message,
+        assistantMessage: null,
+        agentOutcome: "not-requested",
+        threads: await this.threadStore.list(),
+        document: null
+      };
+    }
+
+    const reply = await this.createAssistantReply(
+      threadId,
+      planned.message.content,
+      message.id,
+      agentRunId
+    );
+    return {
+      message,
+      ...reply,
+      threads: await this.threadStore.list()
+    };
+  }
+
   updateQuestion(threadId, messageId, options) {
     return this.withThreadOperation(
       threadId,
@@ -81,6 +128,17 @@ export class ConversationService {
       const error = new Error("message content is required");
       error.statusCode = 400;
       throw error;
+    }
+
+    const storedThread = await this.threadStore.get(threadId);
+    const storedMessage = storedThread.messages.find(
+      (message) => message.id === messageId && message.role === "user"
+    );
+    if (!storedMessage) throw new Error(`question message not found: ${messageId}`);
+    if (storedMessage.content.trim() !== normalizedContent) {
+      throw new ConversationRuleError(
+        "message content changes must create a revision branch"
+      );
     }
 
     const replyKey = activeReplyKey(threadId, messageId);
@@ -213,7 +271,7 @@ export class ConversationService {
     let updatedDocument = null;
     const agentSnapshot = await this.document.createAgentSnapshot();
     let snapshotVerified = false;
-    const storedThread = await this.threadStore.get(threadId);
+    const storedThread = await this.threadStore.prepareAgentTurn(threadId, questionMessageId);
     const question = storedThread.messages.find(
       (message) => message.id === questionMessageId && message.role === "user"
     );

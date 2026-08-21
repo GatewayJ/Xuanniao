@@ -1,4 +1,9 @@
-import { branchRevisionForQuestion, parentQuestion, selectionComesFromNode } from "./thread-tree.js";
+import {
+  branchRevisionForQuestion,
+  conversationNode,
+  parentQuestion,
+  selectionComesFromNode
+} from "./thread-tree.js";
 
 export const CONVERSATION_NODE_KINDS = new Set([
   "question",
@@ -50,6 +55,83 @@ export function planConversationQuestion(thread, command) {
   };
 }
 
+export function planConversationRevision(thread, messageId, command) {
+  const content = String(command.content || "").trim();
+  if (!content) throw new ConversationRuleError("message content is required");
+
+  const revisedMessage = thread.messages.find(
+    (message) => message.id === messageId && message.role === "user"
+  );
+  const revised = revisedMessage
+    ? conversationNode(thread, revisedMessage.nodeId || revisedMessage.id)
+    : null;
+  if (!revisedMessage || !revised) {
+    throw new ConversationRuleError(`conversation node not found: ${messageId}`);
+  }
+
+  const meta = { revisesMessageId: revisedMessage.id };
+  if (CONVERSATION_NODE_KINDS.has(revised.meta?.nodeKind)) {
+    meta.nodeKind = revised.meta.nodeKind;
+  }
+  const branchSelection = normalizeBranchSelection(revised.meta?.branchSelection);
+  if (branchSelection) meta.branchSelection = branchSelection;
+
+  return {
+    askAgent: command.askAgent !== false,
+    message: {
+      role: "user",
+      content,
+      nodeId: null,
+      parentId: revised.parentId || null,
+      meta
+    }
+  };
+}
+
+export function prepareConversationAgentTurn(thread, questionMessageId) {
+  const question = thread.messages.find(
+    (message) => message.id === questionMessageId && message.role === "user"
+  );
+  if (!question) throw new Error(`question message not found: ${questionMessageId}`);
+
+  const nodeId = question.nodeId || question.id;
+  const nodeRoot = thread.messages.find(
+    (message) => message.role === "user" && message.id === nodeId
+  );
+  if (!nodeRoot) throw new Error(`conversation node not found: ${nodeId}`);
+  if (
+    normalizeAgentSession(nodeRoot.agentSession)
+    || normalizeAgentSession(nodeRoot.agentSessionClaim)
+  ) return false;
+
+  const parentRoot = nodeRoot.parentId
+    ? thread.messages.find(
+      (message) => message.role === "user"
+        && message.id === nodeRoot.parentId
+        && (message.nodeId || message.id) === message.id
+    )
+    : null;
+  const parentSession = normalizeAgentSession(parentRoot?.agentSession);
+  if (!parentRoot || !parentSession) return false;
+
+  const sessionClaimed = thread.messages.some((message) => (
+    message.role === "user"
+    && message.id === (message.nodeId || message.id)
+    && agentSessionsMatch(message.agentSessionClaim, parentSession)
+  ));
+  if (sessionClaimed) return false;
+
+  const sessionHead = thread.messages.findLast((message) => (
+    message.role === "user"
+    && message.id === (message.nodeId || message.id)
+    && agentSessionsMatch(message.agentSession, parentSession)
+  ));
+  if (sessionHead?.id !== parentRoot.id) return false;
+
+  nodeRoot.agentSessionClaim = parentSession;
+  return true;
+}
+
 export function appendConversationMessage(thread, message, { id, now }) {
   const saved = createConversationMessage(message, { id, now });
   thread.messages.push(saved);
@@ -87,7 +169,15 @@ export function completeConversationAgentTurn(
     { id, now }
   );
   thread.messages.splice(questionIndex + 1, 0, saved);
-  nodeRoot.agentSession = normalizeAgentSession(agentSession);
+  const previousSession = normalizeAgentSession(nodeRoot.agentSession)
+    || normalizeAgentSession(nodeRoot.agentSessionClaim);
+  const completedSession = normalizeAgentSession(agentSession);
+  if (!completedSession && previousSession) {
+    invalidateAgentSessions(thread.messages, new Set([agentSessionKey(previousSession)]));
+  } else {
+    nodeRoot.agentSession = completedSession;
+    nodeRoot.agentSessionClaim = null;
+  }
   thread.updatedAt = now;
   return saved;
 }
@@ -149,8 +239,10 @@ export function deleteConversationMessage(thread, messageId, now) {
   if (message.role === "user" && message.nodeId === message.id) {
     const nodeIds = descendantNodeIds(thread.messages, message.nodeId);
     removed = thread.messages.filter((item) => item.nodeId && nodeIds.has(item.nodeId));
+    const removedSessionKeys = agentSessionKeys(removed);
     const removedIds = new Set(removed.map((item) => item.id));
     thread.messages = thread.messages.filter((item) => !removedIds.has(item.id));
+    invalidateAgentSessions(thread.messages, removedSessionKeys);
   } else if (message.role === "user") {
     const invalidatedNodeId = message.nodeId || message.id;
     const messageIndex = thread.messages.findIndex((item) => item.id === message.id);
@@ -210,6 +302,17 @@ export function normalizeAgentSession(value, legacyAcpSessionId = null) {
   return null;
 }
 
+function agentSessionsMatch(left, right) {
+  const normalizedLeft = normalizeAgentSession(left);
+  const normalizedRight = normalizeAgentSession(right);
+  return Boolean(
+    normalizedLeft
+    && normalizedRight
+    && normalizedLeft.adapter === normalizedRight.adapter
+    && normalizedLeft.sessionId === normalizedRight.sessionId
+  );
+}
+
 export class ConversationRuleError extends Error {
   constructor(message) {
     super(message);
@@ -255,6 +358,7 @@ function createConversationMessage(message, { id, now }) {
     nodeId: typeof message.nodeId === "string" && message.nodeId ? message.nodeId : message.role === "user" ? id : null,
     parentId: typeof message.parentId === "string" && message.parentId ? message.parentId : null,
     agentSession: normalizeAgentSession(message.agentSession, message.acpSessionId),
+    agentSessionClaim: normalizeAgentSession(message.agentSessionClaim),
     error: Boolean(message.error),
     meta: message.meta || {},
     createdAt: now
@@ -312,9 +416,54 @@ function invalidateDescendantSessions(messages, nodeId) {
 }
 
 function invalidateNodeSessions(messages, nodeIds) {
+  const invalidatedSessionKeys = agentSessionKeys(
+    messages.filter((message) => (
+      message.role === "user" && nodeIds.has(message.nodeId || message.id)
+    ))
+  );
   for (const message of messages) {
-    if (message.role === "user" && nodeIds.has(message.nodeId || message.id)) {
+    if (
+      message.role === "user"
+      && (
+        nodeIds.has(message.nodeId || message.id)
+        || invalidatedSessionKeys.has(agentSessionKey(message.agentSession))
+        || invalidatedSessionKeys.has(agentSessionKey(message.agentSessionClaim))
+      )
+    ) {
       message.agentSession = null;
+      message.agentSessionClaim = null;
     }
   }
+}
+
+function agentSessionKeys(messages) {
+  return new Set(
+    messages
+      .flatMap((message) => [
+        agentSessionKey(message.agentSession),
+        agentSessionKey(message.agentSessionClaim)
+      ])
+      .filter(Boolean)
+  );
+}
+
+function invalidateAgentSessions(messages, sessionKeys) {
+  if (sessionKeys.size === 0) return;
+  for (const message of messages) {
+    if (
+      message.role === "user"
+      && (
+        sessionKeys.has(agentSessionKey(message.agentSession))
+        || sessionKeys.has(agentSessionKey(message.agentSessionClaim))
+      )
+    ) {
+      message.agentSession = null;
+      message.agentSessionClaim = null;
+    }
+  }
+}
+
+function agentSessionKey(value) {
+  const session = normalizeAgentSession(value);
+  return session ? `${session.adapter}:${session.sessionId}` : "";
 }

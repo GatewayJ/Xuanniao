@@ -58,6 +58,7 @@ export type Message = {
   nodeId?: string | null;
   parentId?: string | null;
   agentSession?: AgentSession | null;
+  agentSessionClaim?: AgentSession | null;
   error?: boolean;
   meta?: Record<string, unknown>;
   createdAt: string;

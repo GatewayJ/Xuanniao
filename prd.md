@@ -54,8 +54,8 @@
 | Outline | 已实现 | 服务端生成轻量 block index，前端展示 heading 并跳转到对应行 |
 | 文本选区 | 已实现 | Edit 使用精确字符范围；Preview 使用 source line 和文本恢复源位置 |
 | Anchored Thread | 已实现 | 选区、消息、Agent session 持久化；编辑后自动 remap |
-| 多轮 Codex 对话 | 已实现 | 每个 conversation node 独立原生 Codex thread；支持 resume 与从父 turn 精确 fork |
-| 消息管理 | 已实现 | 编辑用户消息、重跑回复、重试 Codex、删除消息、删除 thread |
+| 多轮 Codex 对话 | 已实现 | 线性分支复用原生 Codex thread；从历史 turn 分叉时精确 fork |
+| 消息管理 | 已实现 | 编辑用户消息时保留原节点并创建 revision 分支；支持重跑回复、重试 Codex、删除消息和删除 thread |
 | Thread/文档联动 | 已实现 | 标记选区、激活跳转、侧栏与文档滚动位置同步 |
 | Mermaid 查看 | 已实现 | Preview 本地渲染、横向查看、全屏缩放 |
 | Agent 访问模式 | 已实现 | 设置页支持请求批准、自动审批、完全访问和 `config.toml` 自定义；命令、文件和额外权限请求进入浏览器审批 |
@@ -101,7 +101,7 @@ flowchart LR
 - Thread 工作区按“文档预览 / 节点 content / Tree”三栏联动展示；切换 Tree 节点时文档预览自动定位当前 Thread 原文锚点，并使用与主 Preview 相同的激活高亮；两条分隔线支持拖动或键盘调整宽度。
 - Tree 总览和节点 content 使用互斥创建入口：叶子节点只创建子节点，已有子路径的节点只创建独立分支；新节点始终直接挂到当前节点，不重排既有路径，连接线不提供创建按钮。
 - 上一个/下一个 thread 导航。
-- 编辑用户问题并保存时始终重新询问 Codex；刷新后未回答的节点可显式恢复请求。
+- 编辑用户问题并保存时从其父节点创建新的 sibling 叶子并重新询问 Codex，原节点和后代保持不变；刷新后未回答的节点可显式恢复请求。
 - Codex 执行期间实时展开结构化过程；正文返回后显示“已处理 Ns”折叠行，点击可查看步骤和输出。
 - 重试或删除 Codex 回复。
 - 删除完整 thread。
@@ -152,7 +152,7 @@ flowchart LR
 一个 Server 进程只有一个活动文档：
 
 - 活动文档对应一个 Agent Runtime 句柄；`codex app-server` 或 ACP 子进程只在第一次 Agent 请求时按需启动。
-- 每个新问题形成独立 conversation node，并对应一个 Agent session；子节点从父节点最后成功 turn fork。
+- 每个新问题形成独立 conversation node；当前叶子的线性后续复用同一 Agent session，只有从历史节点分叉时才从精确 turn fork 新 session。
 - 切换文档时创建新的文档上下文并替换 ThreadStore，随后释放旧 Runtime；Agent CLI 不可用不会阻断文档打开与编辑。
 - 原生 Runtime 只串行化同一 session，不同分支可以并行；ACP 兼容 adapter 仍按进程串行。
 - ThreadStore 对 mutation 使用单实例串行队列，避免并行分支完成时相互覆盖 JSON 更新。
@@ -292,8 +292,8 @@ listPermissionRequests / resolvePermissionRequest
 spawn codex app-server
   → initialize / initialized
   → 根节点：thread/start
-  → 已保存节点：thread/resume
-  → 子分支：thread/fork(parent thread, parent lastTurnId)
+  → 当前分支叶子继续：thread/resume
+  → 历史节点新分支：thread/fork(parent thread, parent lastTurnId)
   → turn/start
   → item/started · delta · item/completed
   → turn/completed
@@ -303,7 +303,7 @@ spawn codex app-server
 
 ### 6.3 Session 与树一致性
 
-每个 conversation node 保存：
+每个 conversation node 保存该节点在分支 session 中的 checkpoint：
 
 ```ts
 type AgentSession = {
@@ -314,7 +314,9 @@ type AgentSession = {
 }
 ```
 
-每个新问题必须创建独立节点；新子节点从父节点最近成功 turn fork，因此 Agent 可见历史与 UI 路径一致。编辑或删除问题、删除回答时，ThreadStore 会清除受影响节点或后代的 session；下一次调用会从仍可信的父节点 fork，或根据本地分支历史重建。新节点只允许直接追加到指定父节点，同节点追加轮次、旧的插入参数和子树重排参数都会在领域边界被拒绝。旧数据中的同节点多轮仅保留兼容展示，不再产生新的写入。
+每个新问题必须创建独立节点。父节点仍是其 session head 时，新节点以独立的 `agentSessionClaim` 认领并复用相同 `sessionId`；只有 turn 成功完成后，claim 才会转换为该节点的 `AgentSession` checkpoint 并保存自己的 `turnId`。执行中断留下的 claim 不视为已完成 checkpoint，后代不得继承它，而应根据本地 lineage 重建上下文。父节点已经存在后续 turn 时，新节点从父 checkpoint 精确 fork 新 session。因此一段成功完成的线性路径共享 session，而每个完成节点仍保留可供未来 fork 的 turn checkpoint。
+
+编辑采用不可变 revision：从被编辑节点的父节点创建新的 sibling 叶子，保留原节点及后代。删除、失败或旧式原地重跑可能使远端 thread 无法安全回退时，ThreadStore 会清除整段共享 session 的 checkpoint，下一次调用从可信父节点 fork 或根据本地分支历史重建。新节点只允许直接追加到指定父节点，同节点追加轮次、旧的插入参数和子树重排参数都会在领域边界被拒绝。旧数据中的同节点多轮仅保留兼容展示，不再产生新的写入。
 
 每次调用还会携带当前 lineage revision。Agent 完成时，ThreadStore 在写入回答与 AgentSession 的同一 mutation 中重新校验 revision；如果祖先路径在运行期间改变，旧回答不会提交，而是要求重试。
 
@@ -327,7 +329,7 @@ type AgentSession = {
 - 小范围文档变化发送带 offset、删除文本、插入文本和前后上下文的精确 splice。
 - 大范围变化或进程重启后缺少旧快照时，重新发送完整文档。
 - 上下文超过显式字符预算时失败并提示，不会静默截断；文档快照使用有界 LRU 缓存。
-- 原生 fork 继承祖先历史，只补当前节点重建所需的消息；兄弟分支永不注入。
+- 原生 fork 继承祖先历史；由于共享 session 的最新文档快照可能晚于 fork checkpoint，历史 fork 必要时重新注入完整当前文档，兄弟分支历史永不注入。
 - ACP adapter 在新 session 或恢复失败时回退到完整分支历史；已恢复 session 使用增量上下文。
 
 ### 6.5 审批与事件
@@ -564,7 +566,7 @@ npm run check
 - Node test runner 单元测试
 - Vite production build
 
-截至当前代码，190 个测试全部通过。覆盖范围包括：
+截至当前代码，213 个测试全部通过。覆盖范围包括：
 
 - 原生 Codex session start/resume/fork、事件归并、审批挂起和上下文去重
 - Codex 模型目录分页、模型与权限设置校验、权限协议映射、环境变量回退和原子持久化

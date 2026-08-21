@@ -247,6 +247,14 @@ const server = createServer(async (req, res) => {
 
     const messageUpdateMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)$/);
     const messageMetaMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/meta$/);
+    const messageRevisionMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)\/revisions$/);
+    if (messageRevisionMatch && req.method === "POST") {
+      const threadId = decodeURIComponent(messageRevisionMatch[1]);
+      const messageId = decodeURIComponent(messageRevisionMatch[2]);
+      const body = await readJson(req);
+      return sendJson(res, 200, await context.conversation.reviseQuestion(threadId, messageId, body));
+    }
+
     if (messageMetaMatch && req.method === "PATCH") {
       const threadId = decodeURIComponent(messageMetaMatch[1]);
       const messageId = decodeURIComponent(messageMetaMatch[2]);

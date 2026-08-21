@@ -73,6 +73,19 @@ test("leaves existing children in place when creating a sibling child branch", (
   assert.deepEqual(buildConversationTree(messages)[0].children[0].children.map((node) => node.id), ["c", "d"]);
 });
 
+test("editing a historical child adds a new sibling that is a leaf", () => {
+  const roots = buildConversationTree([
+    { id: "root", role: "user", content: "Root", nodeId: "root", parentId: null, createdAt: at },
+    { id: "child", role: "user", content: "Original", nodeId: "child", parentId: "root", createdAt: at },
+    { id: "descendant", role: "user", content: "Descendant", nodeId: "descendant", parentId: "child", createdAt: at },
+    { id: "revision", role: "user", content: "Revised", nodeId: "revision", parentId: "root", createdAt: at }
+  ]);
+
+  assert.deepEqual(roots[0].children.map((node) => node.id), ["child", "revision"]);
+  assert.deepEqual(roots[0].children[0].children.map((node) => node.id), ["descendant"]);
+  assert.equal(roots[0].children[1].children.length, 0);
+});
+
 test("maps four-way navigation to parent, first child, and adjacent siblings", () => {
   const messages: Message[] = [
     { id: "a", role: "user", content: "A", nodeId: "a", parentId: null, createdAt: at },

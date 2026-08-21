@@ -117,20 +117,42 @@ export function useConversationCommands({
     const operation = captureDocumentSession();
     const content = editText.trim();
     if (!content) return;
+    const thread = threadsRef.current.find((item) => item.id === threadId);
+    const original = thread?.messages.find(
+      (message) => message.id === messageId && message.role === "user"
+    );
+    if (!original) {
+      setStatus("没有找到需要编辑的节点");
+      return;
+    }
+    if (content === original.content.trim()) {
+      cancelEdit();
+      setStatus("节点内容没有变化");
+      return;
+    }
+
+    const revisionKey = conversationRevisionKey(threadId, messageId);
+    const revisionToken = sendRegistryRef.current.begin(revisionKey);
+    if (!revisionToken) {
+      setStatus("这个编辑分支正在创建");
+      return;
+    }
+
     const agentRunId = createAgentRunId();
-    setStatus("正在更新 Codex 回答");
+    const revisionCommand = conversationRevisionCommand(threadId, original, content, agentRunId);
+    setStatus("正在创建编辑分支");
     let closeAgentRun = () => {};
     try {
       await api.reserveAgentRun(agentRunId, operation.signal);
       if (!isDocumentSessionCurrent(operation)) return;
       setThreads((current) =>
-        updateMessageWithPendingReply(current, threadId, messageId, content, true, agentRunId)
+        appendPendingMessage(current, revisionCommand)
       );
       closeAgentRun = subscribeToAgentRun(threadId, agentRunId, operation);
-      const payload = await api.updateMessage(
+      const payload = await api.reviseMessage(
         threadId,
         messageId,
-        { content, rerunAgent: true, agentRunId },
+        { content, askAgent: true, agentRunId },
         operation.signal
       );
       if (!isDocumentSessionCurrent(operation)) return;
@@ -145,6 +167,7 @@ export function useConversationCommands({
       if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
     } finally {
       closeAgentRun();
+      sendRegistryRef.current.finish(revisionKey, revisionToken);
     }
   }
 
@@ -446,6 +469,27 @@ export function conversationSendKey(command: ConversationMessageCommand): string
     ? `node:${command.nodeId}`
     : `parent:${command.parentMessageId || "root"}`;
   return `${command.threadId}:${target}`;
+}
+
+export function conversationRevisionCommand(
+  threadId: string,
+  message: Message,
+  content: string,
+  agentRunId: string
+): ConversationMessageCommand {
+  return {
+    threadId,
+    content,
+    draftKey: null,
+    askAgent: true,
+    nodeId: null,
+    parentMessageId: message.parentId || null,
+    agentRunId
+  };
+}
+
+export function conversationRevisionKey(threadId: string, messageId: string): string {
+  return `${threadId}:revision:${messageId}`;
 }
 
 export function statusForOutcome(outcome: AgentOutcome, successStatus: string): string {

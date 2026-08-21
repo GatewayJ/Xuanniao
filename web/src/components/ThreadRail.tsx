@@ -1623,9 +1623,10 @@ function ThreadMessageDetail(props: {
         {props.editingMessage === message.id ? (
           <div>
             <textarea className="editMessageBox" value={props.editText} onChange={(event) => props.setEditText(event.target.value)} />
+            <small>保存后会从父节点创建新分支，原节点和后代保持不变。</small>
             <div className="editMessageActions">
               <button type="button" onClick={props.onCancelEdit}>取消</button>
-              <button type="button" className="primaryButton" onClick={() => props.onSaveEdit(props.threadId, message.id)}>保存</button>
+              <button type="button" className="primaryButton" onClick={() => props.onSaveEdit(props.threadId, message.id)}>创建分支</button>
             </div>
           </div>
         ) : (

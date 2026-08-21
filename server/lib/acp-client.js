@@ -34,6 +34,7 @@ export class AcpDocumentAgent {
     this.initialized = false;
     this.agentCapabilities = {};
     this.threadSessions = new Map();
+    this.sessionsById = new Map();
     this.activeTurn = null;
     this.promptLock = Promise.resolve();
     this.pendingPermissions = new Map();
@@ -66,7 +67,7 @@ export class AcpDocumentAgent {
       command: parseCommandLine(this.commandLine),
       accessMode: this.accessMode,
       initialized: this.initialized,
-      sessionCount: this.threadSessions.size,
+      sessionCount: this.sessionsById.size,
       running: this.rpc.running,
       stderrTail: this.rpc.stderrTail,
       pendingPermissions: this.listPermissionRequests().length,
@@ -105,6 +106,7 @@ export class AcpDocumentAgent {
     this.initialized = false;
     this.agentCapabilities = {};
     this.threadSessions.clear();
+    this.sessionsById.clear();
     this.documentSnapshots.clear();
     this.rpc.dispose(new Error("ACP document session closed."));
   }
@@ -230,13 +232,26 @@ export class AcpDocumentAgent {
   async ensureThreadSession(thread, accessMode = this.accessMode) {
     await this.ensureInitialized();
     const sessionKey = thread.sessionKey || thread.id;
-    const activeSession = this.threadSessions.get(sessionKey);
+    const stored = thread.agentSession?.adapter === "acp" ? thread.agentSession : null;
+    const keyedSession = this.threadSessions.get(sessionKey);
+    const activeSession = stored
+      ? (
+        keyedSession?.sessionId === stored.sessionId
+          ? keyedSession
+          : this.sessionsById.get(stored.sessionId)
+      )
+      : null;
     if (activeSession) {
-      await this.enforceSessionAccessMode(activeSession.sessionId, accessMode);
-      return { ...activeSession, historyMode: "inherited" };
+      const resumed = {
+        ...activeSession,
+        documentHash: stored?.documentHash || activeSession.documentHash || null
+      };
+      this.threadSessions.set(sessionKey, resumed);
+      this.sessionsById.set(resumed.sessionId, resumed);
+      await this.enforceSessionAccessMode(resumed.sessionId, accessMode);
+      return { ...resumed, historyMode: "inherited" };
     }
 
-    const stored = thread.agentSession?.adapter === "acp" ? thread.agentSession : null;
     let sessionId = stored?.sessionId || null;
     let historyMode = "inherited";
     if (sessionId && this.agentCapabilities.loadSession === true) {
@@ -272,6 +287,7 @@ export class AcpDocumentAgent {
       documentHash: historyMode === "inherited" ? stored?.documentHash || null : null
     };
     this.threadSessions.set(sessionKey, active);
+    this.sessionsById.set(sessionId, active);
     return { ...active, historyMode };
   }
 
@@ -319,6 +335,7 @@ export class AcpDocumentAgent {
     this.initialized = false;
     this.agentCapabilities = {};
     this.threadSessions.clear();
+    this.sessionsById.clear();
   }
 
   resetAfterTimeout(error) {
@@ -326,6 +343,7 @@ export class AcpDocumentAgent {
     this.initialized = false;
     this.agentCapabilities = {};
     this.threadSessions.clear();
+    this.sessionsById.clear();
     this.documentSnapshots.clear();
     this.rpc.dispose(
       new Error(`ACP runtime was restarted after a request timeout: ${error.message}`)

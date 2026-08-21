@@ -6,6 +6,8 @@ import { renderToString } from "react-dom/server";
 import { api } from "../api.ts";
 import {
   ConversationSendRegistry,
+  conversationRevisionCommand,
+  conversationRevisionKey,
   conversationSendKey,
   useConversationCommands,
   statusForOutcome
@@ -48,6 +50,44 @@ test("send registry rejects a duplicate until its exact owner finishes", () => {
 
   registry.finish("thread-1:node-1", first);
   assert.ok(registry.begin("thread-1:node-1"));
+});
+
+test("editing a historical child targets its parent and therefore creates a sibling leaf", () => {
+  assert.deepEqual(
+    conversationRevisionCommand(
+      "thread-1",
+      {
+        id: "child",
+        role: "user",
+        content: "old",
+        nodeId: "child",
+        parentId: "root",
+        createdAt: "2026-08-21T00:00:00.000Z"
+      },
+      "new",
+      "run_12345678"
+    ),
+    {
+      threadId: "thread-1",
+      content: "new",
+      draftKey: null,
+      askAgent: true,
+      nodeId: null,
+      parentMessageId: "root",
+      agentRunId: "run_12345678"
+    }
+  );
+});
+
+test("revision submissions use a stable per-message registry key", () => {
+  assert.equal(
+    conversationRevisionKey("thread-1", "message-1"),
+    conversationRevisionKey("thread-1", "message-1")
+  );
+  assert.notEqual(
+    conversationRevisionKey("thread-1", "message-1"),
+    conversationRevisionKey("thread-1", "message-2")
+  );
 });
 
 test("a same-tick question can be sent for a thread just created by the caller", async () => {

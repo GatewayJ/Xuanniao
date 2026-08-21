@@ -111,6 +111,108 @@ test("agent sessions persist across store instances and legacy ACP sessions migr
   }
 });
 
+test("linear nodes share a branch session and a historical sibling remains unclaimed", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-branch-session-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({ title: "Branch", selectedText: "selection", anchor: {} });
+    const root = await store.addMessage(thread.id, { role: "user", content: "Root" });
+    const rootSession = {
+      adapter: "codex-app-server",
+      sessionId: "branch-session",
+      turnId: "root-turn",
+      documentHash: "root-hash"
+    };
+    await store.completeAgentTurn(
+      thread.id,
+      root.id,
+      { role: "assistant", content: "Root answer", meta: { transport: "codex-app-server" } },
+      rootSession
+    );
+
+    const child = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Child",
+      parentId: root.id
+    });
+    let prepared = await store.prepareAgentTurn(thread.id, child.id);
+    assert.equal(
+      prepared.messages.find((message) => message.id === child.id).agentSession,
+      null
+    );
+    assert.deepEqual(
+      prepared.messages.find((message) => message.id === child.id).agentSessionClaim,
+      rootSession
+    );
+
+    await store.completeAgentTurn(
+      thread.id,
+      child.id,
+      { role: "assistant", content: "Child answer", meta: { transport: "codex-app-server" } },
+      { ...rootSession, turnId: "child-turn", documentHash: "child-hash" }
+    );
+    const sibling = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Edited child",
+      parentId: root.id
+    });
+    prepared = await store.prepareAgentTurn(thread.id, sibling.id);
+    assert.equal(
+      prepared.messages.find((message) => message.id === sibling.id).agentSession,
+      null
+    );
+    assert.equal(
+      prepared.messages.find((message) => message.id === sibling.id).agentSessionClaim,
+      null
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("removing a shared-session leaf also seals its surviving checkpoints", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-branch-delete-test-"));
+  const storePath = path.join(tempDir, "threads.json");
+
+  try {
+    const store = new ThreadStore(storePath);
+    const thread = await store.create({ title: "Delete branch", selectedText: "selection", anchor: {} });
+    const root = await store.addMessage(thread.id, { role: "user", content: "Root" });
+    const child = await store.addMessage(thread.id, {
+      role: "user",
+      content: "Child",
+      parentId: root.id
+    });
+    const session = (turnId) => ({
+      adapter: "codex-app-server",
+      sessionId: "shared-session",
+      turnId,
+      documentHash: "hash"
+    });
+    await store.completeAgentTurn(
+      thread.id,
+      root.id,
+      { role: "assistant", content: "Root answer" },
+      session("root-turn")
+    );
+    await store.prepareAgentTurn(thread.id, child.id);
+    await store.completeAgentTurn(
+      thread.id,
+      child.id,
+      { role: "assistant", content: "Child answer" },
+      session("child-turn")
+    );
+
+    await store.deleteMessage(thread.id, child.id);
+    const restored = await store.get(thread.id);
+    assert.equal(restored.messages.find((message) => message.id === root.id).agentSession, null);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("anchor synchronization deletes removed threads from the store", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-store-test-"));
   const storePath = path.join(tempDir, "threads.json");

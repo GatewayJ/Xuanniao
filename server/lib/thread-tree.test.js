@@ -63,7 +63,7 @@ const messages = [
 
 test("builds agent history from ancestors without sibling branches", () => {
   const branch = branchThreadForQuestion({ id: "thread-1", messages }, "q-leaf");
-  assert.equal(branch.sessionKey, "thread-1:q-leaf");
+  assert.equal(branch.sessionKey, "agent:codex-app-server:leaf-session");
   assert.equal(branch.agentSession.sessionId, "leaf-session");
   assert.equal(branch.parentAgentSession, null);
   assert.deepEqual(
@@ -124,9 +124,63 @@ test("resumed sessions include only local messages added since the last agent re
   ];
 
   const branch = branchThreadForQuestion({ id: "thread-1", messages: continued }, "q-next");
+  assert.equal(branch.sessionKey, "agent:codex-app-server:session-1");
   assert.deepEqual(
     branch.unsyncedCurrentNodeMessages.map((message) => message.id),
     ["q-local"]
+  );
+});
+
+test("a child of an interrupted claim rebuilds history instead of inheriting it", () => {
+  const interrupted = [
+    {
+      id: "q-root",
+      role: "user",
+      content: "Root",
+      nodeId: "q-root",
+      parentId: null,
+      agentSession: {
+        adapter: "codex-app-server",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        documentHash: "hash"
+      }
+    },
+    {
+      id: "a-root",
+      role: "assistant",
+      content: "Root answer",
+      nodeId: "q-root",
+      parentId: "q-root"
+    },
+    {
+      id: "q-interrupted",
+      role: "user",
+      content: "Interrupted",
+      nodeId: "q-interrupted",
+      parentId: "q-root",
+      agentSessionClaim: {
+        adapter: "codex-app-server",
+        sessionId: "session-1",
+        turnId: "turn-1",
+        documentHash: "hash"
+      }
+    },
+    {
+      id: "q-grandchild",
+      role: "user",
+      content: "Continue after interruption",
+      nodeId: "q-grandchild",
+      parentId: "q-interrupted"
+    }
+  ];
+
+  const branch = branchThreadForQuestion({ id: "thread-1", messages: interrupted }, "q-grandchild");
+  assert.equal(branch.agentSession, null);
+  assert.equal(branch.parentAgentSession, null);
+  assert.deepEqual(
+    branch.messages.map((message) => message.id),
+    ["q-root", "a-root", "q-interrupted"]
   );
 });
 

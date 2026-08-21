@@ -358,6 +358,84 @@ test("sibling conversation nodes use isolated ACP sessions", async () => {
   assert.equal(right.sessionId, "session-2");
 });
 
+test("linear nodes reuse an active ACP session without load support", async () => {
+  class StubAgent extends AcpDocumentAgent {
+    constructor() {
+      super({
+        documentPath: "/tmp/document.md",
+        cwd: "/tmp",
+        commandLine: "codex-acp",
+        timeoutMs: 1000
+      });
+      this.sessionCount = 0;
+      this.agentCapabilities = { loadSession: false };
+    }
+
+    async ensureInitialized() {}
+
+    async request() {
+      this.sessionCount += 1;
+      return { sessionId: `session-${this.sessionCount}` };
+    }
+  }
+
+  const agent = new StubAgent();
+  const root = await agent.ensureThreadSession({
+    id: "thread-1",
+    sessionKey: "thread-1:root",
+    agentSession: null
+  });
+  const child = await agent.ensureThreadSession({
+    id: "thread-1",
+    sessionKey: `agent:acp:${root.sessionId}`,
+    agentSession: {
+      adapter: "acp",
+      sessionId: root.sessionId,
+      turnId: null,
+      documentHash: "document-hash"
+    }
+  });
+
+  assert.equal(child.sessionId, root.sessionId);
+  assert.equal(child.documentHash, "document-hash");
+  assert.equal(child.historyMode, "inherited");
+  assert.equal(agent.sessionCount, 1);
+});
+
+test("an invalidated ACP checkpoint does not reuse a stale node-key session", async () => {
+  class StubAgent extends AcpDocumentAgent {
+    constructor() {
+      super({
+        documentPath: "/tmp/document.md",
+        cwd: "/tmp",
+        commandLine: "codex-acp",
+        timeoutMs: 1000
+      });
+      this.sessionCount = 0;
+    }
+
+    async ensureInitialized() {}
+
+    async request() {
+      this.sessionCount += 1;
+      return { sessionId: `session-${this.sessionCount}` };
+    }
+  }
+
+  const agent = new StubAgent();
+  const thread = {
+    id: "thread-1",
+    sessionKey: "thread-1:root",
+    agentSession: null
+  };
+  const original = await agent.ensureThreadSession(thread);
+  const rebuilt = await agent.ensureThreadSession(thread);
+
+  assert.equal(original.sessionId, "session-1");
+  assert.equal(rebuilt.sessionId, "session-2");
+  assert.equal(agent.sessionCount, 2);
+});
+
 test("prompt contains the complete document and every supplied branch message", () => {
   const messages = Array.from({ length: 14 }, (_, index) => ({
     role: index % 2 === 0 ? "user" : "assistant",
@@ -415,7 +493,9 @@ test("an ACP timeout invalidates the process and all resumable session state", a
   timeout.code = "RPC_REQUEST_TIMEOUT";
   let disposedWith = null;
   agent.initialized = true;
-  agent.threadSessions.set("thread-1", { sessionId: "session-1" });
+  const activeSession = { sessionId: "session-1" };
+  agent.threadSessions.set("thread-1", activeSession);
+  agent.sessionsById.set("session-1", activeSession);
   agent.documentSnapshots.set("session-1", "document");
   agent.rpc = {
     request: async () => {
@@ -429,6 +509,7 @@ test("an ACP timeout invalidates the process and all resumable session state", a
   await assert.rejects(agent.request("session/prompt", {}), (error) => error === timeout);
   assert.equal(agent.initialized, false);
   assert.equal(agent.threadSessions.size, 0);
+  assert.equal(agent.sessionsById.size, 0);
   assert.equal(agent.documentSnapshots.size, 0);
   assert.match(disposedWith.message, /restarted after a request timeout/);
 });

@@ -373,8 +373,6 @@ export class CodexAppServerRuntime {
         this.threadOwners.set(sessionId, thread.id);
         this.rememberThreadSettings(sessionId, forked);
         this.threadPermissionModes.set(sessionId, permissionMode);
-        const parentSnapshot = this.documentSnapshots.get(parent.sessionId);
-        if (parentSnapshot !== undefined) this.documentSnapshots.set(sessionId, parentSnapshot);
         return {
           sessionId,
           turnId: null,

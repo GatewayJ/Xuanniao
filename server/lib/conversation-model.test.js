@@ -5,7 +5,9 @@ import {
   ConversationRuleError,
   appendConversationMessage,
   normalizeConversationMetaPatch,
-  planConversationQuestion
+  planConversationQuestion,
+  planConversationRevision,
+  prepareConversationAgentTurn
 } from "./conversation-model.js";
 
 function rootThread() {
@@ -80,6 +82,107 @@ test("new questions cannot append another turn inside an existing tree node", ()
       && /new conversation node/.test(error.message)
     )
   );
+});
+
+test("editing a historical node plans an immutable sibling leaf", () => {
+  const thread = rootThread();
+  thread.messages.push(
+    {
+      id: "child",
+      role: "user",
+      content: "original child",
+      nodeId: "child",
+      parentId: "root",
+      meta: { nodeKind: "decision" }
+    },
+    {
+      id: "grandchild",
+      role: "user",
+      content: "existing descendant",
+      nodeId: "grandchild",
+      parentId: "child",
+      meta: {}
+    }
+  );
+
+  const planned = planConversationRevision(thread, "child", {
+    content: "revised child",
+    askAgent: true
+  });
+
+  assert.equal(planned.message.nodeId, null);
+  assert.equal(planned.message.parentId, "root");
+  assert.deepEqual(planned.message.meta, {
+    revisesMessageId: "child",
+    nodeKind: "decision"
+  });
+  assert.equal(thread.messages.find((message) => message.id === "child").content, "original child");
+  assert.equal(thread.messages.find((message) => message.id === "grandchild").parentId, "child");
+});
+
+test("a linear child claims the parent branch session while a sibling must fork", () => {
+  const thread = rootThread();
+  thread.messages[0].agentSession = {
+    adapter: "codex-app-server",
+    sessionId: "branch-session",
+    turnId: "root-turn",
+    documentHash: "hash"
+  };
+  thread.messages.push({
+    id: "child",
+    role: "user",
+    content: "child",
+    nodeId: "child",
+    parentId: "root",
+    agentSession: null
+  });
+
+  assert.equal(prepareConversationAgentTurn(thread, "child"), true);
+  assert.equal(thread.messages[1].agentSession, null);
+  assert.equal(thread.messages[1].agentSessionClaim.sessionId, "branch-session");
+
+  thread.messages.push({
+    id: "sibling",
+    role: "user",
+    content: "sibling",
+    nodeId: "sibling",
+    parentId: "root",
+    agentSession: null
+  });
+  assert.equal(prepareConversationAgentTurn(thread, "sibling"), false);
+  assert.equal(thread.messages[2].agentSession, null);
+  assert.equal(thread.messages[2].agentSessionClaim, undefined);
+});
+
+test("an interrupted claim is not inherited as a completed parent checkpoint", () => {
+  const thread = rootThread();
+  thread.messages[0].agentSession = {
+    adapter: "codex-app-server",
+    sessionId: "branch-session",
+    turnId: "root-turn",
+    documentHash: "hash"
+  };
+  thread.messages.push({
+    id: "interrupted",
+    role: "user",
+    content: "never reached Codex",
+    nodeId: "interrupted",
+    parentId: "root",
+    agentSession: null
+  });
+  prepareConversationAgentTurn(thread, "interrupted");
+  thread.messages.push({
+    id: "grandchild",
+    role: "user",
+    content: "must rebuild full history",
+    nodeId: "grandchild",
+    parentId: "interrupted",
+    agentSession: null
+  });
+
+  assert.equal(prepareConversationAgentTurn(thread, "grandchild"), false);
+  assert.equal(thread.messages[2].agentSession, null);
+  assert.equal(thread.messages[2].agentSessionClaim, undefined);
 });
 
 test("continuing a node invalidates descendant sessions", () => {

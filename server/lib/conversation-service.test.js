@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { ConversationConflictError } from "./conversation-model.js";
+import {
+  ConversationConflictError,
+  ConversationRuleError,
+  prepareConversationAgentTurn
+} from "./conversation-model.js";
 import { ConversationService } from "./conversation-service.js";
 import { AgentRunBroker } from "./agent-run-broker.js";
 
@@ -36,6 +40,10 @@ function createHarness({
     },
     async list() {
       return [thread];
+    },
+    async prepareAgentTurn(_threadId, questionMessageId) {
+      prepareConversationAgentTurn(thread, questionMessageId);
+      return thread;
     },
     async hasAssistantAfter(_threadId, userMessageId) {
       return messages.some((message) => (
@@ -171,6 +179,76 @@ test("conversation service returns an explicit completed outcome", async () => {
   assert.equal(result.assistantMessage.error, undefined);
 });
 
+test("a new linear child continues the parent Codex session", async () => {
+  let agentThread = null;
+  const { service, messages } = createHarness({
+    runTurn: async ({ thread }) => {
+      agentThread = thread;
+      return {
+        content: "answer",
+        stopReason: "completed",
+        transport: "codex-app-server",
+        updates: [],
+        session: {
+          adapter: "codex-app-server",
+          sessionId: "shared-session",
+          turnId: "child-turn",
+          documentHash: "hash"
+        }
+      };
+    }
+  });
+  messages[0].agentSession = {
+    adapter: "codex-app-server",
+    sessionId: "shared-session",
+    turnId: "root-turn",
+    documentHash: "hash"
+  };
+
+  await service.addQuestion("thread-1", {
+    content: "child",
+    parentMessageId: "root",
+    askAgent: true
+  });
+
+  assert.equal(agentThread.agentSession.sessionId, "shared-session");
+  assert.equal(agentThread.sessionKey, "agent:codex-app-server:shared-session");
+});
+
+test("revising a historical child creates an answered sibling leaf", async () => {
+  const { service, messages } = createHarness();
+  messages.push(
+    {
+      id: "child",
+      role: "user",
+      content: "original child",
+      nodeId: "child",
+      parentId: "root",
+      meta: { nodeKind: "decision" }
+    },
+    {
+      id: "descendant",
+      role: "user",
+      content: "existing descendant",
+      nodeId: "descendant",
+      parentId: "child",
+      meta: {}
+    }
+  );
+
+  const result = await service.reviseQuestion("thread-1", "child", {
+    content: "revised child",
+    askAgent: true
+  });
+
+  assert.equal(messages.find((message) => message.id === "child").content, "original child");
+  assert.equal(messages.find((message) => message.id === "descendant").parentId, "child");
+  assert.equal(result.message.parentId, "root");
+  assert.equal(result.message.meta.revisesMessageId, "child");
+  assert.equal(result.message.meta.nodeKind, "decision");
+  assert.equal(result.assistantMessage.parentId, result.message.id);
+});
+
 test("conversation service streams agent updates and persists their duration", async () => {
   const agentRuns = new AgentRunBroker();
   const events = [];
@@ -241,17 +319,34 @@ test("conversation service persists agent failures with a failed outcome", async
   assert.match(completeAgentRevisions[0], /^[a-f0-9]{64}$/);
 });
 
-test("an explicit rerun answers a previously unanswered saved question", async () => {
+test("an explicit rerun answers a previously unanswered saved question without rewriting it", async () => {
   const { service, messages } = createHarness();
   const result = await service.updateQuestion("thread-1", "root", {
-    content: "updated root",
+    content: "root",
     rerunAgent: true
   });
 
   assert.equal(result.agentOutcome, "completed");
-  assert.equal(messages[0].content, "updated root");
+  assert.equal(messages[0].content, "root");
   assert.equal(result.assistantMessage.parentId, "root");
   assert.equal(result.assistantMessage.content, "answer");
+});
+
+test("the retry API rejects in-place historical content changes", async () => {
+  const { service, messages } = createHarness();
+
+  await assert.rejects(
+    service.updateQuestion("thread-1", "root", {
+      content: "rewritten root",
+      rerunAgent: true
+    }),
+    (error) => (
+      error instanceof ConversationRuleError
+      && error.statusCode === 400
+      && /revision branch/.test(error.message)
+    )
+  );
+  assert.equal(messages[0].content, "root");
 });
 
 test("an explicit rerun joins an identical agent turn already in flight", async () => {
@@ -367,7 +462,7 @@ test("a stale agent result does not bypass the conversation conflict guard", asy
 
   await assert.rejects(
     service.updateQuestion("thread-1", "root", {
-      content: "updated root",
+      content: "root",
       rerunAgent: true
     }),
     (error) => error === conflict && error.statusCode === 409
@@ -383,7 +478,7 @@ test("conversation persistence errors are not misreported as agent failures", as
 
   await assert.rejects(
     service.updateQuestion("thread-1", "root", {
-      content: "updated root",
+      content: "root",
       rerunAgent: true
     }),
     (error) => error === persistenceError
