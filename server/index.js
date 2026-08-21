@@ -410,7 +410,6 @@ async function createDocumentContext(filePath) {
       document,
       agent,
       agentRuns,
-      documentEdits: process.env.XUANNIAO_CONTROLLED_REPLACEMENT !== "0",
       onAgentError: (event) => {
         console.error(JSON.stringify({
           level: "error",

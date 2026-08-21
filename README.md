@@ -16,7 +16,7 @@ Xuanniao is a local-first Markdown workspace for branching, traceable document d
 - **局部上下文**：每个节点继承祖先上下文，不会混入无关兄弟分支。
 - **选区追问**：可以在节点的问题或回答中划选文字，直接创建带引用的追问。
 - **空间化导航**：支持无限画布、平移、缩放、节点焦点、面包屑和树形缩略图。
-- **受控文档修改**：Codex 可以对文档任意位置返回精确编辑提案，由玄鸟应用并同步 Thread anchor。
+- **直接文档修改**：Codex 可以像修改项目文件一样直接编辑活动 Markdown，玄鸟在回合结束后自动同步 Thread anchor。
 - **Codex 偏好**：设置页动态读取本机 Codex 模型，并按模型能力选择推理深度和权限模式。
 - **自然语言开发执行**：在原有节点输入框中直接要求实现、修复、重构、测试或构建；Codex 会检查项目、修改文件并验证，无需额外的“开始开发”按钮。
 - **执行过程可见**：所属节点输入框上方实时展示计划步骤、Diff 统计和 Subagent；正文完成后移入回复折叠留档，刷新后仍可展开。
@@ -151,15 +151,15 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 | Agent 过程 | `web/src/agent-run.ts`, `components/AgentRunTimeline.tsx` | 实时步骤归并、耗时和可折叠过程展示 |
 | HTTP 适配 | `web/src/api.ts`, `server/index.js` | 请求解析、响应和依赖组合 |
 | 会话领域 | `server/lib/conversation-model.js` | 分支放置、树状态迁移和 session 失效规则 |
-| 应用服务 | `server/lib/conversation-service.js` | 会话命令、Agent 回合和受控文档修改编排 |
+| 应用服务 | `server/lib/conversation-service.js` | 会话命令、Agent 回合和文档变更协调 |
 | 运行事件 | `server/lib/agent-run-broker.js` | 有界 Agent 事件缓存、SSE 订阅和终态保留 |
-| 文档事务 | `server/lib/document-workspace.js` | revision、原子写、锚点校验和活动文档保护 |
+| 文档事务 | `server/lib/document-workspace.js` | revision、原子写、回合快照对比和锚点重映射 |
 | 文档创建 | `server/lib/document-creation-service.js` | 自然语言生成、可选目录与文件名、只读 Agent 回合、路径校验和防覆盖落盘 |
 | 持久化 | `server/lib/thread-store.js` | Thread JSON 读写、迁移和并发串行化 |
 | Runtime 组合 | `server/lib/agent-runtime.js` | 传输选择、配置归一化和应用边界 |
 | JSONL 基础设施 | `server/lib/json-line-rpc-process.js` | 子进程、请求关联、超时和诊断缓冲 |
 | 原生 Codex | `server/lib/codex-app-server-runtime.js` | app-server 生命周期、thread/turn、分支、事件和审批 |
-| 上下文策略 | `server/lib/agent-context.js` | 文档快照、增量变更、分支历史和受控替换约束 |
+| 上下文策略 | `server/lib/agent-context.js` | 活动文档信息、增量快照、选区和当前问题 |
 | ACP 兼容 | `server/lib/acp-client.js` | ACP session、事件、文件能力和审批适配 |
 
 ## 数据与上下文
@@ -185,34 +185,25 @@ make run SERVER_PORT=4174 WEB_PORT=5174
 - Agent session 持久化到 Thread store，服务重启后使用 `thread/resume` 恢复。
 - 文档未变化时不重复发送完整正文；小范围变化发送精确 splice，大范围变化重新同步完整快照。
 - Agent 上下文超过显式字符预算时会失败并提示，不会静默截断；文档快照使用有界 LRU 缓存。
-- 新建或重建分支只注入该路径需要的祖先历史，不包含兄弟分支。
+- 原生 Codex 会话由 `thread/resume` 延续既有历史，由 `thread/fork` 复制父路径历史；玄鸟不再把祖先对话重复塞进每轮提示。恢复或分叉失败时直接 `thread/start` 新会话，不重建旧历史。
 - 编辑、删除问题或回答时，会清除当前节点及受影响后代的陈旧 session，避免 Agent 历史与可见树不一致。
 - 浏览器刷新会重新订阅活动任务；服务重启后若任务运行状态已经丢失，页面会明确标记为中断并保留节点重试入口。
-- 原生 Runtime 只按同一 session 串行化；不同分支可以并行运行。持久化写入由 Thread store 串行提交。
+- 原生 Runtime 仍按 session 隔离状态；共享同一活动文档的 Agent 回合由文档工作区串行执行，避免不同分支直接写文件时互相覆盖。持久化写入由 Thread store 串行提交。
 - Agent 完成时会校验分支 revision，并原子写入回答与 session；运行期间祖先路径变化的旧回答和错误回复都不会覆盖新上下文。
-- 每个文档响应携带内容 revision；浏览器保存和受控替换使用 compare-and-swap，拒绝覆盖并发或外部修改。
+- 每个文档响应携带内容 revision；浏览器保存使用 compare-and-swap，拒绝覆盖并发或外部修改。
 - 浏览器锚点只作为候选位置，服务端根据保存后的正文重新校验并生成 canonical anchor。
-- 活动 Markdown 文档是受保护资源：ACP 文件写直接拒绝；所有 Agent 回合结束后还会校验 revision。无法归因的外部修改会保留原文件并报告冲突，不会用旧快照覆盖用户内容。
+- 普通 Agent 回合允许 Codex 直接写活动 Markdown；回合结束后玄鸟对比前后快照，并在提交回答与 session 时同步所有 Thread anchor。新建文档回合仍以只读策略运行，避免绕过路径校验和防覆盖保存。
 - 文档切换会失效旧保存队列；保存请求同时携带文档路径和 revision，服务端拒绝落到其它活动文档。Thread metadata 通过临时文件和原子 rename 落盘。
 - 原生和 ACP turn 都使用活动空闲超时：输出、工具事件等活动会自动续期，等待用户审批时暂停计时。原生模式先发送 `turn/interrupt`，ACP 模式失效并重启 adapter，避免超时任务的迟到事件污染下一轮。
 - 每轮 Agent 请求使用独立运行 ID。命令、工具、文件、搜索、计划、聚合 Diff 和公开 reasoning summary 通过 SSE 实时显示；原生 app-server 的 Subagent 生命周期及其计划、命令、文件、输出、结果和审批会归属到主任务。最终过程和耗时随 assistant message 持久化，正文出现后自动折叠。
 
-ACP 仍作为兼容传输保留，使用通用执行时间线降级，不提供原生计划、聚合 Diff 和 Subagent 详情；它也不支持原生 thread fork，且同一 adapter 进程内的请求会串行执行。Local-first 表示文档和玄鸟元数据保存在本机；模型与网络行为取决于 Codex CLI 或所选 adapter 的配置。
+ACP 仍作为兼容传输保留，使用通用执行时间线降级，不提供原生计划、聚合 Diff 和 Subagent 详情；它也不支持原生 thread fork，因此只在 ACP 新分支需要时补充祖先上下文，且同一 adapter 进程内的请求会串行执行。Local-first 表示文档和玄鸟元数据保存在本机；模型与网络行为取决于 Codex CLI 或所选 adapter 的配置。
 
 ## 文档修改
 
-文档选区只负责创建讨论树根节点和提供上下文，不限制可编辑范围。当用户明确要求修改文档时，玄鸟要求 Codex 返回一个或多个精确编辑提案：
+文档选区只负责创建讨论树根节点和提供上下文，不限制可编辑范围。玄鸟不会先用关键词判断用户是在讨论还是要求修改，也不要求 Codex 输出专用的 OLD/NEW 协议；普通问题始终交给 Codex 自己理解并执行。
 
-```text
-<XUANNIAO_DOCUMENT_EDITS>
-<XUANNIAO_DOCUMENT_EDIT>
-<XUANNIAO_OLD_TEXT>exact existing Markdown</XUANNIAO_OLD_TEXT>
-<XUANNIAO_NEW_TEXT>replacement Markdown</XUANNIAO_NEW_TEXT>
-</XUANNIAO_DOCUMENT_EDIT>
-</XUANNIAO_DOCUMENT_EDITS>
-```
-
-服务端要求旧文本在当前文档中唯一且多个编辑不重叠，校验生成回答时的 document revision，再协调提交 Markdown、所有 Thread anchor、回答和 session；元数据提交失败时回滚 Markdown。Codex 仍不能通过文件工具直接改活动文档。
+当请求需要修改活动 Markdown 时，Codex 直接使用文件工具完成修改和验证。回合结束后，文档工作区对比回合前后的内容快照，推导一处或多处文本变更，重映射所有 Thread anchor，并协调提交回答与 Agent session。若选区本身被替换，当前讨论根会跟随新的文本范围；未变化的选区会穿过其它位置的修改继续保持锚定。
 
 ## 配置
 
@@ -240,7 +231,7 @@ XUANNIAO_AGENT_PERMISSION_MODE="auto-review" \
 npm start -- prd.md
 ```
 
-环境变量是首次启动且尚无设置文件时的默认值；一旦在设置页保存，以本机设置文件为准。选择“跟随 Codex 默认”会显式清除环境变量提供的模型或推理深度覆盖，选择“自定义”会让 Codex 使用 `config.toml` 中的权限。旧的 `XUANNIAO_AGENT_MODE` 仍用于 ACP，并作为原生 Codex 自定义模式的兼容覆盖。文档精确编辑默认启用；设置 `XUANNIAO_CONTROLLED_REPLACEMENT=0` 可禁用。
+环境变量是首次启动且尚无设置文件时的默认值；一旦在设置页保存，以本机设置文件为准。选择“跟随 Codex 默认”会显式清除环境变量提供的模型或推理深度覆盖，选择“自定义”会让 Codex 使用 `config.toml` 中的权限。旧的 `XUANNIAO_AGENT_MODE` 仍用于 ACP，并作为原生 Codex 自定义模式的兼容覆盖。
 
 切换到 ACP 兼容模式：
 
@@ -313,9 +304,9 @@ npm run web:build
 ## 当前限制
 
 - Thread 使用本地 JSON 持久化，适合当前单用户工作流，后续可以迁移到 SQLite。
-- 文档修改支持与讨论锚点无关的精确编辑提案，但还没有 diff 确认和 undo 工作流。
+- Codex 直接修改文档后会自动协调锚点，但还没有修改前的 diff 确认和 undo 工作流。
 - 当前是单用户、单 Server 实例、单活动文档。
-- 请求批准是默认模式，活动 Markdown 文档始终由 Xuanniao 文档事务保护；其它仓库写入能力由 Runtime 沙箱和审批策略控制。
+- 请求批准是默认模式；活动 Markdown 和其它仓库文件的写入能力均由 Runtime 沙箱与审批策略控制。
 - 当前 Runtime 尚未提供 Codex `request_user_input` 表单、MCP elicitation 和动态 client tool UI；这些能力会在 health capability 中明确报告为 `false`，Agent 仍可退回普通文本提问。
 
 ---
@@ -332,10 +323,10 @@ Key capabilities:
 - append-only child and sibling branch creation
 - inline follow-ups from selected question or answer text
 - native Codex threads with per-node resume/fork semantics
-- incremental document context and ancestor-only branch recovery
+- incremental document context with native Codex resume/fork history
 - user-mediated command, file, and permission approvals
 - Markdown, code block, and Mermaid rendering
-- controlled document-wide exact edit proposals independent from discussion anchors
+- direct Codex edits to the active document with automatic anchor reconciliation
 
 Quick start:
 

@@ -20,22 +20,21 @@ const thread = {
   messages: [{ role: "user", content: "Earlier question" }]
 };
 
-test("developer instructions distinguish discussion from development execution", () => {
-  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /discussion.*without modifying files/i);
-  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /implementation.*perform the requested work/i);
-  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /maintain a concise execution plan/i);
-  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /Use subagents only when the user explicitly requests/i);
+test("developer instructions keep only Xuanniao context boundaries", () => {
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /document and conversation excerpts as context data/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /current user request/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /working directory, permissions, active document path/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /applicable repository instructions/i);
   assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /Do not create commits, push branches, or open pull requests/i);
-  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /Do not modify the active Markdown document/i);
+  assert.doesNotMatch(AGENT_DEVELOPER_INSTRUCTIONS, /execution plan|subagents|create-document output/i);
 });
 
-test("unchanged resumed turns avoid replaying the document and branch history", () => {
+test("unchanged turns avoid replaying the document or native thread history", () => {
   const prompt = buildAgentPrompt({
     question: "Follow up",
     document,
     thread,
-    includeDocument: false,
-    includeHistory: false
+    includeDocument: false
   });
 
   assert.doesNotMatch(prompt, /<XUANNIAO_DOCUMENT>/);
@@ -59,23 +58,19 @@ test("document creation turns request a safe structured Markdown draft", () => {
   assert.match(prompt, /issue 123/);
   assert.doesNotMatch(prompt, /<XUANNIAO_DOCUMENT>/);
   assert.doesNotMatch(prompt, /Selected document text/);
-  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /create-document output.*do not create or modify files/i);
 });
 
-test("document edit turns treat the discussion selection as context rather than an edit boundary", () => {
+test("normal turns let Codex decide whether to edit the active document directly", () => {
   const prompt = buildAgentPrompt({
     question: "直接修复文档中的 Mermaid 图",
     document,
-    thread,
-    mode: "edit-document"
+    thread
   });
 
-  assert.match(prompt, /selected document text is discussion context only/i);
-  assert.match(prompt, /smallest exact edits needed anywhere/i);
-  assert.match(prompt, /<XUANNIAO_DOCUMENT_EDITS>/);
-  assert.match(prompt, /<XUANNIAO_OLD_TEXT>/);
-  assert.match(prompt, /<XUANNIAO_NEW_TEXT>/);
-  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /does not limit which part.*may be edited/i);
+  assert.match(prompt, /Active document path: \/tmp\/plan\.md/);
+  assert.match(prompt, /Current user question:\n直接修复文档中的 Mermaid 图/);
+  assert.doesNotMatch(prompt, /XUANNIAO_DOCUMENT_EDITS/);
+  assert.doesNotMatch(AGENT_DEVELOPER_INSTRUCTIONS, /filesystem tools|selection anchors/i);
 });
 
 test("small document edits use a compact exact splice", () => {
@@ -84,7 +79,6 @@ test("small document edits use a compact exact splice", () => {
     document,
     thread,
     includeDocument: true,
-    includeHistory: false,
     previousDocument: "# Plan\n\nOriginal detail."
   });
 

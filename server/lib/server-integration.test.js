@@ -7,14 +7,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { documentMetadataDirFor } from "./metadata-paths.js";
-
 const serverEntry = fileURLToPath(new URL("../index.js", import.meta.url));
 
 test("HTTP server starts without Agent availability and reports failed turns explicitly", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-server-integration-"));
   const documentPath = path.join(tempDir, "plan.md");
-  const metadataDir = documentMetadataDirFor(documentPath);
   const port = await availablePort();
   await writeFile(documentPath, "# Plan\n", "utf8");
 
@@ -23,6 +20,7 @@ test("HTTP server starts without Agent availability and reports failed turns exp
     stdio: ["ignore", "pipe", "pipe"],
     env: {
       ...process.env,
+      HOME: tempDir,
       HOST: "127.0.0.1",
       PORT: String(port),
       XUANNIAO_CODEX_CMD: "xuanniao-missing-codex-command"
@@ -160,7 +158,6 @@ test("HTTP server starts without Agent availability and reports failed turns exp
       await waitForExit(child);
     }
     await rm(tempDir, { recursive: true, force: true });
-    await rm(metadataDir, { recursive: true, force: true });
   }
 });
 

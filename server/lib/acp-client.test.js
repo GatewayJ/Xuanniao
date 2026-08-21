@@ -26,7 +26,7 @@ test("read-only maps to the ACP read-only mode", () => {
   assert.throws(() => normalizeAgentMode("agent"), /Expected full-access or read-only/);
 });
 
-test("full access writes arbitrary files while read-only rejects writes", async () => {
+test("full access writes files including the active document while read-only rejects writes", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-access-test-"));
   const documentPath = path.join(tempDir, "document.md");
   const otherPath = path.join(tempDir, "other.txt");
@@ -45,14 +45,11 @@ test("full access writes arbitrary files while read-only rejects writes", async 
       }),
       /write denied in read-only mode/
     );
-    await assert.rejects(
-      createAgent(documentPath, "full-access").writeTextFile({
-        path: documentPath,
-        content: "bypass"
-      }),
-      /protected active document/
-    );
-    assert.equal(await readFile(documentPath, "utf8"), "document");
+    await createAgent(documentPath, "full-access").writeTextFile({
+      path: documentPath,
+      content: "updated document"
+    });
+    assert.equal(await readFile(documentPath, "utf8"), "updated document");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -316,7 +313,7 @@ test("creates and persists a new session when a stored session cannot be loaded"
     assert.deepEqual(await agent.ensureThreadSession(thread), {
       sessionId: "replacement-session",
       documentHash: null,
-      historyMode: "fresh"
+      historyMode: "reset"
     });
     assert.equal(agent.calls.at(-1).method, "session/new");
     assert.equal(agent.calls.filter(({ method }) => method === "session/load").length, loadSession ? 1 : 0);
@@ -458,7 +455,7 @@ test("prompt contains the complete document and every supplied branch message", 
   assert.match(prompt, /# Complete plan\n\nAll details\./);
   assert.match(prompt, /<message role="user">\nmessage-0/);
   assert.match(prompt, /<message role="assistant">\nmessage-13/);
-  assert.match(prompt, /Conversation history required to reconstruct this branch:/);
+  assert.match(prompt, /Supplemental conversation context required by this transport:/);
 });
 
 test("prompt identifies the selected conversation excerpt for a focused follow-up", () => {

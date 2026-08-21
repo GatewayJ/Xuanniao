@@ -156,8 +156,12 @@ export class AcpDocumentAgent {
               mode,
               accessMode: turnAccessMode,
               includeDocument,
-              includeHistory: session.historyMode === "fresh" || unsyncedMessages.length > 0,
-              history: session.historyMode === "fresh" ? thread.messages || [] : unsyncedMessages,
+              supplementalHistory:
+                session.historyMode === "fresh"
+                  ? thread.messages || []
+                  : session.historyMode === "inherited"
+                    ? unsyncedMessages
+                    : [],
               previousDocument: includeDocument ? (previousDocument ?? null) : null,
               maxChars: this.contextMaxChars
             })
@@ -263,13 +267,15 @@ export class AcpDocumentAgent {
         });
       } catch {
         sessionId = null;
+        historyMode = "reset";
       }
     } else if (sessionId) {
       sessionId = null;
+      historyMode = "reset";
     }
 
     if (!sessionId) {
-      historyMode = "fresh";
+      if (!stored) historyMode = "fresh";
       const session = await this.request("session/new", {
         cwd: this.cwd,
         mcpServers: []
@@ -520,10 +526,6 @@ export class AcpDocumentAgent {
     if (this.accessMode !== "full-access" || this.activeTurn?.readOnly) {
       throw new Error(`write denied in read-only mode: ${requestedPath}`);
     }
-    if (requestedPath === this.documentPath) {
-      throw new Error(`write denied for Xuanniao's protected active document: ${requestedPath}`);
-    }
-
     await writeFile(requestedPath, String(params.content ?? ""), "utf8");
     return {};
   }
@@ -560,7 +562,8 @@ export function acpAgentMode(value) {
 }
 
 export function buildPrompt(options) {
-  return `${AGENT_DEVELOPER_INSTRUCTIONS}\n\n${buildAgentPrompt(options)}`;
+  const supplementalHistory = options.supplementalHistory ?? options.thread?.messages ?? [];
+  return `${AGENT_DEVELOPER_INSTRUCTIONS}\n\n${buildAgentPrompt({ ...options, supplementalHistory })}`;
 }
 
 function compactUpdate(update) {

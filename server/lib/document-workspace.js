@@ -7,6 +7,7 @@ import { buildBlockIndex } from "./block-index.js";
 import { reconcileThreadsForContent, remapThreadsForReplacement } from "./thread-anchor-remap.js";
 
 const mutationLocks = new Map();
+const agentTurnLocks = new Map();
 const controlledDocumentStates = new Map();
 
 export class DocumentConflictError extends Error {
@@ -84,7 +85,7 @@ export class DocumentWorkspace {
 
       try {
         const threads = await this.reconcileThreads(content, anchorPatches, deletedThreadIds);
-        this.recordControlledContent(content);
+        if (changed) this.recordControlledContent(content);
         return {
           document: payloadFor(this.filePath, content),
           threads
@@ -96,65 +97,88 @@ export class DocumentWorkspace {
     });
   }
 
-  async applyDocumentEdits({
-    expectedRevision,
-    edits,
+  async completeAgentTurnFromSnapshot({
+    snapshot,
     threadId,
-    agentTurn = null
+    userMessageId,
+    message,
+    agentSession,
+    expectedBranchRevision
   }) {
     return this.withMutation(async () => {
-      const before = await this.snapshot();
-      assertRevision(before, expectedRevision);
-      const resolvedEdits = resolveDocumentEdits(before.content, edits);
-      const content = applyResolvedDocumentEdits(before.content, resolvedEdits);
-      await atomicWriteText(this.filePath, content);
-
-      try {
-        const reconcile = (currentThreads) => {
-          const remapped = remapThreadsForDocumentEdits(
-            currentThreads,
-            before.content,
-            resolvedEdits,
-            threadId
-          );
-          return {
-            patches: remapped.threads,
-            deletedThreadIds: remapped.deletedThreadIds
-          };
-        };
-        const committed = agentTurn
-          ? await this.threadStore.completeAgentTurnWithAnchorReconciliation({
-              ...agentTurn,
-              threadId,
-              reconcile
-            })
-          : {
-              assistantMessage: null,
-              threads: await this.threadStore.reconcileAnchors(reconcile)
-            };
-        this.recordControlledContent(content);
-        return {
-          document: payloadFor(this.filePath, content),
-          edits: resolvedEdits,
-          threads: committed.threads,
-          assistantMessage: committed.assistantMessage
-        };
-      } catch (error) {
-        await atomicWriteText(this.filePath, before.content);
-        throw error;
+      const current = await this.snapshot();
+      const changed = current.revision !== snapshot.revision;
+      if (changed && this.controlledState.mutationEpoch !== snapshot.mutationEpoch) {
+        throw new AgentDocumentMutationError(
+          this.filePath,
+          payloadFor(this.filePath, current.content)
+        );
       }
+      const completedMessage = {
+        ...message,
+        meta: {
+          ...(message.meta || {}),
+          appliedEdit: changed
+        }
+      };
+
+      if (!changed) {
+        const assistantMessage = await this.threadStore.completeAgentTurn(
+          threadId,
+          userMessageId,
+          completedMessage,
+          agentSession,
+          expectedBranchRevision
+        );
+        return {
+          assistantMessage,
+          document: null,
+          threads: null,
+          changed: false
+        };
+      }
+
+      const edits = documentEditsBetween(snapshot.content, current.content);
+      const reconcile = (currentThreads) => {
+        const remapped = remapThreadsForDocumentEdits(
+          currentThreads,
+          snapshot.content,
+          edits,
+          threadId
+        );
+        return {
+          patches: remapped.threads,
+          deletedThreadIds: remapped.deletedThreadIds
+        };
+      };
+      const committed = await this.threadStore.completeAgentTurnWithAnchorReconciliation({
+        threadId,
+        userMessageId,
+        message: completedMessage,
+        agentSession,
+        expectedBranchRevision,
+        reconcile
+      });
+      this.recordControlledContent(current.content);
+      return {
+        assistantMessage: committed.assistantMessage,
+        document: payloadFor(this.filePath, current.content),
+        threads: committed.threads,
+        changed: true
+      };
     });
   }
 
   async createAgentSnapshot() {
-    await this.waitForMutations();
-    const snapshot = await this.snapshot();
-    return {
-      document: payloadFor(this.filePath, snapshot.content),
-      content: snapshot.content,
-      revision: snapshot.revision,
-      mutationEpoch: this.controlledState.mutationEpoch
-    };
+    return this.withMutation(async () => {
+      const snapshot = await this.snapshot();
+      return {
+        document: payloadFor(this.filePath, snapshot.content),
+        content: snapshot.content,
+        revision: snapshot.revision,
+        mutationEpoch: this.controlledState.mutationEpoch
+      };
+    });
   }
 
   async verifyAgentSnapshot(snapshot) {
@@ -181,17 +205,11 @@ export class DocumentWorkspace {
   }
 
   async withMutation(operation) {
-    const previous = mutationLocks.get(this.filePath) || Promise.resolve();
-    const run = previous.then(operation, operation);
-    const barrier = run.catch(() => {});
-    mutationLocks.set(this.filePath, barrier);
-    try {
-      return await run;
-    } finally {
-      if (mutationLocks.get(this.filePath) === barrier) {
-        mutationLocks.delete(this.filePath);
-      }
-    }
+    return runWithFileLock(mutationLocks, this.filePath, operation);
+  }
+
+  async withAgentTurn(operation) {
+    return runWithFileLock(agentTurnLocks, this.filePath, operation);
   }
 
   async waitForMutations() {
@@ -228,6 +246,18 @@ export class DocumentWorkspace {
       revision: documentRevision(content),
       mutationEpoch: this.controlledState.mutationEpoch
     };
+  }
+}
+
+async function runWithFileLock(locks, filePath, operation) {
+  const previous = locks.get(filePath) || Promise.resolve();
+  const run = previous.then(operation, operation);
+  const barrier = run.catch(() => {});
+  locks.set(filePath, barrier);
+  try {
+    return await run;
+  } finally {
+    if (locks.get(filePath) === barrier) locks.delete(filePath);
   }
 }
 
@@ -284,42 +314,6 @@ function assertRevision(snapshot, expectedRevision) {
   }
 }
 
-function resolveDocumentEdits(content, edits) {
-  if (!Array.isArray(edits) || edits.length === 0 || edits.length > 32) {
-    throw new DocumentConflictError("Codex must propose between 1 and 32 document edits.", documentRevision(content));
-  }
-  const resolved = edits.map((candidate) => {
-    const oldText = typeof candidate?.oldText === "string" ? candidate.oldText : "";
-    const newText = typeof candidate?.newText === "string" ? candidate.newText : "";
-    if (!oldText || oldText === newText) {
-      throw new DocumentConflictError("Codex proposed an empty or unchanged document edit.", documentRevision(content));
-    }
-    const start = content.indexOf(oldText);
-    if (start < 0 || start !== content.lastIndexOf(oldText)) {
-      throw new DocumentConflictError(
-        "Codex document edits must target text that occurs exactly once in the current document.",
-        documentRevision(content)
-      );
-    }
-    return { start, end: start + oldText.length, oldText, newText };
-  }).sort((left, right) => left.start - right.start);
-
-  for (let index = 1; index < resolved.length; index += 1) {
-    if (resolved[index].start < resolved[index - 1].end) {
-      throw new DocumentConflictError("Codex proposed overlapping document edits.", documentRevision(content));
-    }
-  }
-  return resolved;
-}
-
-function applyResolvedDocumentEdits(content, edits) {
-  let result = content;
-  for (const edit of [...edits].reverse()) {
-    result = `${result.slice(0, edit.start)}${edit.newText}${result.slice(edit.end)}`;
-  }
-  return result;
-}
-
 function remapThreadsForDocumentEdits(threads, content, edits, preservedThreadId) {
   let currentThreads = threads;
   let currentContent = content;
@@ -347,4 +341,144 @@ function remapThreadsForDocumentEdits(threads, content, edits, preservedThreadId
     threads: currentThreads,
     deletedThreadIds: [...new Set(deletedThreadIds)]
   };
+}
+
+function documentEditsBetween(previousContent, currentContent) {
+  if (previousContent === currentContent) return [];
+
+  // Unique token anchors plus an increasing subsequence split distant edits
+  // without a quadratic character-by-character diff over large documents.
+  const previousTokens = tokenizeWithOffsets(previousContent);
+  const currentTokens = tokenizeWithOffsets(currentContent);
+  const anchors = orderedUniqueTokenAnchors(previousTokens, currentTokens);
+  const edits = [];
+  let previousOffset = 0;
+  let currentOffset = 0;
+
+  for (const anchor of anchors) {
+    appendTrimmedEdit(
+      edits,
+      previousContent,
+      currentContent,
+      previousOffset,
+      anchor.previous.start,
+      currentOffset,
+      anchor.current.start
+    );
+    previousOffset = anchor.previous.end;
+    currentOffset = anchor.current.end;
+  }
+
+  appendTrimmedEdit(
+    edits,
+    previousContent,
+    currentContent,
+    previousOffset,
+    previousContent.length,
+    currentOffset,
+    currentContent.length
+  );
+  return edits;
+}
+
+function tokenizeWithOffsets(content) {
+  const tokens = [];
+  const pattern = /\s+|[\p{L}\p{N}_]+|[^\s\p{L}\p{N}_]+/gu;
+  let match;
+  while ((match = pattern.exec(content)) !== null) {
+    if (!match[0].trim()) continue;
+    tokens.push({ text: match[0], start: match.index, end: pattern.lastIndex });
+  }
+  return tokens;
+}
+
+function orderedUniqueTokenAnchors(previousTokens, currentTokens) {
+  const previousOccurrences = tokenOccurrences(previousTokens);
+  const currentOccurrences = tokenOccurrences(currentTokens);
+  const pairs = [];
+
+  for (const [text, previousIndexes] of previousOccurrences) {
+    const currentIndexes = currentOccurrences.get(text);
+    if (previousIndexes.length !== 1 || currentIndexes?.length !== 1) continue;
+    pairs.push({
+      previousIndex: previousIndexes[0],
+      currentIndex: currentIndexes[0]
+    });
+  }
+  pairs.sort((left, right) => left.previousIndex - right.previousIndex);
+
+  return longestIncreasingPairs(pairs).map((pair) => ({
+    previous: previousTokens[pair.previousIndex],
+    current: currentTokens[pair.currentIndex]
+  }));
+}
+
+function tokenOccurrences(tokens) {
+  const occurrences = new Map();
+  tokens.forEach((token, index) => {
+    const indexes = occurrences.get(token.text) || [];
+    indexes.push(index);
+    occurrences.set(token.text, indexes);
+  });
+  return occurrences;
+}
+
+function longestIncreasingPairs(pairs) {
+  if (pairs.length === 0) return [];
+  const tails = [];
+  const predecessors = new Array(pairs.length).fill(-1);
+
+  for (let index = 0; index < pairs.length; index += 1) {
+    let low = 0;
+    let high = tails.length;
+    while (low < high) {
+      const middle = Math.floor((low + high) / 2);
+      if (pairs[tails[middle]].currentIndex < pairs[index].currentIndex) low = middle + 1;
+      else high = middle;
+    }
+    if (low > 0) predecessors[index] = tails[low - 1];
+    tails[low] = index;
+  }
+
+  const result = [];
+  let cursor = tails[tails.length - 1];
+  while (cursor >= 0) {
+    result.push(pairs[cursor]);
+    cursor = predecessors[cursor];
+  }
+  return result.reverse();
+}
+
+function appendTrimmedEdit(
+  edits,
+  previousContent,
+  currentContent,
+  previousStart,
+  previousEnd,
+  currentStart,
+  currentEnd
+) {
+  const previous = previousContent.slice(previousStart, previousEnd);
+  const current = currentContent.slice(currentStart, currentEnd);
+  if (previous === current) return;
+
+  let prefixLength = 0;
+  const sharedLength = Math.min(previous.length, current.length);
+  while (prefixLength < sharedLength && previous[prefixLength] === current[prefixLength]) {
+    prefixLength += 1;
+  }
+
+  let suffixLength = 0;
+  while (
+    suffixLength < sharedLength - prefixLength &&
+    previous[previous.length - suffixLength - 1] === current[current.length - suffixLength - 1]
+  ) {
+    suffixLength += 1;
+  }
+
+  edits.push({
+    start: previousStart + prefixLength,
+    end: previousEnd - suffixLength,
+    newText: current.slice(prefixLength, current.length - suffixLength)
+  });
 }

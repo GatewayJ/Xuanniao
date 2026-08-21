@@ -13,14 +13,12 @@ export class ConversationService {
     document,
     agent,
     agentRuns = null,
-    documentEdits = false,
     onAgentError = () => {}
   }) {
     this.threadStore = threadStore;
     this.document = document;
     this.agent = agent;
     this.agentRuns = agentRuns;
-    this.documentEdits = documentEdits;
     this.onAgentError = onAgentError;
     this.activeReplies = new Map();
     this.activeThreadOperations = new Map();
@@ -241,6 +239,7 @@ export class ConversationService {
     const progress = {
       runIds: new Set(),
       events: [],
+      error: null,
       startedAt: Date.now()
     };
     this.attachAgentRun(progress, agentRunId, threadId, questionMessageId);
@@ -250,7 +249,11 @@ export class ConversationService {
       : this.runAssistantReply(threadId, content, questionMessageId, progress);
     const task = work.then(
       (reply) => {
-        this.completeAgentRuns(progress, reply.agentOutcome === "failed" ? "failed" : "completed");
+        this.completeAgentRuns(
+          progress,
+          reply.agentOutcome === "failed" ? "failed" : "completed",
+          progress.error
+        );
         return reply;
       },
       (error) => {
@@ -268,16 +271,24 @@ export class ConversationService {
   }
 
   async runAssistantReply(threadId, content, questionMessageId, progress) {
-    let updatedDocument = null;
+    return this.document.withAgentTurn(() => (
+      this.runAssistantReplyWithinDocumentTurn(
+        threadId,
+        content,
+        questionMessageId,
+        progress
+      )
+    ));
+  }
+
+  async runAssistantReplyWithinDocumentTurn(threadId, content, questionMessageId, progress) {
     const agentSnapshot = await this.document.createAgentSnapshot();
-    let snapshotVerified = false;
     const storedThread = await this.threadStore.prepareAgentTurn(threadId, questionMessageId);
     const question = storedThread.messages.find(
       (message) => message.id === questionMessageId && message.role === "user"
     );
     if (!question) throw new Error(`question message not found: ${questionMessageId}`);
     const thread = branchThreadForQuestion(storedThread, questionMessageId);
-    const editRequested = this.documentEdits && wantsDocumentEdit(content);
     let answer;
 
     try {
@@ -285,79 +296,34 @@ export class ConversationService {
         question: content,
         document: agentSnapshot.document,
         thread,
-        mode: editRequested ? "edit-document" : "chat",
+        mode: "chat",
         onUpdate: (update) => this.publishAgentUpdate(progress, update)
       });
-
-      updatedDocument = await this.document.verifyAgentSnapshot(agentSnapshot);
-      snapshotVerified = true;
     } catch (initialError) {
       if (initialError instanceof ConversationConflictError) throw initialError;
-      let error = initialError;
-      if (!snapshotVerified) {
-        try {
-          updatedDocument = await this.document.verifyAgentSnapshot(agentSnapshot);
-        } catch (guardError) {
-          if (guardError?.document) updatedDocument = guardError.document;
-          error = guardError;
-        }
-      }
       return this.persistAgentFailure(
         threadId,
         questionMessageId,
-        error,
-        updatedDocument,
-        thread.revision
+        initialError,
+        agentSnapshot,
+        thread.revision,
+        { progress }
       );
     }
 
-    if (editRequested) {
-      const edits = extractDocumentEdits(answer.content);
-      if (edits === null) {
-        return this.persistAgentFailure(
-          threadId,
-          questionMessageId,
-          new Error("Codex did not return valid Xuanniao document edit blocks."),
-          updatedDocument,
-          thread.revision
-        );
-      }
-      const message = assistantMessageForAnswer({
-        ...answer,
-        content: `Applied ${edits.length} edit${edits.length === 1 ? "" : "s"} to the document.`,
-        appliedEdit: true
-      });
-      const applied = await this.document.applyDocumentEdits({
-        expectedRevision: agentSnapshot.revision,
-        edits,
-        threadId,
-        agentTurn: {
-          userMessageId: questionMessageId,
-          message,
-          agentSession: answer.session,
-          expectedBranchRevision: thread.revision
-        }
-      });
-      updatedDocument = applied.document;
-      return {
-        assistantMessage: applied.assistantMessage,
-        agentOutcome: "completed",
-        document: updatedDocument
-      };
-    }
-
-    const assistantMessage = await this.threadStore.completeAgentTurn(
+    const completed = await this.document.completeAgentTurnFromSnapshot({
+      snapshot: agentSnapshot,
       threadId,
-      questionMessageId,
-      assistantMessageForAnswer(answer),
-      answer.session,
-      thread.revision
-    );
+      userMessageId: questionMessageId,
+      message: assistantMessageForAnswer(answer),
+      agentSession: answer.session,
+      expectedBranchRevision: thread.revision
+    });
 
     return {
-      assistantMessage,
+      assistantMessage: completed.assistantMessage,
       agentOutcome: "completed",
-      document: updatedDocument
+      document: completed.document
     };
   }
 
@@ -388,20 +354,23 @@ export class ConversationService {
     threadId,
     questionMessageId,
     error,
-    updatedDocument,
-    expectedBranchRevision
+    agentSnapshot,
+    expectedBranchRevision,
+    { progress = null } = {}
   ) {
     const errorMessage = error instanceof Error ? error.message : String(error);
+    if (progress) progress.error = error instanceof Error ? error : new Error(errorMessage);
     this.onAgentError({
       threadId,
       questionMessageId,
       code: error?.code || null,
       message: errorMessage
     });
-    const assistantMessage = await this.threadStore.completeAgentTurn(
+    const completed = await this.document.completeAgentTurnFromSnapshot({
+      snapshot: agentSnapshot,
       threadId,
-      questionMessageId,
-      {
+      userMessageId: questionMessageId,
+      message: {
         role: "assistant",
         content: agentFailureContent(errorMessage),
         error: true,
@@ -412,13 +381,13 @@ export class ConversationService {
           reasoningEffort: typeof error?.reasoningEffort === "string" ? error.reasoningEffort : null
         }
       },
-      null,
+      agentSession: null,
       expectedBranchRevision
-    );
+    });
     return {
-      assistantMessage,
+      assistantMessage: completed.assistantMessage,
       agentOutcome: "failed",
-      document: updatedDocument
+      document: completed.document
     };
   }
 }
@@ -485,79 +454,4 @@ function agentFailureContent(errorMessage) {
     lines.push("", "Retry the request or inspect the agent runtime status and server log for details.");
   }
   return lines.join("\n");
-}
-
-function wantsDocumentEdit(text) {
-  const normalized = String(text || "").trim();
-  if (!normalized) return false;
-
-  let chineseCommand = normalized;
-  let explicitChineseRequest = false;
-  const politePrefix = /^(?:请你?|麻烦你?|帮我|替我|你)\s*/.exec(chineseCommand);
-  if (politePrefix) {
-    explicitChineseRequest = true;
-    chineseCommand = chineseCommand.slice(politePrefix[0].length);
-  }
-  const directPrefix = /^(?:直接|立即|马上|现在)\s*/.exec(chineseCommand);
-  if (directPrefix) {
-    explicitChineseRequest = true;
-    chineseCommand = chineseCommand.slice(directPrefix[0].length);
-  }
-
-  const chineseEditVerb = /^(?:修改|修复|调整|完善|补充|删除|改成|改为|替换|重写|翻译|翻成英文)/i;
-  const targetsDocument = /文档|本文|Markdown|Mermaid|这一段|这段|此段|这部分|此处|这里|正文|本节|这一节|该章节|这个段落|此段落|选中文字|选中内容|当前内容|文中的|文内/i.test(chineseCommand);
-  const translatesSelection = /^(?:翻译|翻成英文)/.test(chineseCommand);
-  if (!targetsDocument && !translatesSelection) return false;
-  if (/^(?:把|将)/.test(chineseCommand)) {
-    return /修改|修复|调整|完善|补充|删除|改成|改为|替换|重写|翻译|翻成英文/i.test(chineseCommand);
-  }
-  if (chineseEditVerb.test(chineseCommand)) {
-    if (explicitChineseRequest) return true;
-    return !/为什么|为何|怎么|怎样|如何|是否|能否|可否|会不会|有何|有什么|是什么意思|意味着什么/.test(chineseCommand);
-  }
-
-  const englishEditVerb = "(?:translate|rewrite|replace|change|edit|fix|update|delete|remove)";
-  if (!/\b(?:document|markdown|section|paragraph|heading|diagram|mermaid|table|selected text|current text)\b/i.test(normalized)) {
-    return false;
-  }
-  if (new RegExp(`^(?:can|could|would|will)\\s+you\\s+(?:please\\s+)?${englishEditVerb}\\b`, "i").test(normalized)) {
-    return true;
-  }
-  if (new RegExp(`^i\\s+(?:want|need)\\s+you\\s+to\\s+${englishEditVerb}\\b`, "i").test(normalized)) {
-    return true;
-  }
-  if (new RegExp(`^(?:(?:please|directly)\\s+)+${englishEditVerb}\\b`, "i").test(normalized)) {
-    return true;
-  }
-  if (/^(?:how|why|when|where|what|should|is|are|do|does)\b/i.test(normalized)) {
-    return false;
-  }
-  return new RegExp(`^${englishEditVerb}\\b`, "i").test(normalized);
-}
-
-function extractDocumentEdits(content) {
-  const container = /^\s*<XUANNIAO_DOCUMENT_EDITS>([\s\S]*?)<\/XUANNIAO_DOCUMENT_EDITS>\s*$/i.exec(String(content || ""));
-  if (!container) return null;
-  const edits = [];
-  const editPattern = /<XUANNIAO_DOCUMENT_EDIT>([\s\S]*?)<\/XUANNIAO_DOCUMENT_EDIT>/gi;
-  let cursor = 0;
-  let match;
-  while ((match = editPattern.exec(container[1])) !== null) {
-    if (container[1].slice(cursor, match.index).trim()) return null;
-    const fields = /^\s*<XUANNIAO_OLD_TEXT>([\s\S]*?)<\/XUANNIAO_OLD_TEXT>\s*<XUANNIAO_NEW_TEXT>([\s\S]*?)<\/XUANNIAO_NEW_TEXT>\s*$/i.exec(match[1]);
-    if (!fields) return null;
-    const oldText = unwrapEditText(fields[1]);
-    if (!oldText) return null;
-    edits.push({ oldText, newText: unwrapEditText(fields[2]) });
-    if (edits.length > 32) return null;
-    cursor = editPattern.lastIndex;
-  }
-  if (container[1].slice(cursor).trim()) return null;
-  return edits.length > 0 ? edits : null;
-}
-
-function unwrapEditText(value) {
-  return /^\r?\n/.test(value) && /\r?\n$/.test(value)
-    ? value.replace(/^\r?\n/, "").replace(/\r?\n$/, "")
-    : value;
 }

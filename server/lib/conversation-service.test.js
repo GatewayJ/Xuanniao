@@ -12,14 +12,15 @@ import { AgentRunBroker } from "./agent-run-broker.js";
 function createHarness({
   agentError = null,
   completeAgentError = null,
+  documentCompletionError = null,
+  documentChanged = false,
   runTurn = null,
   agentRuns = null,
-  documentEdits = false,
   addMessageBarrier = null
 } = {}) {
   let completeAgentCalls = 0;
   const completeAgentRevisions = [];
-  const documentEditCalls = [];
+  const documentCompletionCalls = [];
   const messages = [{
     id: "root",
     role: "user",
@@ -114,29 +115,38 @@ function createHarness({
     }
   };
   const document = {
+    async withAgentTurn(operation) {
+      return operation();
+    },
     async createAgentSnapshot() {
       return {
         document: { path: "/tmp/plan.md", content: "root", revision: "revision" },
         revision: "revision"
       };
     },
-    async verifyAgentSnapshot() {
-      return null;
-    },
-    async applyDocumentEdits(input) {
-      documentEditCalls.push(input);
-      const saved = {
-        ...input.agentTurn.message,
-        id: "assistant",
-        nodeId: input.agentTurn.userMessageId,
-        parentId: input.agentTurn.userMessageId,
-        createdAt: "now"
-      };
-      messages.push(saved);
+    async completeAgentTurnFromSnapshot(input) {
+      documentCompletionCalls.push(input);
+      if (documentCompletionError) throw documentCompletionError;
+      const saved = await store.completeAgentTurn(
+        input.threadId,
+        input.userMessageId,
+        {
+          ...input.message,
+          meta: {
+            ...(input.message.meta || {}),
+            appliedEdit: documentChanged
+          }
+        },
+        input.agentSession,
+        input.expectedBranchRevision
+      );
       return {
-        document: { path: "/tmp/plan.md", content: input.edits[0].newText, revision: "updated" },
+        document: documentChanged
+          ? { path: "/tmp/plan.md", content: "updated document", revision: "updated" }
+          : null,
         assistantMessage: saved,
-        threads: [thread]
+        threads: documentChanged ? [thread] : null,
+        changed: documentChanged
       };
     }
   };
@@ -158,13 +168,12 @@ function createHarness({
       threadStore: store,
       document,
       agent,
-      agentRuns,
-      documentEdits
+      agentRuns
     }),
     messages,
     completeAgentCalls: () => completeAgentCalls,
     completeAgentRevisions,
-    documentEditCalls
+    documentCompletionCalls
   };
 }
 
@@ -487,25 +496,14 @@ test("conversation persistence errors are not misreported as agent failures", as
   assert.equal(messages.some((message) => message.role === "assistant"), false);
 });
 
-test("document edits are independent from the discussion root selection", async () => {
+test("Codex directly edits the document and Xuanniao reconciles the completed turn", async () => {
   let turnInput = null;
-  const { service, completeAgentCalls, documentEditCalls } = createHarness({
-    documentEdits: true,
+  const { service, completeAgentCalls, documentCompletionCalls } = createHarness({
+    documentChanged: true,
     runTurn: async (input) => {
       turnInput = input;
       return {
-        content: [
-          "<XUANNIAO_DOCUMENT_EDITS>",
-          "<XUANNIAO_DOCUMENT_EDIT>",
-          "<XUANNIAO_OLD_TEXT>",
-          "mermaid diagram",
-          "</XUANNIAO_OLD_TEXT>",
-          "<XUANNIAO_NEW_TEXT>",
-          "updated diagram",
-          "</XUANNIAO_NEW_TEXT>",
-          "</XUANNIAO_DOCUMENT_EDIT>",
-          "</XUANNIAO_DOCUMENT_EDITS>"
-        ].join("\n"),
+        content: "Updated the Mermaid diagram in the document.",
         stopReason: "completed",
         transport: "test",
         updates: [],
@@ -521,96 +519,31 @@ test("document edits are independent from the discussion root selection", async 
   });
 
   assert.equal(result.agentOutcome, "completed");
-  assert.equal(result.document.content, "updated diagram");
-  assert.equal(completeAgentCalls(), 0);
-  assert.equal(turnInput.mode, "edit-document");
-  assert.equal(turnInput.thread.selectedText, "root");
-  assert.equal(documentEditCalls.length, 1);
-  assert.deepEqual(documentEditCalls[0].edits, [{
-    oldText: "mermaid diagram",
-    newText: "updated diagram"
-  }]);
-  assert.equal(documentEditCalls[0].agentTurn.message.meta.appliedEdit, true);
-  assert.match(documentEditCalls[0].agentTurn.expectedBranchRevision, /^[a-f0-9]{64}$/);
-});
-
-test("document edits reject a partially malformed multi-edit protocol", async () => {
-  const { service, completeAgentCalls, documentEditCalls } = createHarness({
-    documentEdits: true,
-    runTurn: async () => ({
-      content: [
-        "<XUANNIAO_DOCUMENT_EDITS>",
-        "<XUANNIAO_DOCUMENT_EDIT>",
-        "<XUANNIAO_OLD_TEXT>first</XUANNIAO_OLD_TEXT>",
-        "<XUANNIAO_NEW_TEXT>updated first</XUANNIAO_NEW_TEXT>",
-        "</XUANNIAO_DOCUMENT_EDIT>",
-        "<XUANNIAO_DOCUMENT_EDIT>",
-        "<XUANNIAO_OLD_TEXT>second</XUANNIAO_OLD_TEXT>",
-        "<XUANNIAO_NEW_TEXT>updated second</XUANNIAO_NEW_TEXT>",
-        "</XUANNIAO_DOCUMENT_EDITS>"
-      ].join("\n"),
-      stopReason: "completed",
-      transport: "test",
-      updates: [],
-      session: null
-    })
-  });
-
-  const result = await service.addQuestion("thread-1", {
-    content: "直接修改文档",
-    parentMessageId: "root",
-    askAgent: true
-  });
-
-  assert.equal(result.agentOutcome, "failed");
-  assert.equal(result.assistantMessage.error, true);
+  assert.equal(result.document.content, "updated document");
   assert.equal(completeAgentCalls(), 1);
-  assert.equal(documentEditCalls.length, 0);
+  assert.equal(turnInput.mode, "chat");
+  assert.equal(turnInput.thread.selectedText, "root");
+  assert.equal(documentCompletionCalls.length, 1);
+  assert.equal(documentCompletionCalls[0].snapshot.revision, "revision");
+  assert.match(documentCompletionCalls[0].expectedBranchRevision, /^[a-f0-9]{64}$/);
+  assert.equal(result.assistantMessage.meta.appliedEdit, true);
 });
 
-test("reviewing an existing update remains a discussion instead of a document edit", async () => {
-  let turnMode = null;
-  const { service } = createHarness({
-    documentEdits: true,
-    runTurn: async (input) => {
-      turnMode = input.mode;
-      return {
-        content: "reviewed",
-        stopReason: "completed",
-        transport: "test",
-        updates: [],
-        session: null
-      };
-    }
-  });
-
-  const result = await service.addQuestion("thread-1", {
-    content: "Review the update",
-    parentMessageId: "root",
-    askAgent: true
-  });
-
-  assert.equal(result.agentOutcome, "completed");
-  assert.equal(turnMode, "chat");
-});
-
-test("questions that mention edit verbs remain discussions", async () => {
-  const questions = [
-    "解释一下为什么删除这段会出错",
+test("document intent is left to Codex instead of being classified by Xuanniao", async () => {
+  const requests = [
+    "好的。那么你来修复这图，注意不要偏移",
+    "好，那就修改这张图",
     "修改这一段会有什么影响？",
-    "How should I fix this?",
-    "请修改设置页面的权限选项",
-    "Please fix the settings page"
+    "How should I fix this?"
   ];
 
-  for (const content of questions) {
+  for (const content of requests) {
     let turnMode = null;
     const { service } = createHarness({
-      documentEdits: true,
       runTurn: async (input) => {
         turnMode = input.mode;
         return {
-          content: "explained",
+          content: "handled",
           stopReason: "completed",
           transport: "test",
           updates: [],
@@ -628,6 +561,42 @@ test("questions that mention edit verbs remain discussions", async () => {
     assert.equal(result.agentOutcome, "completed", content);
     assert.equal(turnMode, "chat", content);
   }
+});
+
+test("an agent failure still reconciles a document change made before the failure", async () => {
+  const agentRuns = new AgentRunBroker();
+  agentRuns.reserve("edit_failure_12345678");
+  const failure = Object.assign(new Error("tool failed after editing"), {
+    updates: [{ type: "reasoning", status: "completed" }],
+    durationMs: 25,
+    model: "test-model",
+    reasoningEffort: "high"
+  });
+  const { service, completeAgentCalls, documentCompletionCalls } = createHarness({
+    agentRuns,
+    documentChanged: true,
+    agentError: failure
+  });
+
+  const result = await service.addQuestion("thread-1", {
+    content: "修改文档",
+    parentMessageId: "root",
+    askAgent: true,
+    agentRunId: "edit_failure_12345678"
+  });
+
+  assert.equal(result.agentOutcome, "failed");
+  assert.equal(result.assistantMessage.error, true);
+  assert.match(result.assistantMessage.content, /tool failed after editing/);
+  assert.equal(result.assistantMessage.meta.durationMs, 25);
+  assert.equal(result.assistantMessage.meta.model, "test-model");
+  assert.equal(result.assistantMessage.meta.appliedEdit, true);
+  assert.equal(result.document.content, "updated document");
+  assert.equal(completeAgentCalls(), 1);
+  assert.equal(documentCompletionCalls.length, 1);
+  assert.equal(agentRuns.snapshot("edit_failure_12345678").status, "failed");
+  assert.match(agentRuns.snapshot("edit_failure_12345678").error, /tool failed after editing/);
+  agentRuns.dispose();
 });
 
 test("threads and messages cannot be deleted while an agent reply is active", async () => {

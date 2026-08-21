@@ -13,10 +13,14 @@ function threadStoreStub({ failUpdates = false, failCompletion = false } = {}) {
       await reconciler([]);
       return [];
     },
-    async completeAgentTurnWithAnchorReconciliation({ reconcile }) {
+    async completeAgentTurn(_threadId, _userMessageId, message) {
+      if (failCompletion) throw new Error("agent turn commit failed");
+      return message;
+    },
+    async completeAgentTurnWithAnchorReconciliation({ reconcile, message }) {
       await reconcile([]);
       if (failCompletion) throw new Error("agent turn commit failed");
-      return { assistantMessage: {}, threads: [] };
+      return { assistantMessage: message, threads: [] };
     }
   };
 }
@@ -136,45 +140,33 @@ test("document content rolls back when anchor persistence fails", async () => {
   }
 });
 
-test("document edits roll back when the coordinated agent turn cannot commit", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-replacement-rollback-"));
+test("unchanged agent turns commit without returning a document update", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-unchanged-agent-turn-"));
   const documentPath = path.join(tempDir, "plan.md");
-  const thread = {
-    id: "thread-1",
-    selectedText: "selected",
-    anchor: { start: 7, end: 15, lineStart: 1, lineEnd: 1, blockId: null }
-  };
 
   try {
-    await writeFile(documentPath, "before selected after", "utf8");
-    const workspace = new DocumentWorkspace(
-      documentPath,
-      threadStoreStub({ failCompletion: true })
-    );
-    const original = await workspace.payload();
+    await writeFile(documentPath, "unchanged", "utf8");
+    const workspace = new DocumentWorkspace(documentPath, threadStoreStub());
+    const snapshot = await workspace.createAgentSnapshot();
+    const result = await workspace.completeAgentTurnFromSnapshot({
+      snapshot,
+      threadId: "thread-1",
+      userMessageId: "question-1",
+      message: { role: "assistant", content: "answer", meta: {} },
+      agentSession: null,
+      expectedBranchRevision: "branch-revision"
+    });
 
-    await assert.rejects(
-      workspace.applyDocumentEdits({
-        expectedRevision: original.revision,
-        edits: [{ oldText: "selected", newText: "changed" }],
-        threadId: thread.id,
-        agentTurn: {
-          userMessageId: "question-1",
-          message: { role: "assistant", content: "answer" },
-          agentSession: null,
-          expectedBranchRevision: "branch-revision"
-        }
-      }),
-      /agent turn commit failed/
-    );
-    assert.equal(await readFile(documentPath, "utf8"), "before selected after");
+    assert.equal(result.document, null);
+    assert.equal(result.changed, false);
+    assert.equal(result.assistantMessage.meta.appliedEdit, false);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
 
-test("document edits can target content outside the discussion root and preserve its anchor", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-document-edits-"));
+test("direct document edits outside the discussion root preserve its anchor", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-direct-document-edit-"));
   const documentPath = path.join(tempDir, "plan.md");
   const content = "Feishu / Lark\n\n```mermaid\ngraph TD\n  A --> B\n```\n";
   const thread = {
@@ -184,27 +176,29 @@ test("document edits can target content outside the discussion root and preserve
   };
   let savedPatches = [];
   const store = {
-    async reconcileAnchors(reconciler) {
-      const update = await reconciler([thread]);
+    async completeAgentTurnWithAnchorReconciliation({ reconcile, message }) {
+      const update = await reconcile([thread]);
       savedPatches = update.patches;
-      return update.patches;
+      return { assistantMessage: message, threads: update.patches };
     }
   };
 
   try {
     await writeFile(documentPath, content, "utf8");
     const workspace = new DocumentWorkspace(documentPath, store);
-    const original = await workspace.payload();
-    const result = await workspace.applyDocumentEdits({
-      expectedRevision: original.revision,
-      edits: [{
-        oldText: "graph TD\n  A --> B",
-        newText: "graph TD\n  A --> B\n  B --> C"
-      }],
-      threadId: thread.id
+    const snapshot = await workspace.createAgentSnapshot();
+    await writeFile(documentPath, content.replace("  A --> B", "  A --> B\n  B --> C"), "utf8");
+    const result = await workspace.completeAgentTurnFromSnapshot({
+      snapshot,
+      threadId: thread.id,
+      userMessageId: "question-1",
+      message: { role: "assistant", content: "updated", meta: {} },
+      agentSession: null,
+      expectedBranchRevision: "branch-revision"
     });
 
     assert.match(result.document.content, /B --> C/);
+    assert.equal(result.assistantMessage.meta.appliedEdit, true);
     assert.equal(savedPatches[0].selectedText, "Feishu / Lark");
     assert.equal(savedPatches[0].anchor.start, 0);
     assert.equal(savedPatches[0].anchor.end, 13);
@@ -213,32 +207,48 @@ test("document edits can target content outside the discussion root and preserve
   }
 });
 
-test("document edits reject ambiguous targets without changing the file", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-ambiguous-edit-"));
+test("direct edits preserve the active discussion root when its selected text changes", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-active-root-edit-"));
   const documentPath = path.join(tempDir, "plan.md");
-  const content = "same\nother\nsame\n";
+  const content = "before selected text after";
+  const thread = {
+    id: "thread-1",
+    selectedText: "selected text",
+    anchor: { start: 7, end: 20, lineStart: 1, lineEnd: 1, blockId: null }
+  };
+  let savedPatches = [];
+  const store = {
+    async completeAgentTurnWithAnchorReconciliation({ reconcile, message }) {
+      const update = await reconcile([thread]);
+      savedPatches = update.patches;
+      return { assistantMessage: message, threads: update.patches };
+    }
+  };
 
   try {
     await writeFile(documentPath, content, "utf8");
-    const workspace = new DocumentWorkspace(documentPath, threadStoreStub());
-    const original = await workspace.payload();
+    const workspace = new DocumentWorkspace(documentPath, store);
+    const snapshot = await workspace.createAgentSnapshot();
+    await writeFile(documentPath, "before improved text after", "utf8");
+    await workspace.completeAgentTurnFromSnapshot({
+      snapshot,
+      threadId: thread.id,
+      userMessageId: "question-1",
+      message: { role: "assistant", content: "updated", meta: {} },
+      agentSession: null,
+      expectedBranchRevision: "branch-revision"
+    });
 
-    await assert.rejects(
-      workspace.applyDocumentEdits({
-        expectedRevision: original.revision,
-        edits: [{ oldText: "same", newText: "changed" }],
-        threadId: "thread-1"
-      }),
-      /occurs exactly once/
-    );
-    assert.equal(await readFile(documentPath, "utf8"), content);
+    assert.equal(savedPatches[0].selectedText, "improved text");
+    assert.equal(savedPatches[0].anchor.start, 7);
+    assert.equal(savedPatches[0].anchor.end, 20);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
 });
 
-test("multiple document edits remap a discussion anchor through every change", async () => {
-  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-multiple-edits-"));
+test("separate direct edits remap an unchanged discussion anchor through every change", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-multiple-direct-edits-"));
   const documentPath = path.join(tempDir, "plan.md");
   const content = "alpha root omega";
   const thread = {
@@ -248,30 +258,135 @@ test("multiple document edits remap a discussion anchor through every change", a
   };
   let savedPatches = [];
   const store = {
-    async reconcileAnchors(reconciler) {
-      const update = await reconciler([thread]);
+    async completeAgentTurnWithAnchorReconciliation({ reconcile, message }) {
+      const update = await reconcile([thread]);
       savedPatches = update.patches;
-      return update.patches;
+      return { assistantMessage: message, threads: update.patches };
     }
   };
 
   try {
     await writeFile(documentPath, content, "utf8");
     const workspace = new DocumentWorkspace(documentPath, store);
-    const original = await workspace.payload();
-    const result = await workspace.applyDocumentEdits({
-      expectedRevision: original.revision,
-      edits: [
-        { oldText: "alpha", newText: "alphabet" },
-        { oldText: "omega", newText: "end" }
-      ],
-      threadId: thread.id
+    const snapshot = await workspace.createAgentSnapshot();
+    await writeFile(documentPath, "alphabet root end", "utf8");
+    const result = await workspace.completeAgentTurnFromSnapshot({
+      snapshot,
+      threadId: thread.id,
+      userMessageId: "question-1",
+      message: { role: "assistant", content: "updated", meta: {} },
+      agentSession: null,
+      expectedBranchRevision: "branch-revision"
     });
 
     assert.equal(result.document.content, "alphabet root end");
     assert.equal(savedPatches[0].selectedText, "root");
     assert.equal(savedPatches[0].anchor.start, 9);
     assert.equal(savedPatches[0].anchor.end, 13);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a failed metadata commit does not overwrite a direct Codex edit", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-direct-edit-commit-failure-"));
+  const documentPath = path.join(tempDir, "plan.md");
+
+  try {
+    await writeFile(documentPath, "before", "utf8");
+    const workspace = new DocumentWorkspace(
+      documentPath,
+      threadStoreStub({ failCompletion: true })
+    );
+    const snapshot = await workspace.createAgentSnapshot();
+    await writeFile(documentPath, "after", "utf8");
+
+    await assert.rejects(
+      workspace.completeAgentTurnFromSnapshot({
+        snapshot,
+        threadId: "thread-1",
+        userMessageId: "question-1",
+        message: { role: "assistant", content: "answer" },
+        agentSession: null,
+        expectedBranchRevision: "branch-revision"
+      }),
+      /agent turn commit failed/
+    );
+    assert.equal(await readFile(documentPath, "utf8"), "after");
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("agent turns for the same document are serialized", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-agent-turn-lock-"));
+  const documentPath = path.join(tempDir, "plan.md");
+  let releaseFirst;
+  let firstStarted;
+  const firstStartedPromise = new Promise((resolve) => {
+    firstStarted = resolve;
+  });
+  const firstGate = new Promise((resolve) => {
+    releaseFirst = resolve;
+  });
+  const order = [];
+
+  try {
+    await writeFile(documentPath, "document", "utf8");
+    const firstWorkspace = new DocumentWorkspace(documentPath, threadStoreStub());
+    const secondWorkspace = new DocumentWorkspace(documentPath, threadStoreStub());
+    const first = firstWorkspace.withAgentTurn(async () => {
+      order.push("first-start");
+      firstStarted();
+      await firstGate;
+      order.push("first-end");
+    });
+    await firstStartedPromise;
+    const second = secondWorkspace.withAgentTurn(async () => {
+      order.push("second-start");
+      order.push("second-end");
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(order, ["first-start"]);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    assert.deepEqual(order, ["first-start", "first-end", "second-start", "second-end"]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("a controlled save during an agent turn is not attributed to Codex", async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-agent-save-conflict-"));
+  const documentPath = path.join(tempDir, "plan.md");
+
+  try {
+    await writeFile(documentPath, "before", "utf8");
+    const workspace = new DocumentWorkspace(documentPath, threadStoreStub());
+    const concurrentWorkspace = new DocumentWorkspace(documentPath, threadStoreStub());
+    const snapshot = await workspace.createAgentSnapshot();
+    await concurrentWorkspace.save({
+      content: "user save",
+      expectedRevision: snapshot.revision
+    });
+    await writeFile(documentPath, "later file write", "utf8");
+
+    await assert.rejects(
+      workspace.completeAgentTurnFromSnapshot({
+        snapshot,
+        threadId: "thread-1",
+        userMessageId: "question-1",
+        message: { role: "assistant", content: "answer" },
+        agentSession: null,
+        expectedBranchRevision: "branch-revision"
+      }),
+      (error) => (
+        error instanceof AgentDocumentMutationError &&
+        error.document.content === "later file write"
+      )
+    );
+    assert.equal(await readFile(documentPath, "utf8"), "later file write");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

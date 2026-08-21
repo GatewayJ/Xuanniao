@@ -200,10 +200,6 @@ export class CodexAppServerRuntime {
       const hash = documentHash(document.content);
       const previousDocument = this.documentSnapshots.get(session.sessionId);
       const includeDocument = session.documentHash !== hash;
-      const unsyncedMessages = thread.unsyncedCurrentNodeMessages || [];
-      const includeHistory = session.historyMode !== "inherited" || unsyncedMessages.length > 0;
-      const history =
-        session.historyMode === "inherited" ? unsyncedMessages : session.historyMode === "forked" ? thread.currentNodeMessages || [] : thread.messages || [];
       const prompt = buildAgentPrompt({
         question,
         document,
@@ -211,8 +207,6 @@ export class CodexAppServerRuntime {
         mode,
         accessMode: turnAccessMode,
         includeDocument,
-        includeHistory,
-        history,
         previousDocument: includeDocument ? (previousDocument ?? null) : null,
         maxChars: this.contextMaxChars
       });
@@ -354,7 +348,7 @@ export class CodexAppServerRuntime {
         return this.createThread(thread, permissionMode);
       }
       this.threadOwners.set(stored.sessionId, thread.id);
-      return { ...stored, ...this.settingsForThread(stored.sessionId), historyMode: "inherited" };
+      return { ...stored, ...this.settingsForThread(stored.sessionId) };
     }
 
     const parent = sessionForAdapter(thread.parentAgentSession, adapterName);
@@ -377,8 +371,7 @@ export class CodexAppServerRuntime {
           sessionId,
           turnId: null,
           documentHash: parent.documentHash,
-          ...this.settingsForThread(sessionId),
-          historyMode: "forked"
+          ...this.settingsForThread(sessionId)
         };
       } catch {
         return this.createThread(thread, permissionMode);
@@ -407,8 +400,7 @@ export class CodexAppServerRuntime {
       sessionId,
       turnId: null,
       documentHash: null,
-      ...this.settingsForThread(sessionId),
-      historyMode: "fresh"
+      ...this.settingsForThread(sessionId)
     };
   }
 
