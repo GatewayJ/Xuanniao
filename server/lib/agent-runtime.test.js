@@ -3,6 +3,9 @@ import test from "node:test";
 
 import { AcpDocumentAgent } from "./acp-client.js";
 import { assertAgentRuntime, createAgentRuntime, normalizeAgentTransport, runtimeAgentSettingsFromEnv } from "./agent-runtime.js";
+import { DEFAULT_NODE_QUICK_ACTIONS } from "./agent-settings.js";
+
+const defaultQuickActions = DEFAULT_NODE_QUICK_ACTIONS.map((action) => ({ ...action }));
 import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
 
 test("native Codex is the default transport and ACP remains explicit", () => {
@@ -56,10 +59,11 @@ test("persisted runtime settings override environment values including explicit 
     XUANNIAO_CODEX_MODEL: "env-model",
     XUANNIAO_CODEX_REASONING_EFFORT: "high"
   }), {
-    version: 2,
+    version: 3,
     model: "env-model",
     reasoningEffort: "high",
-    permissionMode: "request-approval"
+    permissionMode: "request-approval",
+    quickActions: defaultQuickActions
   });
 
   const runtime = createAgentRuntime({

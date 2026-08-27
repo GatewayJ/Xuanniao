@@ -15,6 +15,7 @@ import { useMessageSelection } from "../hooks/useMessageSelection";
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { useRenderedPreview } from "../hooks/useRenderedPreview";
 import { renderMessageMarkdown } from "../markdown";
+import { nodeQuickActions } from "../quick-actions";
 import { formatRelativeTime } from "../relative-time";
 import { resolveThreadAnchor } from "../thread-anchors";
 import {
@@ -34,7 +35,7 @@ import {
   conversationNodeStatus,
   flattenConversationTree
 } from "../thread-tree";
-import type { AgentSettingsPayload, BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
+import type { AgentSettingsPayload, BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, NodeQuickAction, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
 import { PermissionRequestPanel } from "./PermissionRequestPanel";
 
 const THREAD_PANE_DIVIDER_WIDTH = 6;
@@ -49,14 +50,6 @@ const NODE_KIND_META: Record<ConversationNodeKind, { label: string; shortLabel: 
   task: { label: "任务", shortLabel: "任" }
 };
 
-const NODE_QUICK_ACTIONS = [
-  { id: "expand", label: "发散" },
-  { id: "critique", label: "审查" },
-  { id: "decide", label: "收敛" },
-  { id: "task", label: "转任务" }
-] as const;
-
-type NodeQuickActionId = typeof NODE_QUICK_ACTIONS[number]["id"];
 type NodeCreationMode = "child" | "branch";
 type ThreadQuestionCommand = Omit<ConversationMessageCommand, "threadId" | "askAgent">;
 
@@ -648,15 +641,16 @@ export function ThreadDetailModal(props: {
   const selectedNodeOrigin = selectedNode ? messageBranchSelection(selectedNode.question) : null;
   const selectedNodeKind = selectedNode ? conversationNodeKind(selectedNode) : "question";
   const effectiveAgentSettings = agentSettingsSummary(props.agentSettings);
+  const quickActions = nodeQuickActions(props.agentSettings);
   const semanticStats = useMemo(() => conversationSemanticStats(nodes), [nodes]);
   const lineLabel = lineStart
     ? `第 ${lineStart}${lineEnd && lineEnd !== lineStart ? `–${lineEnd}` : ""} 行`
     : "未锚定";
 
-  function applyNodeQuickAction(actionId: NodeQuickActionId) {
+  function applyNodeQuickAction(action: NodeQuickAction) {
     if (!selectedNode) return;
     clearCapturedMessageSelection();
-    props.setMessageDraft(draftKey, promptForNodeQuickAction(actionId, selectedNode));
+    props.setMessageDraft(draftKey, promptForNodeQuickAction(action.prompt));
     window.getSelection()?.removeAllRanges();
     window.requestAnimationFrame(() => composerRef.current?.focus());
   }
@@ -1114,11 +1108,12 @@ export function ThreadDetailModal(props: {
                             </select>
                           </label>
                           <div className="threadNodeQuickActions" aria-label="AI 快捷操作">
-                            {NODE_QUICK_ACTIONS.map((action) => (
+                            {quickActions.map((action) => (
                               <button
                                 key={action.id}
                                 type="button"
-                                onClick={() => applyNodeQuickAction(action.id)}
+                                title={action.prompt}
+                                onClick={() => applyNodeQuickAction(action)}
                               >
                                 {action.label}
                               </button>
@@ -1562,28 +1557,8 @@ function conversationSemanticStats(nodes: ReturnType<typeof flattenConversationT
   return stats;
 }
 
-function promptForNodeQuickAction(actionId: NodeQuickActionId, node: ReturnType<typeof flattenConversationTree>[number]): string {
-  const kindLabel = NODE_KIND_META[conversationNodeKind(node)].label;
-  const latestAnswer = node.messages.filter((message) => message.role === "assistant" && !message.error).at(-1)?.content || "";
-  const context = [
-    `当前节点类型：${kindLabel}`,
-    `当前问题：${node.question.content.trim()}`,
-    latestAnswer ? `当前回答摘要：${truncatePlainText(latestAnswer, 260)}` : ""
-  ].filter(Boolean).join("\n");
-
-  const actionPrompts: Record<NodeQuickActionId, string> = {
-    expand: "请基于当前节点发散 3 个值得继续探索的子方向。每个方向说明为什么重要、适合验证什么，以及建议优先级。",
-    critique: "请审查当前节点：列出关键假设、主要风险、可能反例、缺失证据，并给出最应该先追问的一个问题。",
-    decide: "请把当前节点收敛成一个决策建议：给出推荐选择、理由、取舍、仍不确定的点和下一步动作。",
-    task: "请把当前节点转成可执行任务：拆成步骤、验收标准、依赖项、风险和建议负责人角色。"
-  };
-
-  return `${actionPrompts[actionId]}\n\n${context}`;
-}
-
-function truncatePlainText(content: string, maxLength: number): string {
-  const normalized = content.replace(/```[\s\S]*?```/g, " ").replace(/\s+/g, " ").trim();
-  return normalized.length > maxLength ? `${normalized.slice(0, maxLength)}…` : normalized;
+export function promptForNodeQuickAction(prompt: string): string {
+  return prompt.trim();
 }
 
 function ThreadMessageDetail(props: {

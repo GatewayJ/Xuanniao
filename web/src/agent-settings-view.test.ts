@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { agentSettingsSummary, effortLabel } from "./agent-settings-view";
+import { DEFAULT_NODE_QUICK_ACTIONS } from "./quick-actions";
 
 test("agent settings summary reports the effective model and reasoning depth", () => {
   assert.equal(agentSettingsSummary({
@@ -11,6 +12,7 @@ test("agent settings summary reports the effective model and reasoning depth", (
     model: "gpt-sol",
     reasoningEffort: "max",
     permissionMode: "auto-review",
+    quickActions: [...DEFAULT_NODE_QUICK_ACTIONS],
     models: [{
       id: "gpt-sol",
       model: "gpt-sol",
@@ -33,6 +35,7 @@ test("agent settings summary resolves Codex defaults", () => {
     model: null,
     reasoningEffort: null,
     permissionMode: "request-approval",
+    quickActions: [...DEFAULT_NODE_QUICK_ACTIONS],
     models: [{
       id: "gpt-default",
       model: "gpt-default",

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
+import { DEFAULT_NODE_QUICK_ACTIONS } from "../quick-actions";
 import { SettingsModal } from "./SettingsModal";
 
 test("settings modal exposes the four Codex permission modes", () => {
@@ -15,6 +16,7 @@ test("settings modal exposes the four Codex permission modes", () => {
         model: null,
         reasoningEffort: null,
         permissionMode: "request-approval",
+        quickActions: [...DEFAULT_NODE_QUICK_ACTIONS],
         models: [],
         catalogError: null
       }}
@@ -34,6 +36,13 @@ test("settings modal exposes the four Codex permission modes", () => {
   assert.match(html, /<select id="permission-mode"/);
   assert.doesNotMatch(html, /type="radio"/);
   assert.doesNotMatch(html, /原生 Codex/);
+  assert.match(html, /<strong>快捷操作<\/strong><small>节点操作与提示词<\/small>/);
+  assert.match(html, /class="settingsCategoryPanel hidden"/);
+  assert.match(html, /节点快捷操作/);
+  assert.doesNotMatch(html, />添加操作<\/button>/);
+  assert.match(html, /aria-label="快捷操作 1 名称"/);
+  assert.match(html, /value="发散"/);
+  assert.match(html, /删除快捷操作 发散/);
 });
 
 test("settings modal renders model selection as a dropdown", () => {
@@ -47,6 +56,7 @@ test("settings modal renders model selection as a dropdown", () => {
         model: null,
         reasoningEffort: null,
         permissionMode: "request-approval",
+        quickActions: [...DEFAULT_NODE_QUICK_ACTIONS],
         models: [{
           id: "gpt-5.6-sol",
           model: "gpt-5.6-sol",
@@ -82,6 +92,7 @@ test("permission mode remains saveable when only the model catalog is unavailabl
         model: null,
         reasoningEffort: null,
         permissionMode: "request-approval",
+        quickActions: [...DEFAULT_NODE_QUICK_ACTIONS],
         models: [],
         catalogError: "Codex is temporarily unavailable"
       }}

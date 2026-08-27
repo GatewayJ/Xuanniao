@@ -5,6 +5,9 @@ import path from "node:path";
 import test from "node:test";
 
 import { AgentSettingsStore } from "./agent-settings-store.js";
+import { DEFAULT_NODE_QUICK_ACTIONS } from "./agent-settings.js";
+
+const defaultQuickActions = DEFAULT_NODE_QUICK_ACTIONS.map((action) => ({ ...action }));
 
 test("agent settings store falls back, persists, and reloads atomically", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "xuanniao-agent-settings-"));
@@ -13,15 +16,17 @@ test("agent settings store falls back, persists, and reloads atomically", async 
 
   try {
     assert.deepEqual(await store.load({ model: "env-model", reasoningEffort: "low" }), {
-      version: 2,
+      version: 3,
       model: "env-model",
       reasoningEffort: "low",
-      permissionMode: "request-approval"
+      permissionMode: "request-approval",
+      quickActions: defaultQuickActions
     });
     const saved = await store.save({
       model: "saved-model",
       reasoningEffort: "high",
-      permissionMode: "full-access"
+      permissionMode: "full-access",
+      quickActions: [{ id: "summary", label: "总结", prompt: "总结当前节点" }]
     });
     assert.deepEqual(await store.load({ model: "env-model" }), saved);
     assert.deepEqual(JSON.parse(await readFile(filePath, "utf8")), saved);

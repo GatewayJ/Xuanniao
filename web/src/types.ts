@@ -208,6 +208,12 @@ export type AgentModelOption = {
 
 export type AgentPermissionMode = "request-approval" | "auto-review" | "full-access" | "custom";
 
+export type NodeQuickAction = {
+  id: string;
+  label: string;
+  prompt: string;
+};
+
 export type AgentSettingsPayload = {
   transport: string;
   modelSelectionSupported: boolean;
@@ -215,6 +221,7 @@ export type AgentSettingsPayload = {
   model: string | null;
   reasoningEffort: string | null;
   permissionMode: AgentPermissionMode;
+  quickActions: NodeQuickAction[];
   models: AgentModelOption[];
   catalogError: string | null;
 };

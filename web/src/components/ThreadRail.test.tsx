@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import { defaultThreadPaneWidths, threadDetailEscapeTarget, ThreadDetailModal } from "./ThreadRail";
+import { defaultThreadPaneWidths, promptForNodeQuickAction, threadDetailEscapeTarget, ThreadDetailModal } from "./ThreadRail";
 import type { Thread } from "../types";
 
 const at = "2026-08-27T00:00:00.000Z";
@@ -81,4 +81,10 @@ test("thread detail defaults its three panes to a 3:5:2 ratio", () => {
 test("Escape closes the thread detail directly when no selection popover is open", () => {
   assert.equal(threadDetailEscapeTarget(false), "modal");
   assert.equal(threadDetailEscapeTarget(true), "selection");
+});
+
+test("custom node quick action uses only its configured prompt", () => {
+  const prompt = promptForNodeQuickAction("  请执行我的自定义操作。\n");
+
+  assert.equal(prompt, "请执行我的自定义操作。");
 });

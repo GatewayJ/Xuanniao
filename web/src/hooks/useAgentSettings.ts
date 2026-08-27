@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { api } from "../api";
-import type { AgentPermissionMode, AgentSettingsPayload } from "../types";
+import type { AgentPermissionMode, AgentSettingsPayload, NodeQuickAction } from "../types";
 
 type AgentSettingsOptions = {
   setStatus: (status: string) => void;
@@ -54,7 +54,8 @@ export function useAgentSettings({ setStatus }: AgentSettingsOptions) {
   async function saveSettings(
     model: string | null,
     reasoningEffort: string | null,
-    permissionMode: AgentPermissionMode
+    permissionMode: AgentPermissionMode,
+    quickActions: NodeQuickAction[]
   ) {
     requestRef.current?.abort();
     const request = new AbortController();
@@ -62,10 +63,10 @@ export function useAgentSettings({ setStatus }: AgentSettingsOptions) {
     setSaving(true);
     setError("");
     try {
-      const payload = await api.updateSettings({ model, reasoningEffort, permissionMode }, request.signal);
+      const payload = await api.updateSettings({ model, reasoningEffort, permissionMode, quickActions }, request.signal);
       if (request.signal.aborted) return;
       setData(payload);
-      setStatus("Codex 设置已保存，将从下一轮提问生效");
+      setStatus("设置已保存");
       setOpen(false);
     } catch (saveError) {
       if (!request.signal.aborted) {

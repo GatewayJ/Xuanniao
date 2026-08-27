@@ -390,6 +390,7 @@ function settingsPayload(agent, models, catalogError) {
     model: agentSettings.model,
     reasoningEffort: agentSettings.reasoningEffort,
     permissionMode: agentSettings.permissionMode,
+    quickActions: agentSettings.quickActions,
     models,
     catalogError
   };

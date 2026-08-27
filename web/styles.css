@@ -4338,6 +4338,9 @@ body.resizing .splitter::before {
 .settingsNav {
   background: #f8fafc;
   border-right: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 16px 12px;
 }
 
@@ -4373,6 +4376,12 @@ body.resizing .splitter::before {
   width: 30px;
 }
 
+.settingsNavIcon.quickActions {
+  background: #e9f1ff;
+  color: var(--accent-strong);
+  font-size: 15px;
+}
+
 .settingsNav button > span:last-child {
   display: grid;
   gap: 1px;
@@ -4391,11 +4400,15 @@ body.resizing .splitter::before {
 }
 
 .settingsContent {
-  display: grid;
-  grid-template-rows: auto auto auto minmax(0, auto) minmax(0, auto) 1fr auto;
+  display: flex;
+  flex-direction: column;
   min-height: 0;
   overflow: auto;
   padding: 24px 28px 0;
+}
+
+.settingsCategoryPanel {
+  min-width: 0;
 }
 
 .settingsIntro {
@@ -4525,6 +4538,108 @@ body.resizing .splitter::before {
   color: #b74837;
 }
 
+.settingsAddQuickAction {
+  background: #ffffff;
+  border-color: #c8d5e8;
+  color: var(--accent-strong);
+  flex: 0 0 auto;
+  font-size: 11px;
+  height: 30px;
+  padding: 0 12px;
+}
+
+.settingsQuickActionsSection {
+  padding-bottom: 18px;
+}
+
+.settingsQuickActions {
+  display: grid;
+  gap: 10px;
+}
+
+.settingsQuickAction {
+  background: #fbfcfe;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  display: grid;
+  gap: 9px;
+  padding: 11px;
+}
+
+.settingsQuickActionHeader {
+  align-items: end;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.settingsQuickAction label {
+  color: var(--muted-strong);
+  display: grid;
+  font-size: 10px;
+  font-weight: 650;
+  gap: 5px;
+}
+
+.settingsQuickAction input,
+.settingsQuickAction textarea {
+  background: #ffffff;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  padding: 8px 10px;
+  width: 100%;
+}
+
+.settingsQuickAction input {
+  height: 36px;
+}
+
+.settingsQuickAction textarea {
+  line-height: 18px;
+  min-height: 72px;
+  resize: vertical;
+}
+
+.settingsQuickAction input:focus,
+.settingsQuickAction textarea:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(13, 110, 253, 0.1);
+}
+
+.settingsDeleteQuickAction {
+  background: transparent;
+  border-color: transparent;
+  color: #c24136;
+  font-size: 11px;
+  height: 36px;
+  padding: 0 8px;
+}
+
+.settingsDeleteQuickAction:hover {
+  background: #fff1f0;
+  border-color: #f1b1aa;
+}
+
+.settingsQuickActionsEmpty {
+  background: #f7f9fc;
+  border: 1px dashed #cfd8e5;
+  border-radius: 9px;
+  color: var(--muted);
+  font-size: 11px;
+  padding: 16px;
+  text-align: center;
+}
+
+.settingsFieldError {
+  color: #b74837;
+  font-size: 10px;
+  margin: 8px 0 0;
+}
+
 .settingsFooter {
   align-items: center;
   align-self: end;
@@ -4534,7 +4649,8 @@ body.resizing .splitter::before {
   display: flex;
   gap: 18px;
   justify-content: space-between;
-  margin-top: 4px;
+  flex: 0 0 auto;
+  margin-top: auto;
   min-height: 68px;
   position: sticky;
 }
@@ -4768,11 +4884,13 @@ body.resizing .splitter::before {
   .settingsNav {
     border-bottom: 1px solid var(--line);
     border-right: 0;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     padding: 8px 14px;
   }
 
   .settingsNav button {
-    max-width: 170px;
+    max-width: none;
   }
 
   .settingsContent {

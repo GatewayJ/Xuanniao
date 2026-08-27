@@ -801,8 +801,8 @@ export function App() {
         saving={agentSettings.settingsSaving}
         error={agentSettings.settingsError}
         onClose={agentSettings.closeSettings}
-        onSave={(model, reasoningEffort, permissionMode) => (
-          void agentSettings.saveSettings(model, reasoningEffort, permissionMode)
+        onSave={(model, reasoningEffort, permissionMode, quickActions) => (
+          void agentSettings.saveSettings(model, reasoningEffort, permissionMode, quickActions)
         )}
       />
       {selectionAsk && (

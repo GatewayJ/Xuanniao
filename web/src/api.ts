@@ -1,4 +1,4 @@
-import type { AgentOutcome, AgentPermissionMode, AgentRunSnapshot, AgentRunUpdate, AgentSettingsPayload, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, PermissionRequest, Thread } from "./types";
+import type { AgentOutcome, AgentPermissionMode, AgentRunSnapshot, AgentRunUpdate, AgentSettingsPayload, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, NodeQuickAction, PermissionRequest, Thread } from "./types";
 
 type JsonRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
 
@@ -121,7 +121,12 @@ export const api = {
   settings: (signal?: AbortSignal) =>
     request<AgentSettingsPayload>("/api/settings", { signal }),
   updateSettings: (
-    body: { model: string | null; reasoningEffort: string | null; permissionMode: AgentPermissionMode },
+    body: {
+      model: string | null;
+      reasoningEffort: string | null;
+      permissionMode: AgentPermissionMode;
+      quickActions: NodeQuickAction[];
+    },
     signal?: AbortSignal
   ) =>
     request<AgentSettingsPayload>("/api/settings", {
