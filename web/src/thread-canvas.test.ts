@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  THREAD_CANVAS_HORIZONTAL_GAP,
   THREAD_CANVAS_NODE_HEIGHT,
+  THREAD_CANVAS_NODE_WIDTH,
   THREAD_CANVAS_VERTICAL_GAP,
-  layoutConversationTree
+  layoutConversationTree,
+  layoutConversationTreeWithDraft
 } from "./thread-canvas.ts";
 import type { ConversationNode } from "./thread-tree.ts";
 
@@ -43,4 +46,18 @@ test("lays out siblings as a multi-way tree without overlap", () => {
     ["root:left", "root:middle", "root:right", "middle:leaf"]
   );
   assert.ok(layout.bounds.left < 0 && layout.bounds.right > 0);
+});
+
+test("lays out a draft branch beside existing child nodes", () => {
+  const existing = node("existing");
+  existing.parentId = "root";
+  const root = node("root", [existing]);
+  const preview = layoutConversationTreeWithDraft([root], "root");
+
+  assert.ok(preview);
+  const existingLayout = preview.layout.nodes.find((item) => item.node.id === "existing")!;
+  assert.equal(existingLayout.x, -(THREAD_CANVAS_NODE_WIDTH + THREAD_CANVAS_HORIZONTAL_GAP) / 2);
+  assert.equal(preview.draftNode.x, (THREAD_CANVAS_NODE_WIDTH + THREAD_CANVAS_HORIZONTAL_GAP) / 2);
+  assert.equal(preview.draftNode.y, THREAD_CANVAS_NODE_HEIGHT + THREAD_CANVAS_VERTICAL_GAP);
+  assert.equal(preview.draftConnector?.fromNodeId, "root");
 });

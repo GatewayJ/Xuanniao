@@ -28,6 +28,12 @@ export type ThreadCanvasLayout = {
   bounds: { left: number; top: number; right: number; bottom: number };
 };
 
+export type ThreadCanvasDraftPreview = {
+  layout: ThreadCanvasLayout;
+  draftNode: { x: number; y: number };
+  draftConnector: ThreadCanvasConnector | null;
+};
+
 export function layoutConversationTree(roots: ConversationNode[]): ThreadCanvasLayout {
   if (roots.length === 0) {
     return { nodes: [], connectors: [], bounds: { left: 0, top: 0, right: 0, bottom: 0 } };
@@ -101,5 +107,66 @@ export function layoutConversationTree(roots: ConversationNode[]): ThreadCanvasL
       right: Math.max(...nodes.map((item) => item.x + THREAD_CANVAS_NODE_WIDTH / 2)),
       bottom: Math.max(...nodes.map((item) => item.y + THREAD_CANVAS_NODE_HEIGHT / 2))
     }
+  };
+}
+
+export function layoutConversationTreeWithDraft(
+  roots: ConversationNode[],
+  parentNodeId: string | null
+): ThreadCanvasDraftPreview | null {
+  const existingIds = new Set<string>();
+  const collectIds = (nodes: ConversationNode[]) => {
+    for (const node of nodes) {
+      existingIds.add(node.id);
+      collectIds(node.children);
+    }
+  };
+  collectIds(roots);
+
+  let draftId = "__draft-preview__";
+  while (existingIds.has(draftId)) draftId += "_";
+  const draftQuestion = {
+    id: draftId,
+    role: "user" as const,
+    content: "",
+    nodeId: draftId,
+    parentId: parentNodeId,
+    createdAt: ""
+  };
+  const draftNode: ConversationNode = {
+    id: draftId,
+    parentId: parentNodeId,
+    question: draftQuestion,
+    messages: [draftQuestion],
+    children: []
+  };
+
+  let inserted = parentNodeId === null;
+  const appendDraft = (nodes: ConversationNode[]): ConversationNode[] => nodes.map((node) => {
+    if (node.id === parentNodeId) {
+      inserted = true;
+      return { ...node, children: [...node.children, draftNode] };
+    }
+    const children = appendDraft(node.children);
+    return children === node.children ? node : { ...node, children };
+  });
+  const previewRoots = parentNodeId === null ? [...roots, draftNode] : appendDraft(roots);
+  if (!inserted) return null;
+
+  const previewLayout = layoutConversationTree(previewRoots);
+  const draftLayout = previewLayout.nodes.find((item) => item.node.id === draftId);
+  if (!draftLayout) return null;
+  const draftConnector = previewLayout.connectors.find((connector) => connector.toNodeId === draftId) || null;
+
+  return {
+    layout: {
+      ...previewLayout,
+      nodes: previewLayout.nodes.filter((item) => item.node.id !== draftId),
+      connectors: previewLayout.connectors.filter((connector) => (
+        connector.fromNodeId !== draftId && connector.toNodeId !== draftId
+      ))
+    },
+    draftNode: { x: draftLayout.x, y: draftLayout.y },
+    draftConnector
   };
 }

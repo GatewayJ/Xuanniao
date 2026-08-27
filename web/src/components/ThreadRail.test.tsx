@@ -69,6 +69,9 @@ test("thread detail opens with the root conversation node selected", () => {
   assert.doesNotMatch(html, />讨论结构</);
   assert.doesNotMatch(html, />当前节点</);
   assert.doesNotMatch(html, /从右侧 tree 选择一个节点/);
+  assert.doesNotMatch(html, /2 个节点/);
+  assert.doesNotMatch(html, /3 条消息/);
+  assert.doesNotMatch(html, /第 1 行/);
 });
 
 test("thread detail defaults its three panes to a 3:5:2 ratio", () => {
@@ -76,6 +79,52 @@ test("thread detail defaults its three panes to a 3:5:2 ratio", () => {
 
   assert.deepEqual(widths, { document: 300, content: 500 });
   assert.equal(1012 - 12 - widths.document - widths.content, 200);
+});
+
+test("branch drafts render a preview node on the discussion tree", () => {
+  const thread: Thread = {
+    id: "thread-1",
+    title: "Test thread",
+    selectedText: "Selected source",
+    anchor: { start: 0, end: 15, lineStart: 1, lineEnd: 1, blockId: null },
+    messages: [
+      { id: "root", role: "user", content: "Root question", nodeId: "root", parentId: null, createdAt: at },
+      { id: "answer", role: "assistant", content: "Root answer", nodeId: "root", parentId: "root", createdAt: at },
+      { id: "child", role: "user", content: "Existing branch", nodeId: "child", parentId: "root", createdAt: at }
+    ],
+    createdAt: at,
+    updatedAt: at
+  };
+
+  const html = renderToStaticMarkup(
+    <ThreadDetailModal
+      documentData={null}
+      agentSettings={null}
+      thread={thread}
+      permissionRequests={[]}
+      resolvingPermissionIds={new Set()}
+      editingMessage={null}
+      editText=""
+      messageDrafts={{ "thread:thread-1:node:root": "New branch" }}
+      onClose={() => {}}
+      onRevealSource={() => {}}
+      onEdit={() => {}}
+      onCancelEdit={() => {}}
+      onSaveEdit={() => {}}
+      onUpdateMessageMeta={() => {}}
+      onRetryAssistant={() => {}}
+      onRequestAssistant={() => {}}
+      onDeleteMessage={() => {}}
+      onResolvePermission={() => {}}
+      setEditText={() => {}}
+      setMessageDraft={() => {}}
+      onSend={async () => true}
+    />
+  );
+
+  assert.match(html, /class="threadCanvasGhostNode"/);
+  assert.match(html, /新节点预览/);
+  assert.match(html, />New branch</);
 });
 
 test("Escape closes the thread detail directly when no selection popover is open", () => {

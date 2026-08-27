@@ -358,11 +358,10 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
             </div>
 
             <footer className="settingsFooter">
-              <p>{saving ? "正在保存…" : "设置保存在本机。"}</p>
-              <div>
-                <button type="button" className="ghostButton" disabled={saving} onClick={onClose}>取消</button>
-                <button type="submit" className="primaryButton" disabled={!canSave}>保存设置</button>
-              </div>
+              <button type="button" className="ghostButton" disabled={saving} onClick={onClose}>取消</button>
+              <button type="submit" className="primaryButton" disabled={!canSave}>
+                {saving ? "正在保存…" : "保存设置"}
+              </button>
             </footer>
           </form>
         </div>

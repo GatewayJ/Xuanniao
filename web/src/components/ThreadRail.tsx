@@ -17,11 +17,11 @@ import { useRenderedPreview } from "../hooks/useRenderedPreview";
 import { renderMessageMarkdown } from "../markdown";
 import { nodeQuickActions } from "../quick-actions";
 import { formatRelativeTime } from "../relative-time";
-import { resolveThreadAnchor } from "../thread-anchors";
 import {
   THREAD_CANVAS_NODE_HEIGHT,
   THREAD_CANVAS_NODE_WIDTH,
-  layoutConversationTree
+  layoutConversationTree,
+  layoutConversationTreeWithDraft
 } from "../thread-canvas";
 import { threadNodeDraftKey } from "../thread-drafts";
 import { findPreviewBlockForThread } from "../thread-spatial";
@@ -457,14 +457,6 @@ export function ThreadDetailModal(props: {
   const knownNodeIdsRef = useRef(new Set(nodes.map((node) => node.id)));
   const centeredThreadRef = useRef<string | null>(null);
   const overviewTransformRef = useRef<{ x: number; y: number; scale: number } | null>(null);
-  const documentAnchorLocation = useMemo(
-    () => props.documentData
-      ? resolveThreadAnchor(props.documentData.content, props.thread)
-      : null,
-    [props.documentData?.content, props.thread]
-  );
-  const lineStart = documentAnchorLocation?.lineStart ?? props.thread.anchor.lineStart;
-  const lineEnd = documentAnchorLocation?.lineEnd ?? props.thread.anchor.lineEnd;
   const documentContent = props.documentData?.content ?? null;
   const renderedDocumentContent = documentContextOpen ? documentContent : null;
   const documentPreviewThreads = useMemo(() => [props.thread], [props.thread]);
@@ -620,8 +612,6 @@ export function ThreadDetailModal(props: {
     };
   }, [props.thread.id]);
 
-  const messageCount = props.thread.messages.length;
-  const nodeCount = nodes.length;
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
   const activeRunMessage = selectedNode ? activeAgentRunMessage(selectedNode.messages) : null;
   const nodeCreationMode: NodeCreationMode = selectedNode && conversationNodeCanBranch(selectedNode)
@@ -638,15 +628,18 @@ export function ThreadDetailModal(props: {
   nodeNavigationRef.current = selectedNodeNavigation;
   const draftKey = threadNodeDraftKey(props.thread.id, selectedNodeId);
   const messageDraft = props.messageDrafts[draftKey] || "";
+  const canvasDraftPreview = useMemo(() => (
+    inspectorOpen && messageDraft.trim()
+      ? layoutConversationTreeWithDraft(tree, selectedNodeId)
+      : null
+  ), [inspectorOpen, messageDraft, selectedNodeId, tree]);
+  const displayedCanvasLayout = canvasDraftPreview?.layout || canvasLayout;
+  const ghostNode = canvasDraftPreview?.draftNode || null;
   const selectedNodeOrigin = selectedNode ? messageBranchSelection(selectedNode.question) : null;
   const selectedNodeKind = selectedNode ? conversationNodeKind(selectedNode) : "question";
   const effectiveAgentSettings = agentSettingsSummary(props.agentSettings);
   const quickActions = nodeQuickActions(props.agentSettings);
   const semanticStats = useMemo(() => conversationSemanticStats(nodes), [nodes]);
-  const lineLabel = lineStart
-    ? `第 ${lineStart}${lineEnd && lineEnd !== lineStart ? `–${lineEnd}` : ""} 行`
-    : "未锚定";
-
   function applyNodeQuickAction(action: NodeQuickAction) {
     if (!selectedNode) return;
     clearCapturedMessageSelection();
@@ -723,15 +716,15 @@ export function ThreadDetailModal(props: {
   }
 
   function fitTree() {
-    if (canvasLayout.nodes.length === 0) {
+    if (displayedCanvasLayout.nodes.length === 0 && !ghostNode) {
       resetView();
       return;
     }
-    const width = Math.max(1, canvasLayout.bounds.right - canvasLayout.bounds.left);
-    const height = Math.max(1, canvasLayout.bounds.bottom - canvasLayout.bounds.top);
+    const width = Math.max(1, displayedCanvasLayout.bounds.right - displayedCanvasLayout.bounds.left);
+    const height = Math.max(1, displayedCanvasLayout.bounds.bottom - displayedCanvasLayout.bounds.top);
     const scale = clamp(Math.min((canvasSize.width - 120) / width, (canvasSize.height - 140) / height, 1.15), 0.35, 1.15);
-    const centerX = (canvasLayout.bounds.left + canvasLayout.bounds.right) / 2;
-    const centerY = (canvasLayout.bounds.top + canvasLayout.bounds.bottom) / 2;
+    const centerX = (displayedCanvasLayout.bounds.left + displayedCanvasLayout.bounds.right) / 2;
+    const centerY = (displayedCanvasLayout.bounds.top + displayedCanvasLayout.bounds.bottom) / 2;
     setCanvasTransform({
       x: canvasSize.width / 2 - centerX * scale,
       y: canvasSize.height / 2 - centerY * scale,
@@ -887,19 +880,6 @@ export function ThreadDetailModal(props: {
     }
   }
 
-  const selectedCanvasItem = selectedNodeId
-    ? canvasLayout.nodes.find((item) => item.node.id === selectedNodeId) || null
-    : null;
-  const ghostNode = (() => {
-    if (!inspectorOpen || !messageDraft.trim()) return null;
-    if (nodeCreationMode === "branch") return null;
-    if (!selectedCanvasItem) return { x: 0, y: 0 };
-    return {
-      x: selectedCanvasItem.x,
-      y: selectedCanvasItem.y + THREAD_CANVAS_NODE_HEIGHT + 92
-    };
-  })();
-
   return (
     <div className="modalBackdrop threadModalBackdrop" role="presentation" onMouseDown={props.onClose}>
       <section
@@ -912,12 +892,6 @@ export function ThreadDetailModal(props: {
       >
         <header className="threadModalHeader">
           <div className="threadModalHeading">
-            <div className="threadModalEyebrow">
-              <span>讨论树</span>
-              <span>{nodeCount} 个节点</span>
-              <span>{messageCount} 条消息</span>
-              <span>{lineLabel}</span>
-            </div>
             <h2 id="thread-modal-title">{threadDisplayTitle(props.thread)}</h2>
           </div>
           <div className="threadModalHeaderActions">
@@ -1017,7 +991,6 @@ export function ThreadDetailModal(props: {
             onPointerUp={finishCanvasPan}
             onPointerCancel={finishCanvasPan}
           >
-          <div className="threadCanvasHint">拖动画布 · 滚轮移动 · ⌘/Ctrl + 滚轮缩放</div>
           <div className="threadCanvasInsightStrip" aria-label="讨论计划摘要">
             <span>任务 {semanticStats.task}</span>
             <span>风险 {semanticStats.risk}</span>
@@ -1037,7 +1010,7 @@ export function ThreadDetailModal(props: {
             style={{ transform: `translate(${canvasTransform.x}px, ${canvasTransform.y}px) scale(${canvasTransform.scale})` }}
           >
             <svg className="threadCanvasConnectors" aria-hidden="true">
-              {canvasLayout.connectors.map((connector) => {
+              {displayedCanvasLayout.connectors.map((connector) => {
                 const middleY = (connector.fromY + connector.toY) / 2;
                 return (
                   <path
@@ -1046,15 +1019,19 @@ export function ThreadDetailModal(props: {
                   />
                 );
               })}
-              {ghostNode && selectedCanvasItem && (
-                <path
-                  className="ghostConnector"
-                  d={`M ${selectedCanvasItem.x} ${selectedCanvasItem.y + THREAD_CANVAS_NODE_HEIGHT / 2} C ${selectedCanvasItem.x} ${selectedCanvasItem.y + THREAD_CANVAS_NODE_HEIGHT}, ${ghostNode.x} ${ghostNode.y - 76}, ${ghostNode.x} ${ghostNode.y - 38}`}
-                />
-              )}
+              {canvasDraftPreview?.draftConnector && (() => {
+                const connector = canvasDraftPreview.draftConnector;
+                const middleY = (connector.fromY + connector.toY) / 2;
+                return (
+                  <path
+                    className="ghostConnector"
+                    d={`M ${connector.fromX} ${connector.fromY} C ${connector.fromX} ${middleY}, ${connector.toX} ${middleY}, ${connector.toX} ${connector.toY}`}
+                  />
+                );
+              })()}
             </svg>
 
-            {canvasLayout.nodes.map((item) => (
+            {displayedCanvasLayout.nodes.map((item) => (
               <Fragment key={item.node.id}>
                 <ConversationCanvasNode
                   node={item.node}

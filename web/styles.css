@@ -1907,28 +1907,7 @@ body.resizing .splitter::before {
 }
 
 .threadModalHeading {
-  display: grid;
-  gap: 3px;
   min-width: 0;
-}
-
-.threadModalEyebrow {
-  align-items: center;
-  color: var(--muted);
-  display: flex;
-  flex-wrap: wrap;
-  font-size: 11px;
-  font-weight: 650;
-  gap: 0;
-  line-height: 16px;
-  margin-bottom: 0;
-  text-transform: uppercase;
-}
-
-.threadModalEyebrow span + span::before {
-  color: #c3c9d2;
-  content: "•";
-  margin: 0 8px;
 }
 
 .threadModalHeader h2 {
@@ -2650,7 +2629,6 @@ body.resizing .splitter::before {
 }
 
 .threadCanvasWorld,
-.threadCanvasHint,
 .threadCanvasControls {
   user-select: none;
   -webkit-user-select: none;
@@ -2679,27 +2657,10 @@ body.resizing .splitter::before {
   opacity: 0.35;
 }
 
-.threadCanvasViewport.focusMode .threadCanvasHint,
 .threadCanvasViewport.focusMode .threadCanvasInsightStrip,
 .threadCanvasViewport.focusMode .threadCanvasControls {
   opacity: 0;
   pointer-events: none;
-}
-
-.threadCanvasHint {
-  background: rgba(255, 255, 255, 0.84);
-  border: 1px solid rgba(217, 224, 233, 0.92);
-  border-radius: 999px;
-  color: #7b8798;
-  font-size: 10px;
-  left: 16px;
-  line-height: 22px;
-  padding: 0 10px;
-  pointer-events: none;
-  position: absolute;
-  top: 70px;
-  z-index: 8;
-  transition: opacity 160ms ease;
 }
 
 .threadCanvasInsightStrip {
@@ -4439,8 +4400,7 @@ body.resizing .splitter::before {
 }
 
 .settingsIntro p,
-.settingsSectionHeading p,
-.settingsFooter p {
+.settingsSectionHeading p {
   color: var(--muted);
   font-size: 11px;
   line-height: 17px;
@@ -4647,17 +4607,12 @@ body.resizing .splitter::before {
   border-top: 1px solid var(--line);
   bottom: 0;
   display: flex;
-  gap: 18px;
-  justify-content: space-between;
+  gap: 8px;
+  justify-content: flex-end;
   flex: 0 0 auto;
   margin-top: auto;
   min-height: 68px;
   position: sticky;
-}
-
-.settingsFooter > div {
-  display: flex;
-  gap: 8px;
 }
 
 .settingsFooter button {
@@ -4912,13 +4867,10 @@ body.resizing .splitter::before {
     padding: 10px 0 14px;
   }
 
-  .settingsFooter > div,
   .settingsFooter button {
     width: 100%;
   }
 
-  .threadModalEyebrow span:nth-child(3),
-  .threadModalEyebrow span:nth-child(4),
   .threadContextToggle span {
     display: none;
   }
@@ -4927,7 +4879,6 @@ body.resizing .splitter::before {
     gap: 10px;
   }
 
-  .threadCanvasHint,
   .threadCanvasInsightStrip {
     display: none;
   }
