@@ -9,10 +9,21 @@ type FilePickerModalProps = {
   error: string;
   onClose: () => void;
   onBrowse: (path: string) => void;
+  onOpenDirectory: (path: string) => void;
   onOpenFile: (path: string) => void;
 };
 
-export function FilePickerModal({ open, currentPath, browser, loading, error, onClose, onBrowse, onOpenFile }: FilePickerModalProps) {
+export function FilePickerModal({
+  open,
+  currentPath,
+  browser,
+  loading,
+  error,
+  onClose,
+  onBrowse,
+  onOpenDirectory,
+  onOpenFile
+}: FilePickerModalProps) {
   const [query, setQuery] = useState("");
   const [pathInput, setPathInput] = useState(currentPath);
   const [selectedPath, setSelectedPath] = useState(currentPath);
@@ -47,7 +58,7 @@ export function FilePickerModal({ open, currentPath, browser, loading, error, on
       <section className="fileModal" role="dialog" aria-modal="true" aria-labelledby="file-modal-title" onMouseDown={(event) => event.stopPropagation()}>
         <header className="fileModalHeader">
           <div>
-            <h2 id="file-modal-title">打开 Markdown 文档</h2>
+            <h2 id="file-modal-title">打开目录或 Markdown 文档</h2>
             <p>{browser.directory || "正在加载目录…"}</p>
           </div>
           <button type="button" className="ghostButton" onClick={onClose}>关闭</button>
@@ -66,7 +77,21 @@ export function FilePickerModal({ open, currentPath, browser, loading, error, on
             aria-label="文件或目录路径"
           />
           <button type="button" disabled={!pathInput.trim() || loading} onClick={() => onBrowse(pathInput.trim())}>前往</button>
-          <button type="button" className="primaryButton" disabled={!openPath || loading} onClick={() => onOpenFile(openPath)}>打开</button>
+          <button
+            type="button"
+            disabled={!browser.directory || loading}
+            onClick={() => onOpenDirectory(browser.directory)}
+          >
+            打开目录
+          </button>
+          <button
+            type="button"
+            className="primaryButton"
+            disabled={!openPath || loading}
+            onClick={() => onOpenFile(openPath)}
+          >
+            打开文件
+          </button>
         </div>
 
         <div className="fileToolbar">

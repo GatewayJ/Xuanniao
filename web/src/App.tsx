@@ -11,6 +11,7 @@ import { SelectionAskPopover } from "./components/SelectionAskPopover";
 import { SettingsModal } from "./components/SettingsModal";
 import { ThreadRail } from "./components/ThreadRail";
 import { TopBar } from "./components/TopBar";
+import { WorkspaceTree } from "./components/WorkspaceTree";
 import { useRenderedPreview } from "./hooks/useRenderedPreview";
 import { useAgentSettings } from "./hooks/useAgentSettings";
 import { useConversationCommands } from "./hooks/useConversationCommands";
@@ -65,6 +66,9 @@ export function App() {
   const [newDocumentError, setNewDocumentError] = useState("");
   const [newDocumentRun, setNewDocumentRun] = useState<AgentRunSnapshot | null>(null);
   const [workspaceRoot, setWorkspaceRoot] = useState("");
+  const [fileTreeRoot, setFileTreeRoot] = useState("");
+  const [fileTreeCollapsed, setFileTreeCollapsed] = useState(false);
+  const [openingDocumentPath, setOpeningDocumentPath] = useState<string | null>(null);
   const [fileBrowser, setFileBrowser] = useState<FileBrowserPayload>(emptyFileBrowser);
   const [fileBrowserLoading, setFileBrowserLoading] = useState(false);
   const [fileBrowserError, setFileBrowserError] = useState("");
@@ -123,7 +127,10 @@ export function App() {
 
   const activeThread = threads.find((thread) => thread.id === activeThreadId) || null;
   const orderedThreads = useMemo(() => orderThreads(threads, documentData?.content), [threads, documentData?.content]);
-  const shellStyle = { "--thread-width": `${threadWidth}px` } as CSSProperties;
+  const shellStyle = {
+    "--file-tree-width": fileTreeCollapsed ? "50px" : "clamp(180px, 18vw, 224px)",
+    "--thread-width": `${threadWidth}px`
+  } as CSSProperties;
 
   useEffect(() => {
     threadsRef.current = threads;
@@ -191,6 +198,7 @@ export function App() {
       const [doc, threadPayload, filePayload] = await Promise.all([api.document(), api.threads(), api.files()]);
       documentSession.loadDocument(doc, false, true);
       setWorkspaceRoot(filePayload.root);
+      setFileTreeRoot(filePayload.root);
       setStatus("就绪");
       const loadedThreads = await conversation.resumeAgentRuns(threadPayload.threads);
       setActiveThreadId(loadedThreads[0]?.id || null);
@@ -391,6 +399,7 @@ export function App() {
     openDocumentRequestRef.current?.abort();
     const controller = new AbortController();
     openDocumentRequestRef.current = controller;
+    setOpeningDocumentPath(path);
     setStatus("正在打开文档");
     try {
       if (documentData) {
@@ -415,8 +424,18 @@ export function App() {
       setFileBrowserError(message);
       setStatus(message);
     } finally {
-      if (openDocumentRequestRef.current === controller) openDocumentRequestRef.current = null;
+      if (openDocumentRequestRef.current === controller) {
+        openDocumentRequestRef.current = null;
+        setOpeningDocumentPath(null);
+      }
     }
+  }
+
+  function openDirectory(path: string) {
+    setFileTreeRoot(path);
+    setFilePickerOpen(false);
+    setFileBrowserError("");
+    setStatus("目录已打开");
   }
 
   function currentSelection(): SelectionContext | null {
@@ -669,6 +688,16 @@ export function App() {
         onSave={() => void documentSession.saveDocument()}
       />
       <main className="workspace">
+        <WorkspaceTree
+          rootPath={fileTreeRoot}
+          currentPath={documentData?.path || ""}
+          collapsed={fileTreeCollapsed}
+          openingPath={openingDocumentPath}
+          onBrowse={api.browseFiles}
+          onChooseDirectory={() => void openFileManager()}
+          onOpenFile={(path) => void openDocument(path)}
+          onToggleCollapsed={() => setFileTreeCollapsed((current) => !current)}
+        />
         <DocumentPane
           mode={mode}
           documentData={documentData}
@@ -717,6 +746,7 @@ export function App() {
         error={fileBrowserError}
         onClose={() => setFilePickerOpen(false)}
         onBrowse={(path) => void browseFiles(path)}
+        onOpenDirectory={openDirectory}
         onOpenFile={(path) => void openDocument(path)}
       />
       <NewDocumentModal

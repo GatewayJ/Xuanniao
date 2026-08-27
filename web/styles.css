@@ -214,7 +214,11 @@ button:disabled {
 .workspace {
   display: grid;
   gap: 0;
-  grid-template-columns: minmax(420px, 1fr) 8px minmax(320px, var(--thread-width, 360px));
+  grid-template-columns:
+    var(--file-tree-width, clamp(180px, 18vw, 224px))
+    minmax(320px, 1fr)
+    8px
+    minmax(280px, var(--thread-width, 360px));
   height: calc(100vh - 66px);
   padding: 14px;
 }
@@ -240,6 +244,7 @@ body.resizing .splitter::before {
   background: var(--accent);
 }
 
+.fileTreePane,
 .documentPane,
 .threadPane {
   background: var(--panel);
@@ -247,6 +252,242 @@ body.resizing .splitter::before {
   border-radius: 10px;
   box-shadow: var(--shadow);
   min-height: 0;
+}
+
+.fileTreePane {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  margin-right: 10px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.fileTreePane.collapsed {
+  display: block;
+}
+
+.fileTreeHeader {
+  align-items: center;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+  min-height: 46px;
+  padding: 7px 8px 7px 12px;
+}
+
+.fileTreeHeader > div:first-child {
+  display: grid;
+  min-width: 0;
+}
+
+.fileTreeHeader span {
+  color: var(--muted);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 11px;
+  text-transform: uppercase;
+}
+
+.fileTreeHeader strong {
+  font-size: 12px;
+  line-height: 17px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileTreeHeaderActions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 3px;
+}
+
+.fileTreeHeaderActions button {
+  background: transparent;
+  border-color: transparent;
+  color: var(--muted-strong);
+  font-size: 10px;
+  min-height: 28px;
+  padding: 0 6px;
+}
+
+.fileTreeHeaderActions button:first-child {
+  font-size: 16px;
+  padding: 0;
+  width: 28px;
+}
+
+.fileTreeHeaderActions .fileTreeCollapseButton {
+  font-size: 20px;
+  padding: 0;
+  width: 26px;
+}
+
+.fileTreeHeaderActions button:hover {
+  background: var(--panel-strong);
+  border-color: var(--line);
+}
+
+.fileTreeExpandButton {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  border-radius: 9px;
+  color: var(--muted-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-height: 88px;
+  padding: 7px 0;
+  width: 100%;
+}
+
+.fileTreeExpandButton:hover {
+  background: var(--panel-strong);
+  border-color: transparent;
+  color: var(--accent-strong);
+}
+
+.fileTreeExpandButton span {
+  font-size: 22px;
+  line-height: 24px;
+}
+
+.fileTreeExpandButton small {
+  font-size: 10px;
+  letter-spacing: 2px;
+  writing-mode: vertical-rl;
+}
+
+.fileTreeScroll {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding: 7px 6px 18px;
+}
+
+.fileTree {
+  min-width: max-content;
+}
+
+.fileTreeBranch {
+  min-width: 0;
+}
+
+.fileTreeRow {
+  --file-tree-depth: 0;
+  align-items: center;
+  background: transparent;
+  border-color: transparent;
+  border-radius: 6px;
+  display: grid;
+  gap: 5px;
+  grid-template-columns: 11px 16px minmax(80px, 1fr) 13px;
+  height: 30px;
+  min-height: 30px;
+  padding: 0 6px 0 calc(5px + var(--file-tree-depth) * 15px);
+  text-align: left;
+  width: 100%;
+}
+
+.fileTreeRow:hover {
+  background: #f1f4f8;
+  border-color: transparent;
+}
+
+.fileTreeRow.active {
+  background: var(--accent-soft);
+  color: var(--accent-strong);
+}
+
+.fileTreeRow:disabled {
+  opacity: 0.72;
+}
+
+.fileTreeBranch:first-child > .fileTreeRow > .fileTreeName {
+  font-weight: 700;
+}
+
+.fileTreeChevron {
+  color: #78869a;
+  display: inline-block;
+  font-size: 18px;
+  line-height: 1;
+  text-align: center;
+  transform: rotate(0deg);
+  transition: transform 120ms ease;
+}
+
+.fileTreeChevron.expanded {
+  transform: rotate(90deg);
+}
+
+.fileTreeChevron.placeholder {
+  height: 1px;
+}
+
+.fileTreeIcon {
+  display: block;
+  height: 16px;
+  width: 16px;
+}
+
+.fileTreeIcon.folder {
+  fill: #e3ad2f;
+  stroke: #b78013;
+  stroke-linejoin: round;
+  stroke-width: 1;
+}
+
+.fileTreeIcon.file {
+  fill: #ffffff;
+  stroke: #7b8798;
+  stroke-linejoin: round;
+  stroke-width: 1.35;
+}
+
+.fileTreeName {
+  font-size: 11.5px;
+  line-height: 16px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fileTreeRow.file.active .fileTreeName {
+  font-weight: 650;
+}
+
+.fileTreeLoading {
+  animation: agent-run-spin 0.8s linear infinite;
+  border: 1.5px solid #cbd5e1;
+  border-radius: 999px;
+  border-top-color: var(--accent);
+  height: 11px;
+  width: 11px;
+}
+
+.fileTreeEmpty {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 16px;
+  padding: 14px 8px;
+}
+
+.fileTreeEmpty.nested {
+  padding: 5px 8px 5px 37px;
+}
+
+.fileTreeError {
+  background: #fff1f0;
+  border-bottom: 1px solid #f1c0bc;
+  color: #9f2d27;
+  font-size: 10.5px;
+  line-height: 15px;
+  padding: 7px 10px;
 }
 
 .documentPane {
@@ -4028,7 +4269,7 @@ body.resizing .splitter::before {
 }
 
 .filePathRow {
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
 }
 
 .fileToolbar {
@@ -4646,6 +4887,30 @@ body.resizing .splitter::before {
     grid-template-columns: 1fr;
     height: auto;
     min-height: calc(100vh - 110px);
+  }
+
+  .fileTreePane {
+    margin: 0 0 10px;
+    max-height: 260px;
+    min-height: 180px;
+  }
+
+  .fileTreePane.collapsed {
+    max-height: 44px;
+    min-height: 44px;
+  }
+
+  .fileTreePane.collapsed .fileTreeExpandButton {
+    flex-direction: row;
+    gap: 6px;
+    min-height: 42px;
+    padding: 0 12px;
+    width: auto;
+  }
+
+  .fileTreePane.collapsed .fileTreeExpandButton small {
+    letter-spacing: 0;
+    writing-mode: initial;
   }
 
   .splitter {

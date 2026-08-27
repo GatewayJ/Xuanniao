@@ -17,7 +17,7 @@ export function TopBar({ documentPath, status, onCreateDocument, onOpenFileManag
     <header className="topbar">
       <div className="brand">
         <XuanniaoLogo />
-        <button type="button" className="documentSwitcher" onClick={onOpenFileManager} title="打开 Markdown 文档">
+        <button type="button" className="documentSwitcher" onClick={onOpenFileManager} title="打开目录或 Markdown 文档">
           <h1>玄鸟</h1>
           <p><strong>{fileName}</strong><span>{directory}</span></p>
         </button>
