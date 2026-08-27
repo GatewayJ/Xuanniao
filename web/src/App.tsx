@@ -4,7 +4,7 @@ import type { ViewUpdate } from "@codemirror/view";
 import { api } from "./api";
 import { coalesceAgentRunUpdates, createAgentRunId } from "./agent-run";
 import { DiagramViewer } from "./components/DiagramViewer";
-import { DocumentPane, type Mode } from "./components/DocumentPane";
+import { DEFAULT_DOCUMENT_MODE, DocumentPane, type Mode } from "./components/DocumentPane";
 import { FilePickerModal } from "./components/FilePickerModal";
 import { NewDocumentModal, type NewDocumentCommand } from "./components/NewDocumentModal";
 import { SelectionAskPopover } from "./components/SelectionAskPopover";
@@ -58,7 +58,7 @@ const emptyFileBrowser: FileBrowserPayload = {
 export function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
-  const [mode, setMode] = useState<Mode>("edit");
+  const [mode, setMode] = useState<Mode>(DEFAULT_DOCUMENT_MODE);
   const [status, setStatus] = useState("正在加载");
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [newDocumentOpen, setNewDocumentOpen] = useState(false);
@@ -97,7 +97,7 @@ export function App() {
   const directoryBrowseRequestRef = useRef(0);
   const threadsRef = useRef<Thread[]>([]);
   const activeThreadIdRef = useRef<string | null>(null);
-  const modeRef = useRef<Mode>("edit");
+  const modeRef = useRef<Mode>(DEFAULT_DOCUMENT_MODE);
   selectionAskRef.current = selectionAsk;
   selectionQuestionRef.current = selectionQuestion;
   const { threadWidth, startResize } = useThreadPaneWidth();
@@ -344,7 +344,7 @@ export function App() {
       setSelectionQuestion("");
       setFilePickerOpen(false);
       setNewDocumentOpen(false);
-      setMode("edit");
+      setMode(DEFAULT_DOCUMENT_MODE);
       const loadedThreads = await conversation.resumeAgentRuns(payload.threads);
       if (newDocumentRequestRef.current !== controller) return;
       setActiveThreadId(loadedThreads[0]?.id || null);
@@ -409,6 +409,7 @@ export function App() {
       const payload = await api.openDocument(path, controller.signal);
       if (openDocumentRequestRef.current !== controller) return;
       documentSession.loadDocument(payload.document, true, true);
+      setMode(DEFAULT_DOCUMENT_MODE);
       conversation.resetConversationEditor();
       setSelectionAsk(null);
       setSelectionQuestion("");

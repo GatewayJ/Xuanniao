@@ -430,6 +430,7 @@ export function ThreadDetailModal(props: {
     divider: "document-content" | "content-tree";
     pointerId: number;
   } | null>(null);
+  const paneWidthsCustomizedRef = useRef(false);
   const tree = useMemo(() => buildConversationTree(props.thread.messages), [props.thread.messages]);
   const nodes = useMemo(() => flattenConversationTree(tree), [tree]);
   const canvasLayout = useMemo(() => layoutConversationTree(tree), [tree]);
@@ -440,7 +441,7 @@ export function ThreadDetailModal(props: {
   const [isPanning, setIsPanning] = useState(false);
   const [selectionSending, setSelectionSending] = useState(false);
   const [resizingPane, setResizingPane] = useState<"document-content" | "content-tree" | null>(null);
-  const [paneWidths, setPaneWidths] = useState({ document: 360, content: 620 });
+  const [paneWidths, setPaneWidths] = useState({ document: 0, content: 0 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
   const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
   const contentScaleRef = useRef({ scale: 1 });
@@ -468,11 +469,6 @@ export function ThreadDetailModal(props: {
       ? resolveThreadAnchor(props.documentData.content, props.thread)
       : null,
     [props.documentData?.content, props.thread]
-  );
-  const documentAnchorOutdated = Boolean(
-    props.thread.selectedText.trim()
-    && props.documentData?.content
-    && !documentAnchorLocation
   );
   const lineStart = documentAnchorLocation?.lineStart ?? props.thread.anchor.lineStart;
   const lineEnd = documentAnchorLocation?.lineEnd ?? props.thread.anchor.lineEnd;
@@ -526,7 +522,9 @@ export function ThreadDetailModal(props: {
     const body = modalBodyRef.current;
     if (!body) return;
     const updateWidths = () => {
-      setPaneWidths((current) => fitThreadPaneWidths(body.clientWidth, current, documentContextOpen));
+      setPaneWidths((current) => paneWidthsCustomizedRef.current
+        ? fitThreadPaneWidths(body.clientWidth, current, documentContextOpen)
+        : defaultThreadPaneWidths(body.clientWidth, documentContextOpen));
     };
     updateWidths();
     const observer = new ResizeObserver(updateWidths);
@@ -575,13 +573,9 @@ export function ThreadDetailModal(props: {
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        if (selectionPopoverOpenRef.current) {
+        if (threadDetailEscapeTarget(selectionPopoverOpenRef.current) === "selection") {
           clearCapturedMessageSelection();
           window.getSelection()?.removeAllRanges();
-          return;
-        }
-        if (inspectorOpenRef.current) {
-          closeFocusedNode();
           return;
         }
         props.onClose();
@@ -821,6 +815,7 @@ export function ThreadDetailModal(props: {
     divider: "document-content" | "content-tree"
   ) {
     if (event.button !== 0) return;
+    paneWidthsCustomizedRef.current = true;
     paneResizeRef.current = { divider, pointerId: event.pointerId };
     event.currentTarget.setPointerCapture(event.pointerId);
     setResizingPane(divider);
@@ -855,6 +850,7 @@ export function ThreadDetailModal(props: {
     delta: number
   ) {
     const width = modalBodyRef.current?.clientWidth || 0;
+    paneWidthsCustomizedRef.current = true;
     setPaneWidths((current) => fitThreadPaneWidths(width, {
       document: current.document + (divider === "document-content" ? delta : 0),
       content: current.content + (divider === "content-tree" ? delta : 0)
@@ -959,28 +955,13 @@ export function ThreadDetailModal(props: {
           onPointerCancel={finishPaneResize}
         >
           {documentContextOpen && (
-            <aside className="threadDocumentContext" aria-label="文章上下文">
+            <aside className="threadDocumentContext" aria-label="文档预览">
               <header className="threadDocumentContextHeader">
                 <div>
-                  <span>文章上下文</span>
                   <strong>{props.documentData?.title || "当前文档"}</strong>
                 </div>
                 <button type="button" onClick={props.onRevealSource}>在编辑器中定位</button>
               </header>
-              <div className={`threadContextQuote ${documentAnchorOutdated ? "stale" : ""}`}>
-                <div>
-                  <span>讨论锚点</span>
-                  <small>{documentAnchorOutdated ? `原文已变化 · 上次${lineLabel}` : lineLabel}</small>
-                </div>
-                <blockquote>{props.thread.selectedText || "未保存引用内容"}</blockquote>
-                {selectedNode && (
-                  <div className="threadContextNodeLink">
-                    <span>当前 Tree 节点</span>
-                    <strong title={selectedNode.question.content}>{questionSummary(selectedNode.question.content)}</strong>
-                    <small>沿用此文档锚点</small>
-                  </div>
-                )}
-              </div>
               {documentContent !== null ? (
                 <article
                   ref={documentContextRef}
@@ -1042,10 +1023,6 @@ export function ThreadDetailModal(props: {
             onPointerUp={finishCanvasPan}
             onPointerCancel={finishCanvasPan}
           >
-          <div className="threadTreePaneLabel">
-            <span>Tree</span>
-            <strong>讨论结构</strong>
-          </div>
           <div className="threadCanvasHint">拖动画布 · 滚轮移动 · ⌘/Ctrl + 滚轮缩放</div>
           <div className="threadCanvasInsightStrip" aria-label="讨论计划摘要">
             <span>任务 {semanticStats.task}</span>
@@ -1102,7 +1079,6 @@ export function ThreadDetailModal(props: {
                 >
                   <header className="threadCanvasFocusHeader">
                     <div className="threadCanvasInspectorTitle">
-                      <span>当前节点</span>
                       <nav className="threadCanvasInspectorBreadcrumb" aria-label="当前节点路径">
                         {selectedNodeBreadcrumb.map((node, index) => {
                           const current = index === selectedNodeBreadcrumb.length - 1;
@@ -1151,7 +1127,6 @@ export function ThreadDetailModal(props: {
                         </div>
                       )}
                     </div>
-                    <button type="button" className="threadCanvasInspectorClose" aria-label="关闭节点内容" title="关闭节点内容 (Esc)" onClick={closeFocusedNode}>×</button>
                   </header>
 
                   {selectionPopover && (
@@ -1445,7 +1420,7 @@ function ConversationCanvasNode(props: {
     >
       <button type="button" className="threadCanvasNodeMain" onClick={props.onOpen}>
         <span className="threadCanvasNodeTopline">
-          <span className={`threadNodeKindPill kind-${kind}`}>{props.root ? "根" : NODE_KIND_META[kind].shortLabel}</span>
+          <span className={`threadNodeKindPill kind-${kind}`}>{NODE_KIND_META[kind].shortLabel}</span>
           <small className={status === "failed" ? "error" : ""}>{statusLabel}</small>
         </span>
         <strong>{questionSummary(props.node.question.content)}</strong>
@@ -1483,6 +1458,31 @@ function ConversationCanvasNode(props: {
       </div>
     </article>
   );
+}
+
+export function defaultThreadPaneWidths(
+  containerWidth: number,
+  documentOpen: boolean
+): { document: number; content: number } {
+  if (!Number.isFinite(containerWidth) || containerWidth <= 0) {
+    return { document: 0, content: 0 };
+  }
+  const dividerCount = documentOpen ? 2 : 1;
+  const available = Math.max(1, containerWidth - dividerCount * THREAD_PANE_DIVIDER_WIDTH);
+  if (!documentOpen) {
+    return {
+      document: 0,
+      content: Math.round(available * 5 / 7)
+    };
+  }
+  return {
+    document: Math.round(available * 3 / 10),
+    content: Math.round(available * 5 / 10)
+  };
+}
+
+export function threadDetailEscapeTarget(selectionPopoverOpen: boolean): "selection" | "modal" {
+  return selectionPopoverOpen ? "selection" : "modal";
 }
 
 function fitThreadPaneWidths(

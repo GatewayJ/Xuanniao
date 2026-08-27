@@ -2,6 +2,7 @@ import type { CSSProperties, RefObject } from "react";
 import type { Block, DocumentPayload, Thread } from "../types";
 
 export type Mode = "edit" | "preview" | "outline";
+export const DEFAULT_DOCUMENT_MODE: Mode = "preview";
 
 type DocumentPaneProps = {
   mode: Mode;
@@ -33,8 +34,8 @@ export function DocumentPane({
     <section className="documentPane">
       <div className="paneHeader">
         <div className="tabs">
-          <button type="button" className={mode === "edit" ? "tab active" : "tab"} onClick={() => onModeChange("edit")}>编辑</button>
           <button type="button" className={mode === "preview" ? "tab active" : "tab"} onClick={() => onModeChange("preview")}>预览</button>
+          <button type="button" className={mode === "edit" ? "tab active" : "tab"} onClick={() => onModeChange("edit")}>编辑</button>
           <button type="button" className={mode === "outline" ? "tab active" : "tab"} onClick={() => onModeChange("outline")}>大纲</button>
         </div>
         <div className="selectionInfo">{activeThread ? `讨论位于第 ${activeThread.anchor.lineStart || "-"} 行` : "当前没有活动讨论"}</div>
