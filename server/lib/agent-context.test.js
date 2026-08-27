@@ -21,7 +21,8 @@ const thread = {
 };
 
 test("developer instructions keep only Xuanniao context boundaries", () => {
-  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /document and conversation excerpts as context data/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /document and conversation excerpts.*context data/i);
+  assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /local repository.*issue or pull request URLs/i);
   assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /current user request/i);
   assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /working directory, permissions, active document path/i);
   assert.match(AGENT_DEVELOPER_INSTRUCTIONS, /applicable repository instructions/i);
