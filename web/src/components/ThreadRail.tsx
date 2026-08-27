@@ -351,6 +351,7 @@ export function ThreadRail(props: ThreadRailProps) {
       </aside>
       {openThreadDetail && createPortal(
         <ThreadDetailModal
+          key={openThreadDetail.id}
           documentData={props.documentData}
           agentSettings={props.agentSettings}
           thread={openThreadDetail}
@@ -384,7 +385,7 @@ export function ThreadRail(props: ThreadRailProps) {
   );
 }
 
-function ThreadDetailModal(props: {
+export function ThreadDetailModal(props: {
   documentData: DocumentPayload | null;
   agentSettings: AgentSettingsPayload | null;
   thread: Thread;
@@ -432,8 +433,8 @@ function ThreadDetailModal(props: {
   const tree = useMemo(() => buildConversationTree(props.thread.messages), [props.thread.messages]);
   const nodes = useMemo(() => flattenConversationTree(tree), [tree]);
   const canvasLayout = useMemo(() => layoutConversationTree(tree), [tree]);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(false);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() => tree[0]?.id || null);
+  const [inspectorOpen, setInspectorOpen] = useState(() => tree.length > 0);
   const [contentPaneElement, setContentPaneElement] = useState<HTMLElement | null>(null);
   const [documentContextOpen, setDocumentContextOpen] = useState(true);
   const [isPanning, setIsPanning] = useState(false);
