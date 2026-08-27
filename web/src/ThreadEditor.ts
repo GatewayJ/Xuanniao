@@ -147,6 +147,18 @@ export class MarkdownThreadEditor {
     this.view.scrollDOM.scrollTop = Math.max(0, scrollTop);
   }
 
+  lineAtViewport(anchorRatio = 0.28): number {
+    const height = this.view.scrollDOM.scrollTop + this.view.scrollDOM.clientHeight * anchorRatio;
+    const pos = this.view.lineBlockAtHeight(height).from;
+    return this.view.state.doc.lineAt(pos).number;
+  }
+
+  scrollLineToViewport(lineNumber: number, anchorRatio = 0.28) {
+    const line = this.view.state.doc.line(Math.max(1, Math.min(lineNumber, this.view.state.doc.lines)));
+    const top = this.view.lineBlockAt(line.from).top - this.view.scrollDOM.clientHeight * anchorRatio;
+    this.setScrollTop(top);
+  }
+
   setThreads(threads: Thread[], activeId: string | null) {
     this.threads = threads;
     this.view.dispatch({ effects: [updateThreadsEffect.of(threads), activeThreadEffect.of(activeId)] });
@@ -175,8 +187,7 @@ export class MarkdownThreadEditor {
   }
 
   nearestThreadForViewport(threads: Thread[]): Thread | null {
-    const pos = this.view.lineBlockAtHeight(this.view.scrollDOM.scrollTop + this.view.scrollDOM.clientHeight * 0.28).from;
-    const line = this.view.state.doc.lineAt(pos).number;
+    const line = this.lineAtViewport();
     return nearestThreadForLine(threads, line, this.view.state.doc.toString());
   }
 

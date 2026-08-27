@@ -1,7 +1,34 @@
 import { useEffect, useMemo, useState } from "react";
 
-import { effortLabel, findEffectiveModel, permissionModeLabel } from "../agent-settings-view";
+import { effortLabel, findEffectiveModel } from "../agent-settings-view";
 import type { AgentModelOption, AgentPermissionMode, AgentSettingsPayload } from "../types";
+
+const PERMISSION_MODE_OPTIONS: Array<{
+  mode: AgentPermissionMode;
+  title: string;
+  description: string;
+}> = [
+  {
+    mode: "request-approval",
+    title: "请求批准",
+    description: "编辑工作区外文件和使用互联网时始终询问"
+  },
+  {
+    mode: "auto-review",
+    title: "替我审批",
+    description: "仅对检测到的风险操作请求批准"
+  },
+  {
+    mode: "full-access",
+    title: "完全访问权限",
+    description: "可不受限制地访问互联网和您电脑上的任何文件"
+  },
+  {
+    mode: "custom",
+    title: "自定义 (config.toml)",
+    description: "使用 Codex config.toml 中定义的权限"
+  }
+];
 
 type SettingsModalProps = {
   open: boolean;
@@ -46,6 +73,7 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
   const effectiveModel = useMemo(() => findEffectiveModel(data?.models || [], model), [data?.models, model]);
   const supportedEfforts = effectiveModel?.supportedReasoningEfforts || [];
   const selectedEffort = supportedEfforts.find((option) => option.reasoningEffort === reasoningEffort);
+  const selectedPermission = PERMISSION_MODE_OPTIONS.find((option) => option.mode === permissionMode);
   const unavailableModel = Boolean(model && !effectiveModel);
   const modelSettingsChanged = Boolean(
     data && (model !== (data.model || "") || reasoningEffort !== (data.reasoningEffort || ""))
@@ -100,7 +128,6 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
                 <h3>模型、推理与权限</h3>
                 <p>设置会用于下一轮提问，正在执行的任务不会中断。</p>
               </div>
-              {data && <span className="settingsTransport">{transportLabel(data.transport)}</span>}
             </div>
 
             {loading && <div className="settingsLoading">正在读取 Codex 可用模型…</div>}
@@ -119,46 +146,20 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
                     <h4 id="permission-setting-label">应如何批准 Codex 操作？</h4>
                     <p>控制 Codex 对文件系统和互联网的访问方式。</p>
                   </div>
-                  <span>{permissionModeLabel(permissionMode)}</span>
                 </div>
-                <div className="permissionOptions" aria-disabled={!data.permissionSelectionSupported}>
-                  <PermissionModeOption
-                    mode="request-approval"
-                    checked={permissionMode === "request-approval"}
-                    title="请求批准"
-                    description="编辑工作区外文件和使用互联网时始终询问"
-                    icon="✋"
+                <div className={`settingsSelectControl${permissionMode === "full-access" ? " danger" : ""}`}>
+                  <select
+                    id="permission-mode"
+                    aria-labelledby="permission-setting-label"
+                    value={permissionMode}
                     disabled={!data.permissionSelectionSupported}
-                    onChange={setPermissionMode}
-                  />
-                  <PermissionModeOption
-                    mode="auto-review"
-                    checked={permissionMode === "auto-review"}
-                    title="替我审批"
-                    description="仅对检测到的风险操作请求批准"
-                    icon="◇"
-                    disabled={!data.permissionSelectionSupported}
-                    onChange={setPermissionMode}
-                  />
-                  <PermissionModeOption
-                    mode="full-access"
-                    checked={permissionMode === "full-access"}
-                    title="完全访问权限"
-                    description="可不受限制地访问互联网和您电脑上的任何文件"
-                    icon="!"
-                    tone="danger"
-                    disabled={!data.permissionSelectionSupported}
-                    onChange={setPermissionMode}
-                  />
-                  <PermissionModeOption
-                    mode="custom"
-                    checked={permissionMode === "custom"}
-                    title="自定义 (config.toml)"
-                    description="使用 Codex config.toml 中定义的权限"
-                    icon="⚙"
-                    disabled={!data.permissionSelectionSupported}
-                    onChange={setPermissionMode}
-                  />
+                    onChange={(event) => setPermissionMode(event.target.value as AgentPermissionMode)}
+                  >
+                    {PERMISSION_MODE_OPTIONS.map((option) => (
+                      <option key={option.mode} value={option.mode}>{option.title}</option>
+                    ))}
+                  </select>
+                  <small>{selectedPermission?.description}</small>
                 </div>
               </section>
             )}
@@ -167,52 +168,45 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
               <>
                 <section className="settingsSection" aria-labelledby="model-setting-label">
                   <div className="settingsSectionHeading">
-                    <div>
-                      <h4 id="model-setting-label">模型</h4>
-                      <p>模型列表由当前 Codex 自动提供。</p>
-                    </div>
-                    <span>{model ? effectiveModel?.displayName || model : "Codex 默认"}</span>
+                  <div>
+                    <h4 id="model-setting-label">模型</h4>
+                    <p>模型列表由当前 Codex 自动提供。</p>
                   </div>
-                  <div className="modelOptions">
-                    <ModelOption
-                      checked={!model}
-                      title="跟随 Codex 默认"
-                      description={defaultModelDescription(data.models)}
-                      badge="推荐"
-                      onChange={() => selectModel("")}
-                    />
-                    {unavailableModel && (
-                      <ModelOption
-                        checked
-                        title={model}
-                        description="此模型已不在当前 Codex 的可用列表中，请重新选择。"
-                        badge="不可用"
-                        invalid
-                        onChange={() => {}}
-                      />
-                    )}
-                    {data.models.map((option) => (
-                      <ModelOption
-                        key={option.model}
-                        checked={model === option.model}
-                        title={option.displayName}
-                        description={option.description || option.model}
-                        badge={option.isDefault ? "默认" : null}
-                        onChange={() => selectModel(option.model)}
-                      />
-                    ))}
+                </div>
+                  <div className={`settingsSelectControl${unavailableModel ? " invalid" : ""}`}>
+                    <select
+                      id="codex-model"
+                      aria-labelledby="model-setting-label"
+                      value={model}
+                      disabled={Boolean(data.catalogError)}
+                      onChange={(event) => selectModel(event.target.value)}
+                    >
+                      <option value="">跟随 Codex 默认</option>
+                      {unavailableModel && <option value={model}>{model}（不可用）</option>}
+                      {data.models.map((option) => (
+                        <option key={option.model} value={option.model}>
+                          {option.displayName}{option.isDefault ? "（默认）" : ""}
+                        </option>
+                      ))}
+                    </select>
+                    <small>
+                      {unavailableModel
+                        ? "此模型已不在当前 Codex 的可用列表中，请重新选择。"
+                        : model
+                          ? effectiveModel?.description || effectiveModel?.model
+                          : defaultModelDescription(data.models)}
+                    </small>
                   </div>
                 </section>
 
                 <section className="settingsSection" aria-labelledby="effort-setting-label">
                   <div className="settingsSectionHeading">
-                    <div>
-                      <h4 id="effort-setting-label">推理深度</h4>
-                      <p>更高深度适合复杂任务，但通常需要更长时间。</p>
-                    </div>
-                    <span>{reasoningEffort ? effortLabel(reasoningEffort) : "模型默认"}</span>
+                  <div>
+                    <h4 id="effort-setting-label">推理深度</h4>
+                    <p>更高深度适合复杂任务，但通常需要更长时间。</p>
                   </div>
-                  <div className="reasoningEffortControl">
+                </div>
+                  <div className="settingsSelectControl">
                     <select
                       id="reasoning-effort"
                       aria-labelledby="effort-setting-label"
@@ -255,69 +249,7 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
   );
 }
 
-type ModelOptionProps = {
-  checked: boolean;
-  title: string;
-  description: string;
-  badge: string | null;
-  invalid?: boolean;
-  onChange: () => void;
-};
-
-function ModelOption({ checked, title, description, badge, invalid = false, onChange }: ModelOptionProps) {
-  return (
-    <label className={`modelOption${checked ? " active" : ""}${invalid ? " invalid" : ""}`}>
-      <input type="radio" name="codex-model" checked={checked} onChange={onChange} />
-      <span className="modelOptionMark" aria-hidden="true" />
-      <span className="modelOptionText"><strong>{title}</strong><small>{description}</small></span>
-      {badge && <span className="modelOptionBadge">{badge}</span>}
-    </label>
-  );
-}
-
-type PermissionModeOptionProps = {
-  mode: AgentPermissionMode;
-  checked: boolean;
-  title: string;
-  description: string;
-  icon: string;
-  tone?: "default" | "danger";
-  disabled: boolean;
-  onChange: (mode: AgentPermissionMode) => void;
-};
-
-function PermissionModeOption({
-  mode,
-  checked,
-  title,
-  description,
-  icon,
-  tone = "default",
-  disabled,
-  onChange
-}: PermissionModeOptionProps) {
-  return (
-    <label className={`permissionOption${checked ? " active" : ""}${tone === "danger" ? " danger" : ""}${disabled ? " disabled" : ""}`}>
-      <input
-        type="radio"
-        name="codex-permission-mode"
-        value={mode}
-        checked={checked}
-        disabled={disabled}
-        onChange={() => onChange(mode)}
-      />
-      <span className="permissionOptionIcon" aria-hidden="true">{icon}</span>
-      <span className="permissionOptionText"><strong>{title}</strong><small>{description}</small></span>
-      <span className="permissionOptionCheck" aria-hidden="true">{checked ? "✓" : ""}</span>
-    </label>
-  );
-}
-
 function defaultModelDescription(models: AgentModelOption[]): string {
   const defaultModel = findEffectiveModel(models, "");
   return defaultModel ? `当前默认：${defaultModel.displayName}` : "使用 Codex 当前的默认模型";
-}
-
-function transportLabel(transport: string): string {
-  return transport === "codex-app-server" ? "原生 Codex" : transport.toUpperCase();
 }

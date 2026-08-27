@@ -29,14 +29,20 @@ export function findPreviewBlockForThread(root: HTMLElement, thread: Thread, con
   const lineStart = location?.lineStart ?? thread.anchor.lineStart;
   if (!Number.isInteger(lineStart)) return null;
 
+  return findPreviewBlockForLine(root, lineStart || 1);
+}
+
+export function findPreviewBlockForLine(root: HTMLElement, line: number): HTMLElement | null {
+  if (!Number.isInteger(line)) return null;
+
   const blocks = [...root.querySelectorAll<HTMLElement>("[data-source-line]")]
     .sort((left, right) => Number(left.dataset.sourceLine || 0) - Number(right.dataset.sourceLine || 0));
 
   let candidate: HTMLElement | null = null;
   for (const block of blocks) {
     const blockLine = Number(block.dataset.sourceLine || 0);
-    if (blockLine === lineStart) return block;
-    if (blockLine <= (lineStart || 0)) candidate = block;
+    if (blockLine === line) return block;
+    if (blockLine <= line) candidate = block;
     else break;
   }
   return candidate;

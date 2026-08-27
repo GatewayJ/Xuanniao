@@ -22,7 +22,7 @@ import { selectionContextForPreview } from "./preview-selection";
 import { MarkdownThreadEditor, nearestThreadForLine } from "./ThreadEditor";
 import { canonicalizeSelection, resolveThreadAnchor } from "./thread-anchors";
 import { remapThreadsForChange } from "./thread-anchor-remap";
-import { buildPreviewThreadLayout } from "./thread-spatial";
+import { buildPreviewThreadLayout, findPreviewBlockForLine } from "./thread-spatial";
 import {
   findThreadForSelection,
   insertThreadOnce,
@@ -32,6 +32,7 @@ import {
 import type { AgentRunSnapshot, FileBrowserPayload, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 const EXPLICIT_THREAD_ACTIVATION_HOLD_MS = 2500;
+const DOCUMENT_VIEWPORT_ANCHOR = 0.28;
 type SelectionViewportRect = {
   left: number;
   top: number;
@@ -274,13 +275,40 @@ export function App() {
   function previewLineAtViewport(): number | null {
     const root = previewRef.current;
     if (!root) return null;
-    const target = root.scrollTop + root.clientHeight * 0.28;
+    const target = root.scrollTop + root.clientHeight * DOCUMENT_VIEWPORT_ANCHOR;
     let line: number | null = null;
     for (const block of [...root.querySelectorAll<HTMLElement>("[data-source-line]")]) {
       if (block.offsetTop <= target) line = Number(block.dataset.sourceLine || 1);
       else break;
     }
     return line;
+  }
+
+  function changeDocumentMode(nextMode: Mode) {
+    const currentMode = modeRef.current;
+    if (nextMode === currentMode) return;
+    const line = currentMode === "edit"
+      ? editorRef.current?.lineAtViewport(DOCUMENT_VIEWPORT_ANCHOR) ?? null
+      : currentMode === "preview"
+        ? previewLineAtViewport()
+        : null;
+
+    modeRef.current = nextMode;
+    setMode(nextMode);
+    if (line === null || nextMode === "outline") return;
+
+    window.requestAnimationFrame(() => {
+      if (nextMode === "edit") {
+        editorRef.current?.scrollLineToViewport(line, DOCUMENT_VIEWPORT_ANCHOR);
+      } else {
+        const root = previewRef.current;
+        const block = root ? findPreviewBlockForLine(root, line) : null;
+        if (root && block) {
+          root.scrollTop = Math.max(0, block.offsetTop - root.clientHeight * DOCUMENT_VIEWPORT_ANCHOR);
+        }
+      }
+      scheduleThreadSpatialSync();
+    });
   }
 
   function syncDocumentScrollFromThreadRail(scrollTop: number) {
@@ -705,7 +733,7 @@ export function App() {
           activeThread={activeThread}
           editorHostRef={editorHostRef}
           previewRef={previewRef}
-          onModeChange={setMode}
+          onModeChange={changeDocumentMode}
           onNavigateToLine={navigateToLine}
           onPreviewScroll={syncPreviewScroll}
           onPreviewSelectionChange={capturePreviewSelection}
