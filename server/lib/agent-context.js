@@ -58,7 +58,7 @@ export function buildAgentPrompt({
   if (Array.isArray(supplementalHistory) && supplementalHistory.length > 0) {
     sections.push(
       "",
-      "Supplemental conversation context required by this transport:",
+      "Supplemental conversation context not present in the active agent session:",
       "<XUANNIAO_BRANCH_HISTORY>",
       formatHistory(supplementalHistory),
       "</XUANNIAO_BRANCH_HISTORY>"

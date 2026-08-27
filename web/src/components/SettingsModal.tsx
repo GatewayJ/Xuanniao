@@ -89,7 +89,6 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
   const modelSettingsChanged = Boolean(
     data && (model !== (data.model || "") || reasoningEffort !== (data.reasoningEffort || ""))
   );
-  const permissionChanged = Boolean(data && permissionMode !== data.permissionMode);
   const quickActionsValid = quickActions.length <= 12 && quickActions.every((action) => (
     action.label.trim().length > 0 &&
     action.label.trim().length <= 40 &&
@@ -101,9 +100,7 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
     !loading &&
     !saving &&
     quickActionsValid &&
-    (!permissionChanged || data.permissionSelectionSupported) &&
     (!modelSettingsChanged || (
-      data.modelSelectionSupported &&
       !data.catalogError &&
       !unavailableModel
     ))
@@ -205,10 +202,6 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
               {data?.catalogError && (
                 <div className="settingsError" role="alert">无法读取模型列表：{data.catalogError}</div>
               )}
-              {data && !data.modelSelectionSupported && (
-                <div className="settingsNotice">当前使用 ACP 兼容模式，无法修改模型、推理和权限。</div>
-              )}
-
               {data && (
                 <section className="settingsSection permissionSettingsSection" aria-labelledby="permission-setting-label">
                   <div className="settingsSectionHeading">
@@ -222,7 +215,6 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
                       id="permission-mode"
                       aria-labelledby="permission-setting-label"
                       value={permissionMode}
-                      disabled={!data.permissionSelectionSupported}
                       onChange={(event) => setPermissionMode(event.target.value as AgentPermissionMode)}
                     >
                       {PERMISSION_MODE_OPTIONS.map((option) => (
@@ -234,7 +226,7 @@ export function SettingsModal({ open, data, loading, saving, error, onClose, onS
                 </section>
               )}
 
-              {data && data.modelSelectionSupported && (
+              {data && (
                 <>
                   <section className="settingsSection" aria-labelledby="model-setting-label">
                     <div className="settingsSectionHeading">

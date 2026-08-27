@@ -1,11 +1,3 @@
-export function normalizeAgentMode(value) {
-  const mode = String(value ?? "full-access").trim().toLowerCase();
-  if (mode === "full-access" || mode === "read-only") {
-    return mode;
-  }
-  throw new Error(`Unsupported XUANNIAO_AGENT_MODE: ${value}. Expected full-access or read-only.`);
-}
-
 export function parseCommandLine(commandLine) {
   const tokens = [];
   let current = "";

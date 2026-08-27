@@ -19,7 +19,7 @@ test("thread store paths use the document path sha256 under the metadata root", 
   assert.equal(legacyThreadStorePathFor(documentPath), path.join(path.dirname(documentPath), ".xuanniao", "plan.md.threads.json"));
 });
 
-test("agent sessions persist across store instances and legacy ACP sessions migrate", async () => {
+test("agent sessions persist across store instances", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-store-test-"));
   const storePath = path.join(tempDir, "threads.json");
 
@@ -53,59 +53,6 @@ test("agent sessions persist across store instances and legacy ACP sessions migr
       turnId: "turn-123",
       documentHash: "hash-123"
     });
-
-    await writeFile(
-      storePath,
-      JSON.stringify({
-        version: 2,
-        threads: [
-          {
-            id: "legacy",
-            title: "Legacy",
-            selectedText: "",
-            anchor: {},
-            messages: [
-              {
-                id: "legacy-question",
-                role: "user",
-                content: "Legacy question",
-                nodeId: "legacy-question",
-                parentId: null,
-                acpSessionId: "legacy-acp-session"
-              }
-            ]
-          }
-        ]
-      }),
-      "utf8"
-    );
-    const legacy = await new ThreadStore(storePath).get("legacy");
-    assert.deepEqual(legacy.messages[0].agentSession, {
-      adapter: "acp",
-      sessionId: "legacy-acp-session",
-      turnId: null,
-      documentHash: null
-    });
-
-    await writeFile(
-      storePath,
-      JSON.stringify({
-        version: 1,
-        threads: [
-          {
-            id: "legacy-thread-session",
-            title: "Legacy thread session",
-            selectedText: "",
-            anchor: {},
-            acpSessionId: "legacy-thread-acp-session",
-            messages: [{ id: "root", role: "user", content: "Root" }]
-          }
-        ]
-      }),
-      "utf8"
-    );
-    const legacyThreadSession = await new ThreadStore(storePath).get("legacy-thread-session");
-    assert.equal(legacyThreadSession.messages[0].agentSession.sessionId, "legacy-thread-acp-session");
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

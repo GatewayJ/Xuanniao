@@ -215,9 +215,6 @@ export type NodeQuickAction = {
 };
 
 export type AgentSettingsPayload = {
-  transport: string;
-  modelSelectionSupported: boolean;
-  permissionSelectionSupported: boolean;
   model: string | null;
   reasoningEffort: string | null;
   permissionMode: AgentPermissionMode;

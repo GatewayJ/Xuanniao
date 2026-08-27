@@ -152,6 +152,7 @@ test("native child branches rely on Codex to fork the exact parent history", asy
   });
 
   assert.equal(session.sessionId, "fork-1");
+  assert.equal(session.historyMode, "inherited");
   assert.deepEqual(runtime.calls[0], {
     method: "thread/fork",
     params: {
@@ -184,7 +185,7 @@ test("native resumed threads refresh Xuanniao developer instructions", async () 
   assert.equal(resumed.params.developerInstructions, AGENT_DEVELOPER_INSTRUCTIONS);
 });
 
-test("native resumed turns rely on the Codex thread instead of replaying Xuanniao history", async () => {
+test("native resumed turns supplement local messages missing from the Codex thread", async () => {
   const runtime = new StubRuntime();
   runtime.loadedThreads.add("stored-thread");
   const thread = {
@@ -205,11 +206,11 @@ test("native resumed turns rely on the Codex thread instead of replaying Xuannia
 
   await runtime.runTurn({ question: "Continue", document, thread });
   const prompt = runtime.calls.find(({ method }) => method === "turn/start").params.input[0].text;
-  assert.doesNotMatch(prompt, /<XUANNIAO_BRANCH_HISTORY>/);
-  assert.doesNotMatch(prompt, /Local-only note/);
+  assert.match(prompt, /<XUANNIAO_BRANCH_HISTORY>/);
+  assert.match(prompt, /Local-only note/);
 });
 
-test("native resume failure starts a new thread without rebuilding history", async () => {
+test("native resume failure starts a new thread and rebuilds history", async () => {
   const runtime = new StubRuntime();
   runtime.failMethods.add("thread/resume");
   const thread = {
@@ -230,10 +231,11 @@ test("native resume failure starts a new thread without rebuilding history", asy
   await runtime.runTurn({ question: "Retry in a new thread", document, thread });
   assert.deepEqual(runtime.calls.slice(0, 2).map(({ method }) => method), ["thread/resume", "thread/start"]);
   const prompt = runtime.calls.find(({ method }) => method === "turn/start").params.input[0].text;
-  assert.doesNotMatch(prompt, /XUANNIAO_BRANCH_HISTORY|Old Xuanniao history/);
+  assert.match(prompt, /<XUANNIAO_BRANCH_HISTORY>/);
+  assert.match(prompt, /Old Xuanniao history/);
 });
 
-test("native fork failure starts a new thread without rebuilding history", async () => {
+test("native fork failure starts a new thread and rebuilds history", async () => {
   const runtime = new StubRuntime();
   runtime.failMethods.add("thread/fork");
   const thread = {
@@ -254,7 +256,8 @@ test("native fork failure starts a new thread without rebuilding history", async
   await runtime.runTurn({ question: "Start this branch", document, thread });
   assert.deepEqual(runtime.calls.slice(0, 2).map(({ method }) => method), ["thread/fork", "thread/start"]);
   const prompt = runtime.calls.find(({ method }) => method === "turn/start").params.input[0].text;
-  assert.doesNotMatch(prompt, /XUANNIAO_BRANCH_HISTORY|Old parent answer/);
+  assert.match(prompt, /<XUANNIAO_BRANCH_HISTORY>/);
+  assert.match(prompt, /Old parent answer/);
 });
 
 test("native runtime lists paginated models and applies settings to the next turn", async () => {

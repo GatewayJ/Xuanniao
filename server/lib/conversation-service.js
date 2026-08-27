@@ -428,7 +428,6 @@ function activeReplyKey(threadId, questionMessageId) {
 
 function agentFailureContent(errorMessage) {
   const nativeStartupFailure = /Failed to start Codex app-server command|XUANNIAO_CODEX_CMD is empty/.test(errorMessage);
-  const acpStartupFailure = /Failed to start ACP command|XUANNIAO_ACP_CMD is empty/.test(errorMessage);
   const lines = ["Codex request failed.", "", errorMessage];
   if (nativeStartupFailure) {
     lines.push(
@@ -438,16 +437,6 @@ function agentFailureContent(errorMessage) {
       "```bash",
       "codex login",
       'XUANNIAO_CODEX_CMD="codex app-server" npm start -- prd.md',
-      "```"
-    );
-  } else if (acpStartupFailure) {
-    lines.push(
-      "",
-      "Install codex-acp or set XUANNIAO_ACP_CMD to an ACP-compatible Codex adapter:",
-      "",
-      "```bash",
-      "npm install -g @agentclientprotocol/codex-acp",
-      'XUANNIAO_ACP_CMD="/path/to/codex-acp" npm start -- prd.md',
       "```"
     );
   } else {

@@ -278,7 +278,7 @@ export function hasAssistantReply(thread, userMessageId) {
   return findAssistantReplyIndex(thread.messages, index) >= 0;
 }
 
-export function normalizeAgentSession(value, legacyAcpSessionId = null) {
+export function normalizeAgentSession(value) {
   if (value && typeof value === "object") {
     const adapter = typeof value.adapter === "string" ? value.adapter.trim() : "";
     const sessionId = typeof value.sessionId === "string" ? value.sessionId.trim() : "";
@@ -290,14 +290,6 @@ export function normalizeAgentSession(value, legacyAcpSessionId = null) {
         documentHash: typeof value.documentHash === "string" && value.documentHash ? value.documentHash : null
       };
     }
-  }
-  if (typeof legacyAcpSessionId === "string" && legacyAcpSessionId) {
-    return {
-      adapter: "acp",
-      sessionId: legacyAcpSessionId,
-      turnId: null,
-      documentHash: null
-    };
   }
   return null;
 }
@@ -357,7 +349,7 @@ function createConversationMessage(message, { id, now }) {
     content: message.content,
     nodeId: typeof message.nodeId === "string" && message.nodeId ? message.nodeId : message.role === "user" ? id : null,
     parentId: typeof message.parentId === "string" && message.parentId ? message.parentId : null,
-    agentSession: normalizeAgentSession(message.agentSession, message.acpSessionId),
+    agentSession: normalizeAgentSession(message.agentSession),
     agentSessionClaim: normalizeAgentSession(message.agentSessionClaim),
     error: Boolean(message.error),
     meta: message.meta || {},

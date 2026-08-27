@@ -23,7 +23,7 @@ export function findEffectiveModel(
 }
 
 export function agentSettingsSummary(settings: AgentSettingsPayload | null): string | null {
-  if (!settings || !settings.modelSelectionSupported) return null;
+  if (!settings) return null;
   const model = findEffectiveModel(settings.models, settings.model || "");
   const modelLabel = model?.displayName || settings.model || "Codex 默认模型";
   const effort = settings.reasoningEffort || model?.defaultReasoningEffort;

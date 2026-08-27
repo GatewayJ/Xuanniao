@@ -38,8 +38,6 @@ test("HTTP server starts without Agent availability and reports failed turns exp
 
     const settings = await jsonRequest(`${baseUrl}/api/settings`);
     assert.equal(settings.response.status, 200);
-    assert.equal(settings.payload.modelSelectionSupported, true);
-    assert.equal(settings.payload.permissionSelectionSupported, true);
     assert.equal(settings.payload.permissionMode, "request-approval");
     assert.deepEqual(settings.payload.quickActions.map((action) => action.label), ["发散", "审查", "收敛", "转任务"]);
     assert.deepEqual(settings.payload.models, []);

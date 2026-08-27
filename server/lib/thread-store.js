@@ -302,9 +302,9 @@ function applyAnchorUpdates(data, patches, deletedThreadIds) {
 }
 
 function normalizeStoredThread(thread) {
-  const { acpSessionId, agentSession, ...stored } = thread;
+  const { agentSession, ...stored } = thread;
   const messages = normalizeStoredMessages(thread.messages);
-  const legacySession = normalizeAgentSession(agentSession, acpSessionId);
+  const legacySession = normalizeAgentSession(agentSession);
   const firstNodeRoot = messages.find((message) => message.role === "user" && message.id === (message.nodeId || message.id));
   if (legacySession && firstNodeRoot && !firstNodeRoot.agentSession) {
     firstNodeRoot.agentSession = legacySession;
@@ -322,12 +322,11 @@ function normalizeStoredMessages(messages) {
   return messages.map((message) => {
     const hasParentId = Object.prototype.hasOwnProperty.call(message, "parentId");
     const parentId = hasParentId ? (typeof message.parentId === "string" && message.parentId ? message.parentId : null) : previousQuestionId;
-    const { acpSessionId, ...stored } = message;
     const normalized = {
-      ...stored,
+      ...message,
       nodeId: typeof message.nodeId === "string" && message.nodeId ? message.nodeId : message.role === "user" ? message.id : parentId || previousNodeId,
       parentId,
-      agentSession: normalizeAgentSession(message.agentSession, acpSessionId),
+      agentSession: normalizeAgentSession(message.agentSession),
       agentSessionClaim: normalizeAgentSession(message.agentSessionClaim)
     };
     if (message.role === "user") {

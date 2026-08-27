@@ -10,9 +10,6 @@ test("node quick actions use defaults until settings load", () => {
 
 test("node quick actions preserve custom and explicitly empty settings", () => {
   const base: AgentSettingsPayload = {
-    transport: "codex-app-server",
-    modelSelectionSupported: true,
-    permissionSelectionSupported: true,
     model: null,
     reasoningEffort: null,
     permissionMode: "request-approval",

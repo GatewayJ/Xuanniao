@@ -1,35 +1,25 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AcpDocumentAgent } from "./acp-client.js";
-import { assertAgentRuntime, createAgentRuntime, normalizeAgentTransport, runtimeAgentSettingsFromEnv } from "./agent-runtime.js";
+import { assertAgentRuntime, createAgentRuntime, runtimeAgentSettingsFromEnv } from "./agent-runtime.js";
 import { DEFAULT_NODE_QUICK_ACTIONS } from "./agent-settings.js";
 
 const defaultQuickActions = DEFAULT_NODE_QUICK_ACTIONS.map((action) => ({ ...action }));
 import { CodexAppServerRuntime } from "./codex-app-server-runtime.js";
 
-test("native Codex is the default transport and ACP remains explicit", () => {
+test("the runtime uses native Codex app-server", () => {
   const common = {
     documentPath: "/tmp/plan.md",
     cwd: "/tmp"
   };
   const native = createAgentRuntime({ ...common, env: {} });
-  const acp = createAgentRuntime({
-    ...common,
-    env: { XUANNIAO_AGENT_TRANSPORT: "acp" }
-  });
 
   assert.ok(native instanceof CodexAppServerRuntime);
   assert.equal(native.commandLine, "codex app-server");
   assert.equal(native.timeoutMs, 600_000);
-  assert.ok(acp instanceof AcpDocumentAgent);
-  assert.equal(acp.commandLine, "codex-acp");
-  assert.equal(acp.timeoutMs, 600_000);
 });
 
-test("transport and timeout configuration fails fast on invalid values", () => {
-  assert.equal(normalizeAgentTransport(undefined), "codex");
-  assert.throws(() => normalizeAgentTransport("unknown"), /Expected codex or acp/);
+test("timeout configuration fails fast on invalid values", () => {
   assert.throws(
     () =>
       createAgentRuntime({
@@ -80,11 +70,8 @@ test("persisted runtime settings override environment values including explicit 
   assert.equal(runtime.status().permissionMode, "request-approval");
 });
 
-test("permission mode can be configured by environment with legacy access mode compatibility", () => {
+test("permission mode can be configured by environment", () => {
   assert.equal(runtimeAgentSettingsFromEnv({
     XUANNIAO_AGENT_PERMISSION_MODE: "auto-review"
   }).permissionMode, "auto-review");
-  assert.equal(runtimeAgentSettingsFromEnv({
-    XUANNIAO_AGENT_MODE: "read-only"
-  }).permissionMode, "custom");
 });

@@ -6,9 +6,6 @@ import { DEFAULT_NODE_QUICK_ACTIONS } from "./quick-actions";
 
 test("agent settings summary reports the effective model and reasoning depth", () => {
   assert.equal(agentSettingsSummary({
-    transport: "codex-app-server",
-    modelSelectionSupported: true,
-    permissionSelectionSupported: true,
     model: "gpt-sol",
     reasoningEffort: "max",
     permissionMode: "auto-review",
@@ -29,9 +26,6 @@ test("agent settings summary reports the effective model and reasoning depth", (
 
 test("agent settings summary resolves Codex defaults", () => {
   assert.equal(agentSettingsSummary({
-    transport: "codex-app-server",
-    modelSelectionSupported: true,
-    permissionSelectionSupported: true,
     model: null,
     reasoningEffort: null,
     permissionMode: "request-approval",

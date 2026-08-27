@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { normalizeAgentMode, parseCommandLine } from "./agent-config.js";
+import { parseCommandLine } from "./agent-config.js";
 import {
   AGENT_DEVELOPER_INSTRUCTIONS,
   DocumentSnapshotCache,
@@ -19,7 +19,6 @@ export class CodexAppServerRuntime {
     documentPath,
     cwd,
     commandLine = "codex app-server",
-    legacyAccessMode = null,
     timeoutMs = 600_000,
     interruptGraceMs = 5_000,
     model = null,
@@ -32,7 +31,6 @@ export class CodexAppServerRuntime {
     this.documentPath = documentPath;
     this.cwd = cwd;
     this.commandLine = commandLine;
-    this.legacyAccessMode = legacyAccessMode ? normalizeAgentMode(legacyAccessMode) : null;
     this.timeoutMs = timeoutMs;
     this.interruptGraceMs = interruptGraceMs;
     this.model = model;
@@ -73,7 +71,7 @@ export class CodexAppServerRuntime {
     return {
       transport: adapterName,
       command: parseCommandLine(this.commandLine),
-      accessMode: permissionAccessMode(this.permissionMode, this.legacyAccessMode),
+      accessMode: permissionAccessMode(this.permissionMode),
       permissionMode: this.permissionMode,
       initialized: this.initialized,
       running: this.rpc.running,
@@ -194,12 +192,17 @@ export class CodexAppServerRuntime {
         : this.permissionMode;
       const turnAccessMode = mode === "create-document"
         ? "read-only"
-        : permissionAccessMode(this.permissionMode, this.legacyAccessMode);
+        : permissionAccessMode(this.permissionMode);
       const session = await this.ensureThread(thread, turnPermissionMode);
       const effectiveSettings = await this.resolveTurnSettings(session);
       const hash = documentHash(document.content);
       const previousDocument = this.documentSnapshots.get(session.sessionId);
       const includeDocument = session.documentHash !== hash;
+      const supplementalHistory = session.historyMode === "fresh"
+        ? thread.messages || []
+        : session.historyMode === "resumed"
+          ? thread.unsyncedCurrentNodeMessages || []
+          : [];
       const prompt = buildAgentPrompt({
         question,
         document,
@@ -207,6 +210,7 @@ export class CodexAppServerRuntime {
         mode,
         accessMode: turnAccessMode,
         includeDocument,
+        supplementalHistory,
         previousDocument: includeDocument ? (previousDocument ?? null) : null,
         maxChars: this.contextMaxChars
       });
@@ -348,7 +352,11 @@ export class CodexAppServerRuntime {
         return this.createThread(thread, permissionMode);
       }
       this.threadOwners.set(stored.sessionId, thread.id);
-      return { ...stored, ...this.settingsForThread(stored.sessionId) };
+      return {
+        ...stored,
+        historyMode: "resumed",
+        ...this.settingsForThread(stored.sessionId)
+      };
     }
 
     const parent = sessionForAdapter(thread.parentAgentSession, adapterName);
@@ -371,6 +379,7 @@ export class CodexAppServerRuntime {
           sessionId,
           turnId: null,
           documentHash: parent.documentHash,
+          historyMode: "inherited",
           ...this.settingsForThread(sessionId)
         };
       } catch {
@@ -400,6 +409,7 @@ export class CodexAppServerRuntime {
       sessionId,
       turnId: null,
       documentHash: null,
+      historyMode: "fresh",
       ...this.settingsForThread(sessionId)
     };
   }
@@ -424,7 +434,7 @@ export class CodexAppServerRuntime {
         model: this.model,
         developerInstructions: AGENT_DEVELOPER_INSTRUCTIONS
       }),
-      ...codexThreadPermissionParams(permissionMode, this.legacyAccessMode)
+      ...codexThreadPermissionParams(permissionMode)
     };
   }
 
@@ -1587,7 +1597,7 @@ function isDocumentPermissionMode(permissionMode) {
   return permissionMode.startsWith("document-read-only:");
 }
 
-function codexThreadPermissionParams(permissionMode, legacyAccessMode) {
+function codexThreadPermissionParams(permissionMode) {
   if (isDocumentPermissionMode(permissionMode)) {
     return {
       approvalPolicy: "on-request",
@@ -1619,18 +1629,16 @@ function codexThreadPermissionParams(permissionMode, legacyAccessMode) {
   return {
     approvalPolicy: null,
     approvalsReviewer: null,
-    sandbox: legacyAccessMode === "read-only"
-      ? "read-only"
-      : legacyAccessMode === "full-access" ? "danger-full-access" : null
+    sandbox: null
   };
 }
 
-function permissionAccessMode(permissionMode, legacyAccessMode) {
+function permissionAccessMode(permissionMode) {
   if (permissionMode === "request-approval" || permissionMode === "auto-review") {
     return "workspace-write";
   }
   if (permissionMode === "full-access") return "full-access";
-  return legacyAccessMode || "custom";
+  return "custom";
 }
 
 function optionalString(value) {

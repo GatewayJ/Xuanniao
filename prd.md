@@ -4,7 +4,7 @@
 
 ## 1. 产品定义
 
-玄鸟是一个本地优先（Local-first）的 AI Markdown 文档协作工具。用户在浏览器中编辑本地 Markdown 文件，围绕选中文本创建评论线程，并通过原生 Codex app-server 或 ACP 兼容传输进行多轮讨论。
+玄鸟是一个本地优先（Local-first）的 AI Markdown 文档协作工具。用户在浏览器中编辑本地 Markdown 文件，围绕选中文本创建评论线程，并通过原生 Codex app-server 进行多轮讨论。
 
 这里的“本地优先”具体指：
 
@@ -12,7 +12,7 @@
 - Thread、消息和协议无关的 Agent session 引用保存在用户 home 目录下的本地元数据文件中。
 - Browser UI、Node Server 和 Agent Runtime 都在本机运行。
 - 不提供云端文档托管、云同步或多人实时协作。
-- Codex 最终使用本地模型还是远端模型、是否访问网络，由 Codex CLI 或兼容 adapter 的配置决定；玄鸟当前不承诺完全离线推理。
+- Codex 最终使用本地模型还是远端模型、是否访问网络，由 Codex CLI 配置和用户授权决定；玄鸟当前不承诺完全离线推理。
 
 “协作”特指用户与 AI 围绕文档协作，不是多人协同编辑。
 
@@ -60,9 +60,9 @@
 | Mermaid 查看 | 已实现 | Preview 本地渲染、横向查看、全屏缩放 |
 | Agent 访问模式 | 已实现 | 设置页支持请求批准、自动审批、完全访问和 `config.toml` 自定义；命令、文件和额外权限请求进入浏览器审批 |
 | Codex 设置 | 已实现 | 设置页动态读取 `model/list`；模型、推理深度与权限模式持久化，并从下一轮提问生效 |
-| Agent session 恢复 | 已实现 | 原生模式保存 thread/turn ID 并调用 `thread/resume`；ACP 兼容模式使用 `session/load` |
+| Agent session 恢复 | 已实现 | 保存 thread/turn ID，并在服务重启后调用 `thread/resume` |
 | Agent 修改仓库文件 | 已实现 | Runtime 可按沙箱和审批策略修改活动 Markdown 之外的仓库文件 |
-| 受控文档精确编辑 | 已实现、默认开启 | 选区仅定义讨论根节点；Codex 可对文档任意唯一文本区域提出精确编辑，由统一事务应用 |
+| Agent 修改活动文档 | 已实现 | 选区仅定义讨论根节点；Codex 使用文件工具直接编辑，回合结束后通过快照差异重映射全部 anchor |
 | Patch/Diff 审核 | 未实现 | 没有 patch 数据模型、diff preview、确认后 apply 流程 |
 | 实时流式回复 | 部分实现 | Agent 工具、计划和状态通过 SSE 实时传递；assistant 正文仍随最终 HTTP 响应返回 |
 | Tool Call 展示 | 已实现 | 执行中自动展开命令、文件、MCP、搜索和计划；正文返回后折叠，刷新后仍可展开 |
@@ -118,7 +118,7 @@ flowchart LR
 | Styling | 原生 CSS | 没有 Tailwind |
 | Server | Node.js 20.19.x / 22.12+，ESM JavaScript | 使用内置 `http` 和文件系统 API，没有 Web 框架 |
 | Browser/Server 通信 | REST + JSON + SSE | 文档和消息使用 REST；Agent 运行事件使用单向 SSE |
-| Agent Runtime | stdio JSONL / JSON-RPC | 默认直连 `codex app-server`；可切换 ACP adapter |
+| Agent Runtime | stdio JSONL / JSON-RPC | 直连 `codex app-server` |
 | Thread 持久化 | 本地 JSON | 每个文档一个 `threads.json` |
 | Markdown 索引 | 自定义轻量行解析器 | 识别 heading、paragraph、无序 list、反引号 fenced code |
 | Tests | Node test runner + TypeScript check | 单元测试覆盖 Runtime、上下文策略、store、file browser、anchor remap |
@@ -144,17 +144,17 @@ flowchart LR
 │ Agent Runtime：session、上下文、事件、fork/resume 与 approval broker      │
 └────────────────────────── semantic runtime API ──────────────────────────┘
                                       │
-              Codex app-server（原生） · ACP adapter（兼容）
+                          Codex app-server（原生）
                                       │
                   本地 Markdown + ~/xuanniao 元数据
 ```
 
 一个 Server 进程只有一个活动文档：
 
-- 活动文档对应一个 Agent Runtime 句柄；`codex app-server` 或 ACP 子进程只在第一次 Agent 请求时按需启动。
+- 活动文档对应一个 Agent Runtime 句柄；`codex app-server` 子进程只在第一次 Agent 请求时按需启动。
 - 每个新问题形成独立 conversation node；当前叶子的线性后续复用同一 Agent session，只有从历史节点分叉时才从精确 turn fork 新 session。
 - 切换文档时创建新的文档上下文并替换 ThreadStore，随后释放旧 Runtime；Agent CLI 不可用不会阻断文档打开与编辑。
-- 原生 Runtime 只串行化同一 session，不同分支可以并行；ACP 兼容 adapter 仍按进程串行。
+- Runtime 只串行化同一 session，不同分支可以并行。
 - ThreadStore 对 mutation 使用单实例串行队列，避免并行分支完成时相互覆盖 JSON 更新。
 
 ### 4.2 前端模块
@@ -189,16 +189,15 @@ flowchart LR
 | --- | --- | --- |
 | Server 入口 | `server/index.js` | 参数解析、活动文档上下文、REST、静态资源与依赖组合 |
 | HTTP 安全 | `server/lib/http-security.js` | 绑定地址、Host/Origin、JSON 媒体类型与安全响应头 |
-| 会话应用服务 | `server/lib/conversation-service.js` | 消息命令、Agent 回合和受控文档修改编排 |
+| 会话应用服务 | `server/lib/conversation-service.js` | 消息命令、Agent 回合和文档变化协调 |
 | 会话领域模型 | `server/lib/conversation-model.js` | 问题放置、状态迁移、分支校验和 session 失效 |
 | 文档事务 | `server/lib/document-workspace.js` | revision、原子保存、canonical anchor 与活动文档保护 |
-| Runtime 组合 | `server/lib/agent-runtime.js` | 传输选择、公共配置归一化和应用边界 |
+| Runtime 组合 | `server/lib/agent-runtime.js` | app-server 配置归一化和应用边界 |
 | Agent 设置 | `server/lib/agent-settings.js` | 模型目录归一化、模型与推理深度能力校验、权限模式校验 |
 | 设置存储 | `server/lib/agent-settings-store.js` | 全局 Codex 偏好的原子持久化 |
 | JSONL 进程 | `server/lib/json-line-rpc-process.js` | 子进程、请求关联、超时、退出处理和 stderr 诊断 |
 | Codex Runtime | `server/lib/codex-app-server-runtime.js` | app-server 子进程、thread/turn、fork/resume、事件和审批 |
 | Context Policy | `server/lib/agent-context.js` | 文档快照、增量变更、分支历史和受控替换规则 |
-| ACP Client | `server/lib/acp-client.js` | ACP 兼容 session、update、文件接口和审批适配 |
 | Thread Store | `server/lib/thread-store.js` | Thread JSON 读写、迁移、锁与 mutation 串行化 |
 | 元数据路径 | `server/lib/metadata-paths.js` | 文档绝对路径到本地元数据目录的映射 |
 | Anchor 校准 | `server/lib/thread-anchor-remap.js` | Agent 或外部写入后恢复、移动或删除 thread |
@@ -241,14 +240,14 @@ sequenceDiagram
   participant API as Node Server
   participant Store as ThreadStore
   participant Runtime as Agent Runtime
-  participant Codex as Codex app-server / ACP
+  participant Codex as Codex app-server
 
   UI->>API: flush PUT /api/document
   UI->>API: POST thread message
   API->>Store: 保存 user message
   API->>Runtime: runTurn(document, branch, question)
   Runtime->>Codex: thread start/resume/fork
-  Runtime->>Codex: turn/start 或 session/prompt
+  Runtime->>Codex: turn/start
   Codex-->>Runtime: item/update events
   Runtime-->>UI: SSE agent run updates
   Codex-->>Runtime: turn completed
@@ -265,10 +264,10 @@ sequenceDiagram
 
 1. Browser 通过 `PUT /api/document` 保存完整 Markdown。
 2. 选区只定义讨论树根节点和对话上下文，不定义编辑边界。
-3. 用户明确要求修改文档时，Server 解析 Codex 的精确 old-text/new-text 编辑提案；目标可以位于文档任意位置。
-4. `DocumentWorkspace` 校验 base revision、目标文本唯一性和编辑不重叠，再原子提交 Markdown、所有 Thread anchor、回答和 Agent session。
+3. Codex 根据用户要求使用文件工具修改活动文档或仓库中的其它文件；玄鸟不预先用关键词分类编辑意图。
+4. `DocumentWorkspace` 比较回合前后快照，推导文本变化并协调提交 Markdown revision、所有 Thread anchor、回答和 Agent session。
 
-活动 Markdown 是受保护资源：ACP 文件写直接拒绝；每个 Agent turn 前后记录文档快照，发现绕过事务的直接写入时保留当前文件并返回冲突，避免旧快照覆盖未知外部修改。full-access Codex 仍缺少操作系统级单文件隔离，因此该 turn 后校验是保护层而不是内核强制边界。
+每个 Agent turn 前后都会记录活动 Markdown 快照；发现无法归因的直接写入时保留当前文件并返回冲突，避免旧快照覆盖未知外部修改。full-access Codex 仍缺少操作系统级单文件隔离，因此该 turn 后校验是保护层而不是内核强制边界。
 
 ## 6. Agent Runtime 实现
 
@@ -282,7 +281,7 @@ runTurn(question, document, branch, mode, onUpdate) → answer + AgentSession
 listPermissionRequests / resolvePermissionRequest
 ```
 
-协议选择、进程启动和 wire format 被封装在 adapter 内。`status()` 明确报告 resume、fork、跨 session 并发、审批代理、增量文档上下文和事件流等能力，避免把 ACP 的最低能力误当成所有 Agent 的共同上限。
+进程启动和 wire format 被封装在 Runtime 内。`status()` 明确报告 resume、fork、跨 session 并发、审批代理、增量文档上下文和事件流等能力。
 
 当前浏览器尚未实现结构化 `request_user_input`、MCP elicitation 和动态 client tool 表单，Runtime 会在 capability 中明确报告为 `false`；未知 server request 返回协议错误，Agent 可退回普通文本交互，不伪装成已支持。
 
@@ -320,8 +319,6 @@ type AgentSession = {
 
 每次调用还会携带当前 lineage revision。Agent 完成时，ThreadStore 在写入回答与 AgentSession 的同一 mutation 中重新校验 revision；如果祖先路径在运行期间改变，旧回答不会提交，而是要求重试。
 
-旧版 `acpSessionId` 在读取 version 1/2 sidecar 时迁移为 `adapter: "acp"` 的 AgentSession；新写入格式为 version 3。
-
 ### 6.4 上下文策略
 
 - 新建或必须重建的 session 注入完整文档快照和当前分支历史。
@@ -330,25 +327,14 @@ type AgentSession = {
 - 大范围变化或进程重启后缺少旧快照时，重新发送完整文档。
 - 上下文超过显式字符预算时失败并提示，不会静默截断；文档快照使用有界 LRU 缓存。
 - 原生 fork 继承祖先历史；由于共享 session 的最新文档快照可能晚于 fork checkpoint，历史 fork 必要时重新注入完整当前文档，兄弟分支历史永不注入。
-- ACP adapter 在新 session 或恢复失败时回退到完整分支历史；已恢复 session 使用增量上下文。
 
 ### 6.5 审批与事件
 
-Codex 的 command、file change 和 additional permissions 请求会转成统一 PermissionRequest，挂起原协议请求并等待浏览器选择。Allow once、Allow for session、Reject 和 Cancel 会映射回协议原生 decision。ACP `session/request_permission` 使用同一个审批队列，不再根据访问模式自动代替用户选择。
+Codex 的 command、file change 和 additional permissions 请求会转成统一 PermissionRequest，挂起协议请求并等待浏览器选择。Allow once、Allow for session、Reject 和 Cancel 会映射回 app-server decision。
 
 Runtime 把 command execution、file change、MCP/dynamic tool、web search、plan、协作调用和公开 reasoning summary 归一为展示事件，并交给有界 `AgentRunBroker` 通过 SSE 发布。命令输出 delta 会在执行中增量归并，终态步骤与耗时写入 assistant message meta。隐藏 reasoning 正文不会进入应用展示或持久化；assistant 正文仍在 turn 完成后一次性返回。
 
 原生 turn 使用 10 分钟活动空闲超时，Agent 输出和工具事件会自动续期，等待用户审批时暂停计时。连续无活动超时后 Runtime 会发送 `turn/interrupt` 并继续持有当前 session lock；若宽限期内仍收不到终态，则重启 app-server 并失败掉其它在途 turn，确保超时任务不能在后台继续修改工作区。迟到事件和抢跑事件均有数量边界。
-
-### 6.6 ACP 兼容模式
-
-设置 `XUANNIAO_AGENT_TRANSPORT=acp` 后使用 `codex-acp`：
-
-- 支持 `session/new` 和 adapter 声明的 `session/load`。
-- 继续提供 ACP 文件接口和 update 事件。
-- 不声明原生 fork 能力；分支通过新 session 与本地祖先历史恢复。
-- 因一个 adapter 进程只维护一个 active turn，prompt 仍全局串行。
-- prompt 使用活动空闲超时：update 事件会续期，等待权限选择时暂停；连续无活动超时后 adapter 会被终止并在下一轮重建，旧 session 和迟到事件不会复用。
 
 ## 7. 文档、Block 与 Thread Anchor
 
@@ -533,17 +519,11 @@ Node Server 检测到 `web/dist/index.html` 时会提供构建后的静态资源
 | --- | --- | --- |
 | `HOST` | `127.0.0.1` | Node Server 地址 |
 | `PORT` | `4173` | Node Server 端口 |
-| `XUANNIAO_AGENT_TRANSPORT` | `codex` | `codex` 原生模式或 `acp` 兼容模式 |
 | `XUANNIAO_AGENT_PERMISSION_MODE` | `request-approval` | `request-approval`、`auto-review`、`full-access` 或 `custom` |
-| `XUANNIAO_AGENT_MODE` | `full-access` | ACP 访问模式；原生 Codex 自定义权限的兼容覆盖，可为 `full-access` 或 `read-only` |
-| `XUANNIAO_AGENT_TIMEOUT_MS` | `600000` | 原生与 ACP turn 活动空闲超时 |
+| `XUANNIAO_AGENT_TIMEOUT_MS` | `600000` | Codex turn 活动空闲超时 |
 | `XUANNIAO_CODEX_CMD` | `codex app-server` | 原生 Codex app-server 命令 |
 | `XUANNIAO_CODEX_MODEL` | 未设置 | 可选模型覆盖；默认使用 Codex 配置 |
 | `XUANNIAO_CODEX_REASONING_EFFORT` | 未设置 | 可选推理强度覆盖；默认使用 Codex 配置 |
-| `XUANNIAO_ACP_CMD` | `codex-acp` | ACP 兼容 adapter 命令 |
-| `XUANNIAO_ACP_TIMEOUT_MS` | 通用超时 | ACP 活动空闲超时覆盖 |
-| `XUANNIAO_ACP_SKIP_AUTH` | 未设置 | 设置为 `1` 时允许 adapter 使用已有认证 |
-| `XUANNIAO_CONTROLLED_REPLACEMENT` | 未设置 | 兼容开关；文档精确编辑默认开启，设置为 `0` 时禁用 |
 | `XUANNIAO_AGENT_CONTEXT_MAX_CHARS` | `1500000` | Agent 单次上下文字符上限 |
 | `XUANNIAO_AGENT_SNAPSHOT_CACHE_ENTRIES` | `32` | 文档快照 LRU 最大条目数 |
 | `XUANNIAO_UNSAFE_ALLOW_REMOTE` | 未设置 | 设置为 `1` 时显式允许非回环监听 |
@@ -566,11 +546,10 @@ npm run check
 - Node test runner 单元测试
 - Vite production build
 
-截至当前代码，213 个测试全部通过。覆盖范围包括：
+截至当前代码，216 个测试全部通过。覆盖范围包括：
 
 - 原生 Codex session start/resume/fork、事件归并、审批挂起和上下文去重
 - Codex 模型目录分页、模型与权限设置校验、权限协议映射、环境变量回退和原子持久化
-- ACP 模式映射、文件写权限、session new/load/fallback、审批和启动失败
 - ThreadStore 路径、AgentSession 迁移、树变更失效规则和 anchor 删除同步
 - 增量文档 splice、branch-only 上下文和文档 hash
 - 前后端 thread anchor remap 与恢复
@@ -586,24 +565,23 @@ npm run check
 
 尚缺少：
 
-- React 组件测试
 - 自动化浏览器端到端测试
-- 真实 Codex app-server 初始化与 model turn 已做手动冒烟验证；尚缺自动化 app-server 和 `codex-acp` 兼容性集成测试
+- 真实 Codex app-server 初始化与 model turn 已做手动冒烟验证；尚缺自动化 app-server 集成测试
 - 进程崩溃注入和磁盘故障恢复测试
 
 ## 13. 主要技术风险
 
 ### 13.1 Agent 直接文件写入仍在事务边界之外
 
-Browser 保存、Thread 创建和 Codex 文档精确编辑已收口到 `DocumentWorkspace`，统一执行 revision 校验、原子写入和 anchor 同步。ACP 直接写活动文档会被拒绝；Agent turn 后若发现无法归因的外部修改，会保留当前文件并返回冲突，不再用旧快照覆盖。但 `danger-full-access` 不能提供操作系统级单文件隔离，因此 turn 后校验仍是保护层而不是内核强制边界。
+Browser 保存、Thread 创建和 Codex 文档修改已收口到 `DocumentWorkspace`，统一执行 revision 校验、原子写入和 anchor 同步。Agent turn 后若发现无法归因的外部修改，会保留当前文件并返回冲突，不再用旧快照覆盖。但 `danger-full-access` 不能提供操作系统级单文件隔离，因此 turn 后校验仍是保护层而不是内核强制边界。
 
 ### 13.2 外部修改缺少主动通知
 
-Document payload 已携带 SHA-256 revision；Browser 保存和文档精确编辑使用 compare-and-swap，外部修改不会被静默覆盖。目前仍没有文件 watcher，冲突只能在下一次保存或 Agent 完成后的校准阶段被发现。
+Document payload 已携带 SHA-256 revision；Browser 保存使用 compare-and-swap，Agent 回合使用前后快照校准，外部修改不会被静默覆盖。目前仍没有文件 watcher，冲突只能在下一次保存或 Agent 完成后的校准阶段被发现。
 
-### 13.3 默认 full-access 范围过大
+### 13.3 full-access 范围较大
 
-当前默认模式允许 Agent 在 `danger-full-access` sandbox 下工作；Codex 或 adapter 发起的显式审批会由用户处理，但并非每次文件写入都会产生审批。它适合受信任的本地开发环境，但与“文档修改应先预览确认”的产品目标仍不完全一致。
+用户选择“完全访问权限”后，Agent 会在 `danger-full-access` sandbox 下工作，并非每次文件写入都会产生审批。它只适合受信任的本地开发环境；默认“请求批准”模式使用 `workspace-write` 并由用户处理额外权限请求。
 
 ### 13.4 远程模式不是认证边界
 
@@ -621,7 +599,7 @@ Runtime 已避免在未变化的连续 turn 重发完整文档和历史，并增
 
 ### Phase 1：稳定当前 MVP
 
-1. 已引入统一 `DocumentWorkspace`，把 Browser 保存和 Codex 文档精确编辑收口为一个入口：
+1. 已引入统一 `DocumentWorkspace`，把 Browser 保存和 Codex 回合后的文档校准收口为一个入口：
 
 ```text
 load current revision
@@ -639,13 +617,11 @@ load current revision
 5. Runtime 使用活动空闲超时，等待审批时暂停计时；超时后发送 `turn/interrupt` 并在失败时重启。用户主动取消仍待实现。
 6. 已把 `App.tsx` 中的文档、会话、权限和选区流程拆成面向业务用例的 hooks；服务端会话用例下沉到 ConversationService。
 
-### Phase 2：实现受控 AI 修改
+### Phase 2：增加可审查的 AI 修改
 
-1. 已实现：Codex 返回结构化 edit proposal，而不是直接写活动 Markdown。
-2. 已实现：proposal 携带 base revision，并以唯一 old-text/new-text 描述一个或多个不重叠目标范围。
-3. Browser 展示 diff，用户确认后才调用统一 mutation 入口。
-4. 支持 reject、apply、undo 和 snapshot。
-5. 对 Agent 直接写当前文档的能力默认关闭；full-access 保留给明确授权的仓库级任务。
+1. 在 Codex 修改活动文档后生成结构化 Diff。
+2. 支持修改前预览，以及 reject、apply、undo 和 snapshot。
+3. 为活动文档增加更强的写入隔离，减少 full-access 模式对回合后校准的依赖。
 
 目标流程：
 
@@ -683,7 +659,7 @@ Ask Codex
 1. **Markdown source of truth**：原文件内容优先于缓存、session 和派生索引。
 2. **Range-anchored threads**：当前以字符范围、文本、行号和 context 组合定位，不把易变 block ID 当作唯一依据。
 3. **One mutation path**：所有文档写入最终应经过同一验证、写入、remap 和持久化入口。
-4. **Explicit AI edits**：讨论可以自动进行，文档修改应形成可审查的 proposal。
+4. **Traceable AI edits**：当前通过回合快照与 anchor 校准追踪直接写入，后续增加修改前 Diff 确认。
 5. **Local by default**：文档和协作元数据留在本机，同时明确模型和网络边界。
 6. **Deep module boundaries**：Editor、Agent Runtime、Thread Store 和 Document Mutation 应隐藏各自实现细节；页面和路由只编排用户用例。
 7. **Derived indexes are disposable**：Block index、Preview marker 和空间布局都可从 Markdown 与 Thread 数据重新生成。

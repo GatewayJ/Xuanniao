@@ -4408,8 +4408,7 @@ body.resizing .splitter::before {
 }
 
 .settingsLoading,
-.settingsError,
-.settingsNotice {
+.settingsError {
   border-radius: 9px;
   font-size: 12px;
   line-height: 18px;
@@ -4417,8 +4416,7 @@ body.resizing .splitter::before {
   padding: 10px 12px;
 }
 
-.settingsLoading,
-.settingsNotice {
+.settingsLoading {
   background: #f5f7fa;
   border: 1px solid #dce2e9;
   color: var(--muted-strong);

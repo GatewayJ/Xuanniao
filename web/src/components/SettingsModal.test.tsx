@@ -10,9 +10,6 @@ test("settings modal exposes the four Codex permission modes", () => {
     <SettingsModal
       open
       data={{
-        transport: "codex-app-server",
-        modelSelectionSupported: true,
-        permissionSelectionSupported: true,
         model: null,
         reasoningEffort: null,
         permissionMode: "request-approval",
@@ -50,9 +47,6 @@ test("settings modal renders model selection as a dropdown", () => {
     <SettingsModal
       open
       data={{
-        transport: "codex-app-server",
-        modelSelectionSupported: true,
-        permissionSelectionSupported: true,
         model: null,
         reasoningEffort: null,
         permissionMode: "request-approval",
@@ -86,9 +80,6 @@ test("permission mode remains saveable when only the model catalog is unavailabl
     <SettingsModal
       open
       data={{
-        transport: "codex-app-server",
-        modelSelectionSupported: true,
-        permissionSelectionSupported: true,
         model: null,
         reasoningEffort: null,
         permissionMode: "request-approval",
