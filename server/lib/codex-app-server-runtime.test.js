@@ -112,8 +112,9 @@ test("native runtime persists a semantic session and avoids unchanged context re
   assert.doesNotMatch(resumedPrompt, /<XUANNIAO_BRANCH_HISTORY>/);
 });
 
-test("document creation runs in a fresh read-only native session", async () => {
+test("document creation follows the selected full-access permission mode", async () => {
   const runtime = new StubRuntime();
+  runtime.configure({ permissionMode: "full-access" });
   await runtime.runTurn({
     question: "Create an issue analysis document",
     document: { path: "/tmp", title: "New document", content: "" },
@@ -131,8 +132,8 @@ test("document creation runs in a fresh read-only native session", async () => {
 
   const threadStart = runtime.calls.find(({ method }) => method === "thread/start");
   const turnStart = runtime.calls.find(({ method }) => method === "turn/start");
-  assert.equal(threadStart.params.sandbox, "read-only");
-  assert.equal(threadStart.params.approvalPolicy, "on-request");
+  assert.equal(threadStart.params.sandbox, "danger-full-access");
+  assert.equal(threadStart.params.approvalPolicy, "never");
   assert.equal(threadStart.params.approvalsReviewer, "user");
   assert.match(turnStart.params.input[0].text, /Do not create or modify any file/i);
 });

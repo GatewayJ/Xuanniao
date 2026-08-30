@@ -187,12 +187,8 @@ export class CodexAppServerRuntime {
     const lockKey = thread.sessionKey || thread.id;
     return this.withSessionLock(lockKey, async () => {
       await this.ensureInitialized();
-      const turnPermissionMode = mode === "create-document"
-        ? documentPermissionMode(this.permissionMode)
-        : this.permissionMode;
-      const turnAccessMode = mode === "create-document"
-        ? "read-only"
-        : permissionAccessMode(this.permissionMode);
+      const turnPermissionMode = this.permissionMode;
+      const turnAccessMode = permissionAccessMode(this.permissionMode);
       const session = await this.ensureThread(thread, turnPermissionMode);
       const effectiveSettings = await this.resolveTurnSettings(session);
       const hash = documentHash(document.content);
@@ -328,9 +324,6 @@ export class CodexAppServerRuntime {
   }
 
   async ensureThread(thread, permissionMode = this.permissionMode) {
-    if (isDocumentPermissionMode(permissionMode)) {
-      return this.createThread(thread, permissionMode);
-    }
     const stored = sessionForAdapter(thread.agentSession, adapterName);
     if (stored) {
       if (!this.loadedThreads.has(stored.sessionId)) {
@@ -1589,22 +1582,7 @@ function compactObject(value) {
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== null && entry !== undefined));
 }
 
-function documentPermissionMode(permissionMode) {
-  return `document-read-only:${permissionMode}`;
-}
-
-function isDocumentPermissionMode(permissionMode) {
-  return permissionMode.startsWith("document-read-only:");
-}
-
 function codexThreadPermissionParams(permissionMode) {
-  if (isDocumentPermissionMode(permissionMode)) {
-    return {
-      approvalPolicy: "on-request",
-      approvalsReviewer: "user",
-      sandbox: "read-only"
-    };
-  }
   if (permissionMode === "request-approval") {
     return {
       approvalPolicy: "on-request",

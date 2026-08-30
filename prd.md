@@ -47,7 +47,7 @@
 | 能力 | 状态 | 当前实现 |
 | --- | --- | --- |
 | 打开 Markdown | 已实现 | 启动时指定文件；应用内按目录浏览；支持绝对路径和 workspace 外文件 |
-| 自然语言创建 Markdown | 已实现 | 顶栏“新建”接收自然语言任务，可选保存目录和文件名；Codex 以只读会话检查工作区并返回结构化首稿；服务端校验路径、防止覆盖并自动打开新文档 |
+| 自然语言创建 Markdown | 已实现 | 顶栏“新建”接收自然语言任务，可选保存目录和文件名；Codex 按设置页选择的权限检查工作区并返回结构化首稿；服务端校验路径、防止覆盖并自动打开新文档 |
 | Markdown 编辑 | 已实现 | CodeMirror 6 源码编辑、语法高亮、自动换行、编辑器内 undo/redo |
 | 自动保存 | 已实现 | 编辑停止 1 秒后保存；切换文档或询问 Codex 前先 flush；支持手动 Save |
 | Preview | 已实现 | markdown-it 渲染；禁用原始 HTML；支持 Mermaid |
@@ -89,7 +89,7 @@ flowchart LR
   Reply --> Edit
 ```
 
-用户无需提前创建空 Markdown。点击顶栏“新建”后，可以用自然语言同时描述文档类型、Issue、参考代码仓库和期望结构，也可以从工作区目录树选择保存目录并填写文件名；任一项留空时由 Codex 自动决定。创建回合强制使用只读 Agent 能力；服务端只允许在当前 workspace 内写入新的 Markdown 文件，拒绝路径穿越、符号链接逃逸和覆盖已有文件，成功后自动切换到新文档。生成计划与工具过程通过现有 Agent Run SSE 展示，权限请求在创建弹窗内处理。
+用户无需提前创建空 Markdown。点击顶栏“新建”后，可以用自然语言同时描述文档类型、Issue、参考代码仓库和期望结构，也可以从工作区目录树选择保存目录并填写文件名；任一项留空时由 Codex 自动决定。创建回合沿用设置页当前选择的权限模式，Agent 只负责检查资料并返回结构化草稿；服务端只允许在当前 workspace 内写入新的 Markdown 文件，拒绝路径穿越、符号链接逃逸和覆盖已有文件，成功后自动切换到新文档。生成计划与工具过程通过现有 Agent Run SSE 展示，权限请求在创建弹窗内处理。
 
 用户在 Edit 或 Preview 中选中文本后，点击右侧“选中文字提问”，通过选区旁的内嵌提问框输入问题。相同范围已有 thread 时会复用该 thread。
 
@@ -298,7 +298,7 @@ spawn codex app-server
   → turn/completed
 ```
 
-原生 Runtime 将设置页的权限模式映射到 Codex 的 approval policy、审批者和 sandbox：“请求批准”为 `on-request + user + workspace-write`，“替我审批”为 `on-request + auto_review + workspace-write`，“完全访问权限”为 `never + danger-full-access`，“自定义”清除玄鸟覆盖并使用 `config.toml`。设置页通过 `model/list` 获取当前目录，并在后续 `thread/start` / `turn/start` 传递已保存的模型与推理深度。修改设置不中断正在运行的 turn；权限变化后，下一轮会使用新策略建立语义 session，并从本地分支历史恢复上下文。文档创建 session 始终覆盖为只读 sandbox。
+原生 Runtime 将设置页的权限模式映射到 Codex 的 approval policy、审批者和 sandbox：“请求批准”为 `on-request + user + workspace-write`，“替我审批”为 `on-request + auto_review + workspace-write`，“完全访问权限”为 `never + danger-full-access`，“自定义”清除玄鸟覆盖并使用 `config.toml`。设置页通过 `model/list` 获取当前目录，并在后续 `thread/start` / `turn/start` 传递已保存的模型与推理深度。修改设置不中断正在运行的 turn；权限变化后，下一轮会使用新策略建立语义 session，并从本地分支历史恢复上下文。文档创建 session 同样使用当前权限映射，但仍通过创建协议要求 Agent 不直接修改文件，由服务端验证并写入最终草稿。
 
 ### 6.3 Session 与树一致性
 
