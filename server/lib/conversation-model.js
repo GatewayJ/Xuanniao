@@ -70,6 +70,7 @@ export function planConversationRevision(thread, messageId, command) {
   }
 
   const meta = { revisesMessageId: revisedMessage.id };
+  if (Array.isArray(revisedMessage.meta?.references)) meta.references = revisedMessage.meta.references;
   if (CONVERSATION_NODE_KINDS.has(revised.meta?.nodeKind)) {
     meta.nodeKind = revised.meta.nodeKind;
   }

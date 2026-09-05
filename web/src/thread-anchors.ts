@@ -14,6 +14,7 @@ export type ResolvedThreadAnchor = MarkdownTextLocation & {
 const MISSING_POSITION = Number.MAX_SAFE_INTEGER;
 
 export function resolveThreadAnchor(content: string, thread: Thread): ResolvedThreadAnchor | null {
+  if (thread.orphaned) return null;
   const explicit = explicitAnchorLocation(content, thread);
   const selectedText = normalizeSearchText(thread.selectedText);
   if (explicit && contextMatches(content, explicit, thread) && (!selectedText || normalizeSearchText(content.slice(explicit.start, explicit.end)) === selectedText)) {
@@ -161,6 +162,7 @@ function contextScore(content: string, location: Pick<MarkdownTextLocation, "sta
 }
 
 function threadSortKey(thread: Thread, content?: string | null) {
+  if (thread.orphaned) return { lineStart: MISSING_POSITION, start: MISSING_POSITION, lineEnd: MISSING_POSITION, end: MISSING_POSITION, createdAt: thread.createdAt || "" };
   const resolved = content ? resolveThreadAnchor(content, thread) : null;
   return {
     lineStart: resolved?.lineStart ?? integerOrMissing(thread.anchor.lineStart),

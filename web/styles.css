@@ -3953,11 +3953,36 @@ body.resizing .splitter::before {
   border-radius: 14px;
   box-shadow: 0 28px 70px rgba(31, 35, 41, 0.24);
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 16px;
   max-height: min(820px, calc(100vh - 48px));
   overflow: auto;
   padding: 20px;
   width: min(720px, calc(100vw - 48px));
+}
+
+.newDocumentModal > * {
+  min-width: 0;
+}
+
+.newDocumentModal > .fileModalHeader > div {
+  min-width: 0;
+}
+
+.newDocumentModal > .fileModalHeader > button {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.newDocumentRetry {
+  overflow-wrap: anywhere;
+}
+
+.newDocumentRetry pre {
+  line-height: 1.6;
+  max-height: min(240px, 30dvh);
+  overflow: auto;
+  white-space: pre-wrap;
 }
 
 .newDocumentPrompt {
@@ -4058,6 +4083,7 @@ body.resizing .splitter::before {
   align-items: center;
   border-top: 1px solid var(--line);
   display: flex;
+  flex-wrap: wrap;
   gap: 16px;
   justify-content: space-between;
   padding-top: 14px;
@@ -4066,7 +4092,10 @@ body.resizing .splitter::before {
 .newDocumentFooter > div {
   display: flex;
   flex: 0 0 auto;
+  flex-wrap: wrap;
   gap: 8px;
+  margin-left: auto;
+  max-width: 100%;
 }
 
 .directoryPickerBackdrop {

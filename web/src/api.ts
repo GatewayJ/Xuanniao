@@ -1,4 +1,4 @@
-import type { AgentOutcome, AgentPermissionMode, AgentRunSnapshot, AgentRunUpdate, AgentSettingsPayload, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, NodeQuickAction, PermissionRequest, Thread } from "./types";
+import type { AgentOutcome, AgentPermissionMode, AgentRunSnapshot, AgentRunUpdate, AgentSettingsPayload, Anchor, BranchSelection, ConversationNodeKind, DocumentPayload, FileBrowserPayload, MarkdownFile, Message, NodeQuickAction, PermissionRequest, ReferenceInput, Thread } from "./types";
 
 type JsonRequestInit = Omit<RequestInit, "body"> & { body?: unknown };
 
@@ -31,7 +31,7 @@ export const api = {
     signal
   }),
   createDocument: (
-    command: { instruction: string; directory: string | null; fileName: string | null },
+    command: { instruction: string; directory: string | null; fileName: string | null; documentPath: string; retryOf?: string },
     agentRunId: string,
     signal?: AbortSignal
   ) =>
@@ -44,7 +44,7 @@ export const api = {
     documentPath: string,
     content: string,
     expectedRevision: string,
-    threads?: Array<{ id: string; selectedText: string; anchor: Anchor }>,
+    threads?: Array<{ id: string; selectedText: string; anchor: Anchor; orphaned?: boolean }>,
     deletedThreadIds: string[] = [],
     signal?: AbortSignal
   ) => request<{ document: DocumentPayload; threads: Thread[] }>("/api/document", {
@@ -61,7 +61,7 @@ export const api = {
     }),
   agentRun: (runId: string, signal?: AbortSignal) =>
     request<AgentRunSnapshot>(`/api/agent-runs/${encodeURIComponent(runId)}`, { signal }),
-  createThread: (body: { documentPath: string; title: string; selectedText: string; anchor: unknown; expectedRevision: string }, signal?: AbortSignal) =>
+  createThread: (body: { documentPath: string; title: string; selectedText: string; anchor: unknown; expectedRevision: string; independent?: boolean; contextScope?: "full" | "references"; sourceThreadId?: string }, signal?: AbortSignal) =>
     request<{ thread: Thread }>("/api/threads", {
       method: "POST",
       body,
@@ -70,9 +70,10 @@ export const api = {
   deleteThread: (threadId: string, signal?: AbortSignal) =>
     request<{ threads: Thread[] }>(`/api/threads/${encodeURIComponent(threadId)}`, {
       method: "DELETE",
+      body: {},
       signal
     }),
-  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null; agentRunId?: string | null }, signal?: AbortSignal) =>
+  sendMessage: (threadId: string, body: { content: string; askAgent: boolean; nodeId?: string | null; parentMessageId?: string | null; branchSelection?: BranchSelection | null; agentRunId?: string | null; references?: ReferenceInput[] }, signal?: AbortSignal) =>
     request<{ userMessage: Message; assistantMessage: Message | null; agentOutcome: AgentOutcome; threads: Thread[]; document?: DocumentPayload | null }>(
       `/api/threads/${encodeURIComponent(threadId)}/messages`,
       {
@@ -113,6 +114,7 @@ export const api = {
       `/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(messageId)}`,
       {
         method: "DELETE",
+        body: {},
         signal
       }
     ),

@@ -16,19 +16,24 @@ export class DocumentCreationService {
     this.now = now;
   }
 
-  async create({ instruction, directory = null, fileName = null, agentRunId = null }) {
+  async create({ instruction, directory = null, fileName = null, agentRunId = null }, { onUpdate = null, isStopping = () => false } = {}) {
     const threadId = documentCreationThreadId(agentRunId);
     const startedAt = this.now();
     let agentSnapshot = null;
+    let answer = null;
     this.agentRuns?.start(agentRunId, { kind: "document-creation", threadId });
 
     try {
       const request = normalizeInstruction(instruction);
       const destination = normalizeDestinationPreferences(this.workspaceRoot, { directory, fileName });
+      assertNotStopping(isStopping);
       agentSnapshot = await this.document?.createAgentSnapshot() || null;
-      let answer;
+      // Stop may have arrived while the source snapshot was being read, before
+      // the runtime had a run to interrupt.
+      assertNotStopping(isStopping);
       try {
         answer = await this.agent.runTurn({
+          runId: agentRunId || undefined,
           question: request,
           document: {
             path: this.workspaceRoot,
@@ -45,22 +50,32 @@ export class DocumentCreationService {
             parentAgentSession: null
           },
           mode: "create-document",
-          onUpdate: (update) => this.agentRuns?.publish(agentRunId, update)
+          onUpdate: (update) => {
+            onUpdate?.(update);
+            this.agentRuns?.publish(agentRunId, update);
+          }
         });
       } catch (runError) {
         if (agentSnapshot) {
           try {
             await this.document.verifyAgentSnapshot(agentSnapshot);
           } catch (guardError) {
+            // A missing/changed source must not hide the uncertain native run.
+            if (["AGENT_RUNTIME_LOST", "AGENT_STOP_TIMEOUT"].includes(runError.code)) {
+              runError.verificationError = guardError.message;
+              throw runError;
+            }
             throw guardError;
           }
         }
         throw runError;
       }
+      assertNotStopping(isStopping);
       if (agentSnapshot) await this.document.verifyAgentSnapshot(agentSnapshot);
+      assertNotStopping(isStopping);
       const draft = extractCreatedDocument(answer.content);
       const relativePath = applyDestinationPreferences(draft.relativePath, destination);
-      const filePath = await writeNewDocument(this.workspaceRoot, relativePath, draft.content);
+      const filePath = await writeNewDocument(this.workspaceRoot, relativePath, draft.content, { isStopping });
       this.agentRuns?.complete(agentRunId, "completed", {
         durationMs: this.now() - startedAt
       });
@@ -70,7 +85,13 @@ export class DocumentCreationService {
         content: draft.content
       };
     } catch (error) {
-      this.agentRuns?.complete(agentRunId, "failed", {
+      if (answer) {
+        error.content ??= answer.content;
+        error.updates ??= answer.updates;
+      }
+      const status = ["AGENT_RUNTIME_LOST", "AGENT_STOP_TIMEOUT"].includes(error.code) ? "unknown"
+        : error.code === "AGENT_INTERRUPTED" ? "interrupted" : "failed";
+      this.agentRuns?.complete(agentRunId, status, {
         durationMs: this.now() - startedAt,
         error: error instanceof Error ? error.message : String(error)
       });
@@ -107,7 +128,8 @@ export function extractCreatedDocument(value) {
   return { relativePath, content: `${content}\n` };
 }
 
-export async function writeNewDocument(workspaceRoot, relativePath, content) {
+export async function writeNewDocument(workspaceRoot, relativePath, content, { isStopping = () => false } = {}) {
+  assertNotStopping(isStopping);
   const root = path.resolve(workspaceRoot);
   const candidate = normalizeRelativeMarkdownPath(relativePath);
   const filePath = path.resolve(root, candidate);
@@ -130,8 +152,10 @@ export async function writeNewDocument(workspaceRoot, relativePath, content) {
 
   const parent = path.dirname(filePath);
   await assertExistingAncestorInsideRoot(root, parent);
+  assertNotStopping(isStopping);
   await mkdir(parent, { recursive: true });
   await assertRealPathInsideRoot(root, parent);
+  assertNotStopping(isStopping);
 
   try {
     await writeFile(filePath, content, { encoding: "utf8", flag: "wx" });
@@ -288,4 +312,8 @@ function creationError(message, statusCode, code) {
   error.statusCode = statusCode;
   error.code = code;
   return error;
+}
+
+function assertNotStopping(isStopping) {
+  if (isStopping()) throw creationError("文档创建已中断，未继续生成或写入新文档。", 409, "AGENT_INTERRUPTED");
 }

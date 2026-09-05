@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { AgentDocumentMutationError, DocumentConflictError, DocumentWorkspace } from "./document-workspace.js";
+import { ThreadStore } from "./thread-store.js";
+import { branchRevisionForQuestion } from "./thread-tree.js";
 
 function threadStoreStub({ failUpdates = false, failCompletion = false } = {}) {
   return {
@@ -493,4 +495,196 @@ test("agent snapshots never overwrite an unknown write after a controlled save",
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test("relinked document identity survives save, reconciliation and agent conflict payloads", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-document-identity-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const file = path.join(dir, "document.md");
+  await writeFile(file, "Original\n");
+  const workspace = new DocumentWorkspace(file, threadStoreStub());
+  workspace.referenceIdentity = "new-registration-identity";
+  workspace.referenceIdentityRequired = true;
+  const check = (document) => {
+    assert.equal(document.referenceIdentity, workspace.referenceIdentity);
+    assert.equal(document.referenceIdentityRequired, true);
+    assert.equal(document.path, file);
+    return true;
+  };
+  check(await workspace.payload());
+  const snapshot = await workspace.createAgentSnapshot();
+  check(snapshot.document);
+  const saved = await workspace.save({ content: "Controlled save\n", expectedRevision: snapshot.revision });
+  check(saved.document);
+  check(await workspace.verifyAgentSnapshot(snapshot));
+  const unchanged = await workspace.save({ content: saved.document.content, expectedRevision: saved.document.revision });
+  check(unchanged.document);
+  const turn = (before) => workspace.completeAgentTurnFromSnapshot({ snapshot: before, threadId: "thread", userMessageId: "question",
+    message: { role: "assistant", content: "Updated" }, agentSession: null, expectedBranchRevision: "revision" });
+  await assert.rejects(turn(snapshot), (error) => error.code === "AGENT_DOCUMENT_MUTATION" && check(error.document));
+  await writeFile(file, "Concurrent edit\n");
+  await assert.rejects(workspace.verifyAgentSnapshot(snapshot), (error) => error.code === "AGENT_DOCUMENT_MUTATION" && check(error.document));
+  const fresh = await workspace.createAgentSnapshot();
+  await writeFile(file, "Agent change\n");
+  await assert.rejects(workspace.verifyAgentSnapshot(fresh), (error) => error.code === "AGENT_DOCUMENT_MUTATION" && check(error.document));
+  const completed = await turn(fresh);
+  assert.equal(completed.changed, true);
+  assert.equal(completed.document.content, "Agent change\n");
+  check(completed.document);
+});
+
+async function discussionFixture(t) {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-orphan-workspace-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const documentPath = path.join(dir, "plan.md");
+  const content = "before selected after\n\nnew target";
+  await writeFile(documentPath, content);
+  const store = new ThreadStore(path.join(dir, "threads.json"));
+  const workspace = new DocumentWorkspace(documentPath, store);
+  const document = await workspace.payload();
+  const thread = await workspace.createThread({ title: "Original", selectedText: "selected", anchor: { start: 7, end: 15, lineStart: 1, lineEnd: 1, blockId: "old-block" }, expectedRevision: document.revision });
+  const source = { id: "ref", kind: "document", documentPath, title: "Original source", start: 7, end: 15, content: "selected", revision: document.revision };
+  const question = await store.addMessage(thread.id, { role: "user", content: "Original question", meta: { references: [source] } });
+  const checkpoint = { adapter: "codex-app-server", sessionId: "saved-session", turnId: "saved-turn", documentHash: document.revision };
+  await store.completeAgentTurn(thread.id, question.id, { role: "assistant", content: "Original answer", meta: { verification: "passed" } }, checkpoint);
+  const outcomesPath = path.join(dir, "outcomes.json");
+  const outcomes = JSON.stringify({ version: 1, documentPath, records: [{ id: "applied", kind: "proposal", status: "applied", source }, { id: "execution", kind: "execution", status: "completed", source }] });
+  await writeFile(outcomesPath, outcomes);
+  return { dir, documentPath, workspace, store, document, thread: await store.get(thread.id), question, source, checkpoint, outcomesPath, outcomes };
+}
+
+test("independent discussions from an orphan reuse the saved source snapshot without a valid document anchor", async (t) => {
+  const { workspace, store, document, thread } = await discussionFixture(t);
+  const saved = await workspace.save({ content: "replacement", expectedRevision: document.revision });
+  const orphan = await store.get(thread.id);
+  assert.equal(orphan.orphaned, true);
+  const command = { title: "Independent", independent: true, contextScope: "references", sourceThreadId: thread.id, expectedRevision: saved.document.revision };
+  const independent = await workspace.createThread(command);
+  const second = await workspace.createThread({ ...command, selectedText: "client-forged", anchor: { start: 0, end: "replacement".length } });
+  for (const created of [independent, second]) {
+    assert.notEqual(created.id, thread.id);
+    assert.equal(created.sourceThreadId, thread.id);
+    assert.equal(created.selectedText, thread.selectedText);
+    assert.equal(created.contextScope, "references");
+    assert.equal(created.independent, true);
+    assert.equal(created.orphaned, true);
+    assert.deepEqual(created.anchor, { ...thread.anchor, start: null, end: null, lineStart: null, lineEnd: null, blockId: null });
+    assert.deepEqual(created.messages, []);
+    assert.equal(created.agentSession, undefined);
+    assert.equal((await new ThreadStore(store.filePath).get(created.id)).orphaned, true);
+  }
+  assert.notEqual(independent.id, second.id);
+  assert.deepEqual((await store.get(thread.id)).messages, thread.messages);
+  await assert.rejects(workspace.createThread({ ...command, expectedRevision: document.revision }), { code: "DOCUMENT_CONFLICT" });
+  await assert.rejects(workspace.createThread({ ...command, contextScope: "invalid" }), { code: "DOCUMENT_CONFLICT" });
+  await assert.rejects(workspace.createThread({ ...command, sourceThreadId: "not-found" }), /thread not found/);
+  await assert.rejects(workspace.createThread({ ...command, independent: false, contextScope: "full" }), { code: "DOCUMENT_CONFLICT" });
+});
+
+test("ordinary document saves cannot reactivate an orphan via stale proposals, restored text or legacy deleted IDs", async (t) => {
+  const { workspace, store, document, thread, outcomesPath, outcomes } = await discussionFixture(t);
+  const detached = await workspace.save({ content: document.content, expectedRevision: document.revision, deletedThreadIds: [thread.id], anchorPatches: [{ ...thread, orphaned: false }] });
+  assert.equal(detached.threads.length, 1);
+  assert.equal(detached.threads[0].orphaned, true);
+  const rewritten = await workspace.save({ content: "", expectedRevision: detached.document.revision });
+  const restored = await workspace.save({ content: document.content, expectedRevision: rewritten.document.revision, anchorPatches: [{ ...thread, orphaned: false, selectedText: "forged" }] });
+  const historical = restored.threads[0];
+  assert.equal(historical.orphaned, true);
+  assert.equal(historical.anchor.start, null);
+  assert.equal(historical.selectedText, thread.selectedText);
+  assert.deepEqual(historical.messages, thread.messages);
+  assert.equal(await readFile(outcomesPath, "utf8"), outcomes);
+  const fresh = await workspace.createThread({ title: "Fresh", selectedText: thread.selectedText, anchor: thread.anchor, expectedRevision: restored.document.revision });
+  assert.notEqual(fresh.id, thread.id);
+  assert.equal((await store.get(thread.id)).orphaned, true);
+});
+
+test("explicit reanchor changes only the location while preserving messages, reference snapshots, results and checkpoints", async (t) => {
+  const { workspace, store, document, thread, outcomesPath, outcomes } = await discussionFixture(t);
+  const saved = await workspace.save({ content: "# New\n\nnew target", expectedRevision: document.revision });
+  const before = await store.get(thread.id);
+  const baseRevision = branchRevisionForQuestion(before, before.messages[0].id);
+  const start = saved.document.content.indexOf("new target");
+  const rebound = await workspace.reanchor(thread.id, { start, end: start + 10, expectedRevision: saved.document.revision });
+  const current = rebound.find((item) => item.id === thread.id);
+  assert.equal(current.id, before.id);
+  assert.equal(current.orphaned, false);
+  assert.equal(current.selectedText, "new target");
+  assert.equal(current.anchor.lineStart, 3);
+  assert.equal(current.anchor.blockId, saved.document.blocks.find((block) => block.lineStart === 3).id);
+  assert.equal(current.anchor.contextBefore, "# New\n\n");
+  assert.deepEqual(current.messages, before.messages);
+  assert.equal(branchRevisionForQuestion(current, current.messages[0].id), baseRevision);
+  assert.equal(await readFile(outcomesPath, "utf8"), outcomes);
+  const reloaded = await new ThreadStore(store.filePath).get(thread.id);
+  assert.equal(reloaded.orphaned, false);
+  assert.deepEqual(reloaded.messages, before.messages);
+  assert.equal((await workspace.save({ content: saved.document.content, expectedRevision: saved.document.revision })).threads[0].orphaned, false);
+});
+
+test("failed reanchor validation leaves the historical thread and Markdown unchanged", async (t) => {
+  const { workspace, store, document, thread, outcomesPath, outcomes } = await discussionFixture(t);
+  const saved = await workspace.save({ content: "new", expectedRevision: document.revision });
+  const before = await store.get(thread.id);
+  for (const command of [
+    { start: 0, end: 1, expectedRevision: document.revision },
+    { start: -1, end: 1, expectedRevision: saved.document.revision },
+    { start: 0, end: 0, expectedRevision: saved.document.revision },
+    { start: 0, end: 4, expectedRevision: saved.document.revision },
+    { start: 0.5, end: 2, expectedRevision: saved.document.revision }
+  ]) await assert.rejects(workspace.reanchor(thread.id, command), { code: "DOCUMENT_CONFLICT" });
+  await assert.rejects(workspace.reanchor("missing", { start: 0, end: 1, expectedRevision: saved.document.revision }), /thread not found/);
+  assert.deepEqual(await store.get(thread.id), before);
+  assert.equal((await workspace.payload()).content, "new");
+  assert.equal(await readFile(outcomesPath, "utf8"), outcomes);
+  await assert.rejects(workspace.createThread({ selectedText: "new", anchor: { start: 0, end: 100 }, expectedRevision: saved.document.revision }), { code: "DOCUMENT_CONFLICT" });
+});
+
+test("deleting the source file does not erase discussion snapshots, messages, results or checkpoints", async (t) => {
+  const { workspace, store, documentPath, document, thread, outcomesPath, outcomes } = await discussionFixture(t);
+  await rm(documentPath);
+  await assert.rejects(workspace.payload(), { code: "ENOENT" });
+  await assert.rejects(workspace.save({ content: "replacement", expectedRevision: document.revision }), { code: "ENOENT" });
+  await assert.rejects(workspace.reanchor(thread.id, { start: 0, end: 1, expectedRevision: document.revision }), { code: "ENOENT" });
+  assert.deepEqual(await new ThreadStore(store.filePath).get(thread.id), thread);
+  assert.equal(await readFile(outcomesPath, "utf8"), outcomes);
+  await assert.rejects(readFile(documentPath), { code: "ENOENT" });
+});
+
+test("agent completion after deleting its root keeps the answer and checkpoint on the orphaned thread", async (t) => {
+  const { workspace, store, documentPath, thread, outcomesPath, outcomes } = await discussionFixture(t);
+  const question = await store.addMessage(thread.id, { role: "user", content: "Remove the whole source", nodeId: thread.messages[0].id });
+  const before = await store.get(thread.id);
+  const snapshot = await workspace.createAgentSnapshot();
+  await writeFile(documentPath, "");
+  const checkpoint = { adapter: "codex-app-server", sessionId: "new-session", turnId: "new-turn", documentHash: "empty" };
+  const result = await workspace.completeAgentTurnFromSnapshot({ snapshot, threadId: thread.id, userMessageId: question.id, message: { role: "assistant", content: "Removed source", meta: {} }, agentSession: checkpoint, expectedBranchRevision: branchRevisionForQuestion(before, question.id) });
+  assert.equal(result.changed, true);
+  assert.equal(result.threads[0].orphaned, true);
+  assert.equal(result.threads[0].selectedText, thread.selectedText);
+  assert.equal(result.threads[0].messages.at(-1).content, "Removed source");
+  assert.equal(result.threads[0].messages.find((item) => item.id === question.nodeId).agentSession.sessionId, checkpoint.sessionId);
+  assert.equal(await readFile(outcomesPath, "utf8"), outcomes);
+});
+
+test("reanchor cannot overwrite a message appended after the source thread was read", async (t) => {
+  const { workspace, store, document, thread } = await discussionFixture(t);
+  const saved = await workspace.save({ content: "new target", expectedRevision: document.revision });
+  let release;
+  let announce;
+  const barrier = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { announce = resolve; });
+  const updateAnchors = store.updateAnchors.bind(store);
+  store.updateAnchors = async (...args) => { announce(); await barrier; return updateAnchors(...args); };
+  const reanchoring = workspace.reanchor(thread.id, { start: 0, end: 10, expectedRevision: saved.document.revision });
+  await started;
+  try {
+    const concurrent = await store.addMessage(thread.id, { role: "user", content: "Concurrent question" });
+    release();
+    await reanchoring;
+    const current = await store.get(thread.id);
+    assert.equal(current.orphaned, false);
+    assert.equal(current.messages.some((message) => message.id === concurrent.id), true);
+    assert.deepEqual(current.messages.slice(0, thread.messages.length), thread.messages);
+  } finally { release(); }
 });

@@ -5,13 +5,13 @@ export function remapThreadsForReplacement(threads, previousContent, edit, prese
   for (const thread of threads) {
     const range = threadRangeInContent(thread, previousContent);
     if (!range) {
-      deletedThreadIds.push(thread.id);
+      nextThreads.push(orphanThread(thread));
       continue;
     }
 
     const nextRange = mapRangeThroughReplacement(range, edit, thread.id === preservedThreadId);
     if (!nextRange) {
-      deletedThreadIds.push(thread.id);
+      nextThreads.push(orphanThread(thread));
       continue;
     }
 
@@ -28,13 +28,17 @@ export function reconcileThreadsForContent(threads, content) {
   for (const thread of threads) {
     const range = threadRangeInContent(thread, content);
     if (!range) {
-      deletedThreadIds.push(thread.id);
+      nextThreads.push(orphanThread(thread));
       continue;
     }
     nextThreads.push(threadAtRange(thread, content, range.start, range.end));
   }
 
   return { threads: nextThreads, deletedThreadIds };
+}
+
+export function orphanThread(thread) {
+  return { ...thread, orphaned: true, anchor: { ...thread.anchor, start: null, end: null, lineStart: null, lineEnd: null, blockId: null } };
 }
 
 function mapRangeThroughReplacement(range, edit, preserveReplacement) {
@@ -50,21 +54,23 @@ function mapRangeThroughReplacement(range, edit, preserveReplacement) {
       : { start: replacementStart, end: replacementStart + replacementLength };
   }
 
-  const nextStart = replacementStart <= start && start < replacementEnd
-    ? replacementStart
-    : start >= replacementEnd
-      ? start + delta
-      : start;
-  const nextEnd = replacementStart < end && end <= replacementEnd
-    ? replacementStart + replacementLength
-    : end >= replacementEnd
-      ? end + delta
-      : end;
+  // Match the editor's inclusive start / exclusive end insertion associations.
+  const mapPosition = (position, association) => {
+    if (position < replacementStart) return position;
+    if (position > replacementEnd) return position + delta;
+    if (replacementStart === replacementEnd) return association < 0 ? replacementStart : replacementStart + replacementLength;
+    if (position === replacementStart) return replacementStart;
+    if (position === replacementEnd) return replacementStart + replacementLength;
+    return association < 0 ? replacementStart : replacementStart + replacementLength;
+  };
+  const nextStart = mapPosition(start, 1);
+  const nextEnd = mapPosition(end, -1);
 
   return nextEnd > nextStart ? { start: nextStart, end: nextEnd } : null;
 }
 
 function threadRangeInContent(thread, content) {
+  if (thread.orphaned) return null;
   const anchor = thread.anchor || {};
   const selectedText = String(thread.selectedText || "");
   const start = anchor.start;
@@ -105,6 +111,7 @@ function locateTextInContent(content, selectedText, lineHint, anchor) {
 function threadAtRange(thread, content, start, end) {
   return {
     ...thread,
+    orphaned: false,
     selectedText: content.slice(start, end),
     anchor: {
       ...thread.anchor,

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -152,6 +152,29 @@ test("HTTP server starts without Agent availability and reports failed turns exp
     const runSnapshot = await jsonRequest(`${baseUrl}/api/agent-runs/${agentRunId}`);
     assert.equal(runSnapshot.response.status, 200);
     assert.equal(runSnapshot.payload.status, "failed");
+
+    // A request whose body arrives across a document switch must never revive the disposed runtime.
+    const nextDocumentPath = path.join(tempDir, "other.md");
+    await writeFile(nextDocumentPath, "# Other\n", "utf8");
+    let staleRequest;
+    const staleResponse = new Promise((resolve, reject) => {
+      staleRequest = httpRequest(`${baseUrl}/api/threads/${created.payload.thread.id}/messages`, {
+        method: "POST", headers: { "content-type": "application/json" }
+      }, (response) => {
+        const chunks = [];
+        response.on("data", (chunk) => chunks.push(chunk));
+        response.on("end", () => resolve({ status: response.statusCode, payload: JSON.parse(Buffer.concat(chunks).toString()) }));
+      });
+      staleRequest.on("error", reject);
+    });
+    staleRequest.write('{"content":');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const switched = await jsonRequest(`${baseUrl}/api/document/open`, { method: "POST", body: { path: nextDocumentPath } });
+    assert.equal(switched.response.status, 200);
+    staleRequest.end('"stale question","askAgent":true}');
+    assert.equal((await staleResponse).status, 409);
+    const reopened = await jsonRequest(`${baseUrl}/api/document/open`, { method: "POST", body: { path: documentPath } });
+    assert.equal(reopened.payload.threads[0].messages.length, 3);
 
     const waitingAgentRunId = "integration_waiting_12345678";
     const reservedWaitingRun = await jsonRequest(`${baseUrl}/api/agent-runs/${waitingAgentRunId}`, {

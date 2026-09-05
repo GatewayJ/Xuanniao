@@ -1,0 +1,14 @@
+.workspaceNavigationShell { display: flex; flex-direction: column; height: 100vh; height: 100dvh; min-height: 0; overflow: hidden; }
+.workspaceNavigationContent { flex: 1; min-height: 0; overflow: hidden; }
+.workspaceNavigationContent > .appShell { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.workspaceNavigationContent > .appShell > .topbar { flex-shrink: 0; }
+.workspaceNavigationContent > .appShell > .workspace { flex: 1; height: auto; min-height: 0; }
+.workspaceNavigation { display: flex; align-items: center; flex-wrap: wrap; flex-shrink: 0; gap: 6px; min-width: 0; padding: 6px 12px; border-top: 1px solid var(--line, #dde5ee); background: var(--panel, #fff); color: var(--text, #334155); font-size: 12px; }
+.workspaceNavigation-discussion { border-top: 0; border-bottom: 1px solid var(--line, #dde5ee); }
+.workspaceNavigation button { padding: 5px 9px; font-size: 12px; max-width: 100%; white-space: normal; }
+.workspaceNavigation button:focus-visible { outline: 2px solid #0891b2; outline-offset: 2px; }
+.workspaceNavigationStatus { flex: 1; min-width: 0; overflow-wrap: anywhere; padding-inline: 4px; }
+@media (max-width: 600px) {
+  .workspaceNavigation { padding: 5px 8px; gap: 5px; }
+  .workspaceNavigationStatus { flex-basis: 100%; order: 1; }
+}

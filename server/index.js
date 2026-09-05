@@ -18,6 +18,11 @@ import { browseMarkdownDirectory } from "./lib/file-browser.js";
 import { HttpRequestError, assertSafeHostBinding, assertTrustedRequest, setSecurityHeaders } from "./lib/http-security.js";
 import { agentSettingsPath, legacyThreadStorePathFor, threadStorePathFor } from "./lib/metadata-paths.js";
 import { ThreadStore } from "./lib/thread-store.js";
+import { ActivityGate } from "./lib/activity-gate.js";
+import { OutcomeStore } from "./lib/outcome-store.js";
+import { WorkspaceOutcomes } from "./lib/workspace-outcomes.js";
+import { ProjectWorkspace } from "./lib/project-workspace.js";
+import { referenceRevision } from "./lib/discussion-context.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -37,6 +42,7 @@ assertSafeHostBinding(host, allowRemote);
 const initialDocumentPath = path.resolve(workspaceRoot, args.file ?? "prd.md");
 const settingsStore = new AgentSettingsStore(agentSettingsPath());
 const agentRuns = new AgentRunBroker();
+const project = new ProjectWorkspace({ root: workspaceRoot });
 const environmentAgentSettings = runtimeAgentSettingsFromEnv(process.env);
 let agentSettings = await loadAgentSettings();
 await ensureDocument(initialDocumentPath);
@@ -60,12 +66,68 @@ const server = createServer(async (req, res) => {
       });
     }
 
+    if (url.pathname === "/api/project" && req.method === "GET") {
+      for (const file of await listMarkdownFiles(context.path)) {
+        if (existsSync(threadStorePathFor(file.path)) || existsSync(legacyThreadStorePathFor(file.path))) await project.registerDocument(file.path);
+      }
+      return sendJson(res, 200, await project.list());
+    }
+    if (url.pathname === "/api/project/documents" && req.method === "POST") {
+      const body = await readDocumentCommand(req, context);
+      const registered = await project.registerDocument(resolveMarkdownPath(String(body.path || "")), { relink: body.relink === true });
+      if (registered.path === context.path) {
+        context.document.referenceIdentity = registered.identity;
+        context.document.referenceIdentityRequired = !!registered.relinkedAt;
+      }
+      return sendJson(res, 200, { ...await project.list(), registeredPath: registered.path });
+    }
+    if (url.pathname === "/api/project/preview" && req.method === "GET") {
+      return sendJson(res, 200, await project.preview(resolveMarkdownPath(url.searchParams.get("path") || context.path)));
+    }
+    if (url.pathname === "/api/references/incoming" && req.method === "GET") {
+      const catalog = await project.list();
+      const citations = catalog.documents.flatMap((document) => document.threads.flatMap((thread) => thread.messages.flatMap((message) => (Array.isArray(message.meta?.references) ? message.meta.references : []).filter((reference) => reference.kind === "message" && reference.documentPath === context.path).map((reference) => ({ reference, documentPath: document.path, targetThreadId: thread.id, targetMessageId: message.id, title: thread.title, targetContent: message.content, available: document.available })))));
+      return sendJson(res, 200, citations);
+    }
+    if (url.pathname === "/api/references/check" && req.method === "POST") {
+      const body = await readDocumentCommand(req, context);
+      return sendJson(res, 200, await project.checkReferences(body.references || []));
+    }
+    if (url.pathname === "/api/outcomes" && req.method === "GET") {
+      return sendJson(res, 200, await context.outcomes.snapshot());
+    }
+    if (url.pathname === "/api/outcomes" && req.method === "POST") {
+      const body = await readDocumentCommand(req, context);
+      assertDocumentContext(body.documentPath, context.path);
+      if (!["proposal", "execution"].includes(body.kind)) throw new HttpRequestError(400, "未知操作类型");
+      return sendJson(res, 202, { record: await context.outcomes.start(body.kind, body) });
+    }
+    const outcomeMatch = url.pathname.match(/^\/api\/outcomes\/([^/]+)\/([^/]+)$/);
+    if (outcomeMatch && req.method === "POST") {
+      const body = await readDocumentCommand(req, context);
+      assertDocumentContext(body.documentPath, context.path);
+      return sendJson(res, 200, await context.outcomes.change(decodeURIComponent(outcomeMatch[1]), outcomeMatch[2], body));
+    }
+    if (url.pathname === "/api/agent/stop" && req.method === "POST") {
+      const body = await readDocumentCommand(req, context);
+      assertDocumentContext(body.documentPath, context.path);
+      if (typeof body.operationId !== "string") throw new HttpRequestError(400, "停止请求缺少当前执行标识。", "MISSING_OPERATION_ID");
+      return sendJson(res, 200, await context.outcomes.stop({ operationId: body.operationId }));
+    }
+    const reanchorMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/anchor$/);
+    if (reanchorMatch && req.method === "PUT") {
+      const body = await readDocumentCommand(req, context);
+      context.gate.assertIdle();
+      const threads = await context.document.reanchor(decodeURIComponent(reanchorMatch[1]), body);
+      return sendJson(res, 200, { threads });
+    }
+
     if (url.pathname === "/api/settings" && req.method === "GET") {
       return sendJson(res, 200, await agentSettingsPayload(context.agent));
     }
 
     if (url.pathname === "/api/settings" && req.method === "PUT") {
-      const body = await readJson(req);
+      const body = await readDocumentCommand(req, context);
       const requestedSettings = parseAgentSettingsUpdate(body);
       const modelSettingsChanged = requestedSettings.model !== agentSettings.model
         || requestedSettings.reasoningEffort !== agentSettings.reasoningEffort;
@@ -112,7 +174,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/document/open" && req.method === "POST") {
-      const body = await readJson(req);
+      const body = await readDocumentCommand(req, context);
       const nextPath = resolveMarkdownPath(String(body.path || ""));
       if (!existsSync(nextPath)) {
         return sendJson(res, 404, {
@@ -128,12 +190,20 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/document/create" && req.method === "POST") {
-      const body = await readJson(req);
+      const body = await readDocumentCommand(req, context);
+      if (typeof body.documentPath !== "string" || !body.documentPath.trim()) {
+        throw new HttpRequestError(400, "创建文档必须指定源文档路径。", "DOCUMENT_PATH_REQUIRED");
+      }
+      assertDocumentContext(body.documentPath, context.path);
+      if (body.retryOf !== undefined && (typeof body.retryOf !== "string" || !body.retryOf.trim())) {
+        throw new HttpRequestError(400, "重试缺少有效的原执行记录标识。");
+      }
       const created = await createAndSwitchDocument(context, {
         instruction: body.instruction,
         directory: body.directory,
         fileName: body.fileName,
-        agentRunId: normalizeAgentRunId(body.agentRunId)
+        agentRunId: normalizeAgentRunId(body.agentRunId) || randomUUID(),
+        retryOf: body.retryOf
       });
       return sendJson(res, 201, {
         document: await created.document.payload(),
@@ -143,7 +213,7 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/document" && req.method === "PUT") {
-      const body = await readJson(req);
+      const body = await readDocumentCommand(req, context);
       assertDocumentContext(body.documentPath, context.path);
       if (typeof body.content !== "string") {
         return sendJson(res, 400, { error: "content must be a string" });
@@ -165,7 +235,7 @@ const server = createServer(async (req, res) => {
 
     const agentRunSnapshotMatch = url.pathname.match(/^\/api\/agent-runs\/([^/]+)$/);
     if (agentRunSnapshotMatch && req.method === "POST") {
-      await readJson(req);
+      await readDocumentCommand(req, context);
       const agentRunId = normalizeAgentRunId(decodeURIComponent(agentRunSnapshotMatch[1]));
       return sendJson(res, 201, agentRuns.reserve(agentRunId));
     }
@@ -187,13 +257,16 @@ const server = createServer(async (req, res) => {
     }
 
     if (url.pathname === "/api/threads" && req.method === "POST") {
-      const body = await readJson(req);
+      const body = await readDocumentCommand(req, context);
       assertDocumentContext(body.documentPath, context.path);
       const thread = await context.document.createThread({
         title: String(body.title || body.selectedText || "Untitled thread").slice(0, 120),
         selectedText: String(body.selectedText || ""),
         anchor: normalizeAnchor(body.anchor),
-        expectedRevision: body.expectedRevision
+        expectedRevision: body.expectedRevision,
+        independent: body.independent === true,
+        contextScope: body.contextScope ?? "full",
+        sourceThreadId: typeof body.sourceThreadId === "string" ? body.sourceThreadId : null
       });
       return sendJson(res, 201, { thread });
     }
@@ -205,7 +278,7 @@ const server = createServer(async (req, res) => {
     const permissionMatch = url.pathname.match(/^\/api\/permissions\/([^/]+)\/resolve$/);
     if (permissionMatch && req.method === "POST") {
       const permissionId = decodeURIComponent(permissionMatch[1]);
-      const body = await readJson(req);
+      const body = await readDocumentCommand(req, context);
       context.agent.resolvePermissionRequest(permissionId, {
         optionId: typeof body.optionId === "string" ? body.optionId : "",
         cancelled: body.cancelled === true
@@ -223,8 +296,8 @@ const server = createServer(async (req, res) => {
     const messageMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages$/);
     if (messageMatch && req.method === "POST") {
       const threadId = decodeURIComponent(messageMatch[1]);
-      const body = await readJson(req);
-      return sendJson(res, 200, await context.conversation.addQuestion(threadId, body));
+      const body = await readDocumentCommand(req, context);
+      return sendJson(res, 200, await context.conversation.addQuestion(threadId, publicConversationCommand(body)));
     }
 
     const messageUpdateMatch = url.pathname.match(/^\/api\/threads\/([^/]+)\/messages\/([^/]+)$/);
@@ -233,14 +306,14 @@ const server = createServer(async (req, res) => {
     if (messageRevisionMatch && req.method === "POST") {
       const threadId = decodeURIComponent(messageRevisionMatch[1]);
       const messageId = decodeURIComponent(messageRevisionMatch[2]);
-      const body = await readJson(req);
-      return sendJson(res, 200, await context.conversation.reviseQuestion(threadId, messageId, body));
+      const body = await readDocumentCommand(req, context);
+      return sendJson(res, 200, await context.conversation.reviseQuestion(threadId, messageId, publicConversationCommand(body)));
     }
 
     if (messageMetaMatch && req.method === "PATCH") {
       const threadId = decodeURIComponent(messageMetaMatch[1]);
       const messageId = decodeURIComponent(messageMetaMatch[2]);
-      const body = await readJson(req);
+      const body = await readDocumentCommand(req, context);
       let metaPatch;
       try {
         metaPatch = normalizeConversationMetaPatch(body.meta ?? body);
@@ -269,8 +342,8 @@ const server = createServer(async (req, res) => {
     if (messageUpdateMatch && req.method === "PUT") {
       const threadId = decodeURIComponent(messageUpdateMatch[1]);
       const messageId = decodeURIComponent(messageUpdateMatch[2]);
-      const body = await readJson(req);
-      return sendJson(res, 200, await context.conversation.updateQuestion(threadId, messageId, body));
+      const body = await readDocumentCommand(req, context);
+      return sendJson(res, 200, await context.conversation.updateQuestion(threadId, messageId, publicConversationCommand(body)));
     }
 
     return serveStatic(url.pathname, res);
@@ -375,26 +448,33 @@ async function createDocumentContext(filePath) {
   const threadStore = await createThreadStoreFor(resolved);
   const agent = createAgentFor(resolved);
   const document = new DocumentWorkspace(resolved, threadStore);
-  return Object.freeze({
-    path: resolved,
-    threadStore,
-    document,
-    agent,
-    conversation: new ConversationService({
-      threadStore,
-      document,
-      agent,
-      agentRuns,
-      onAgentError: (event) => {
-        console.error(JSON.stringify({
-          level: "error",
-          event: "agent_turn_failed",
-          documentPath: resolved,
-          ...event
-        }));
-      }
-    })
+  const registration = await project.registerDocument(resolved);
+  document.referenceIdentity = registration.identity;
+  document.referenceIdentityRequired = Boolean(registration.relinkedAt);
+  const gate = new ActivityGate();
+  const store = new OutcomeStore(resolved);
+  const resolveDocument = (target) => project.resolveDocument(target);
+  let outcomes;
+  const conversation = new ConversationService({
+    threadStore, document, agent, agentRuns, gate, resolveDocument,
+    beforeRun: () => outcomes.assertRecovered(),
+    onRunFailure: async ({ threadId, questionMessageId, error, events, agentSnapshot }) => {
+      if (!["AGENT_RUNTIME_LOST", "AGENT_STOP_TIMEOUT"].includes(error?.code)) return;
+      await outcomes.recordUnownedFailure(error, { threadId, questionMessageId, events, agentSnapshot });
+    },
+    onAgentError: (event) => console.error(JSON.stringify({ level: "error", event: "agent_turn_failed", documentPath: resolved, ...event }))
   });
+  outcomes = new WorkspaceOutcomes({ document, store, agent, conversation, gate, resolveDocument, cwd: workspaceRoot, settings: () => agentSettings });
+  await outcomes.proposals.recover();
+  // A saved unanswered question is evidence of an uncertain run, not evidence it did no work.
+  for (const thread of await threadStore.list()) {
+    for (const question of thread.messages.filter((message) => message.role === "user" && message.meta?.agentRunId)) {
+      if (thread.messages.some((message) => message.role === "assistant" && message.parentId === question.id)) continue;
+      if (await store.hasRun(question.meta.agentRunId)) continue;
+      await store.create({ kind: "execution", origin: "discussion", status: "unknown", requestKey: question.meta.agentRunId, title: question.content.slice(0, 80), instruction: question.content, references: question.meta.references || [], threadId: thread.id, messageId: question.id, source: { id: question.id, kind: "message", documentPath: resolved, sourceIdentity: document.referenceIdentity, title: thread.title, threadId: thread.id, messageId: question.id, start: 0, end: question.content.length, revision: referenceRevision(question.content), content: question.content }, events: [], verification: "not-checked", recoveryAcknowledged: false, error: "服务中断，结果未知；过程记录不完整。请核对当前文件并确认原进程已结束。" });
+    }
+  }
+  return Object.freeze({ path: resolved, threadStore, document, agent, conversation, gate, outcomes });
 }
 
 async function switchDocument(nextPath) {
@@ -422,7 +502,17 @@ function createAndSwitchDocument(context, command) {
       document: context.document,
       agentRuns
     });
-    const created = await service.create(command);
+    const created = await context.outcomes.runExternal({
+      origin: "document-creation",
+      requestKey: command.agentRunId,
+      instruction: command.instruction,
+      creationRequest: {
+        instruction: command.instruction,
+        directory: command.directory ?? null,
+        fileName: command.fileName ?? null
+      },
+      retryOf: command.retryOf
+    }, ({ onUpdate, isStopping }) => service.create(command, { onUpdate, isStopping }));
     return performDocumentSwitch(created.path);
   });
 }
@@ -432,7 +522,14 @@ async function performDocumentSwitch(nextPath) {
   if (resolved === activeDocument.path) {
     return activeDocument;
   }
+  if (activeDocument.conversation.isBusy() || activeDocument.gate.active || activeDocument.agent.isBusy()) {
+    throw new HttpRequestError(409, "当前讨论仍在执行，请等待结束后再切换文档。", "DOCUMENT_BUSY");
+  }
   const next = await createDocumentContext(resolved);
+  if (activeDocument.conversation.isBusy() || activeDocument.gate.active || activeDocument.agent.isBusy()) {
+    next.agent.dispose();
+    throw new HttpRequestError(409, "当前讨论仍在执行，请等待结束后再切换文档。", "DOCUMENT_BUSY");
+  }
   const previous = activeDocument;
   activeDocument = next;
   previous.agent.dispose();
@@ -535,10 +632,16 @@ function assertDocumentContext(requestedPath, activePath) {
   }
 }
 
+function publicConversationCommand(body) {
+  const { operationToken: _token, onQuestion: _question, onUpdate: _update, executionId: _execution, ...command } = body;
+  return command;
+}
+
 function normalizeThreadAnchorPatch(value) {
   const patch = value && typeof value === "object" ? value : {};
   return {
     id: String(patch.id || ""),
+    orphaned: typeof patch.orphaned === "boolean" ? patch.orphaned : undefined,
     selectedText: typeof patch.selectedText === "string" ? patch.selectedText : undefined,
     anchor: normalizeAnchor(patch.anchor)
   };
@@ -567,6 +670,14 @@ function serveStatic(routePath, res) {
 
   res.writeHead(200, { "content-type": contentType });
   createReadStream(filePath).pipe(res);
+}
+
+async function readDocumentCommand(req, expectedContext) {
+  const body = await readJson(req);
+  if (expectedContext !== activeDocument) {
+    throw new HttpRequestError(409, "文档已切换，请在当前文档中重新操作。", "DOCUMENT_CONTEXT_CHANGED");
+  }
+  return body;
 }
 
 async function readJson(req) {

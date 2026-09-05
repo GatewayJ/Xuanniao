@@ -86,7 +86,7 @@ test("agent run capacity remains a hard limit while active runs are subscribed",
   broker.dispose();
 });
 
-test("an unanswered persisted question exposes an interrupted run after restart", () => {
+test("an unanswered persisted question exposes an unknown outcome after restart", () => {
   const snapshot = interruptedAgentRunSnapshot("run_12345678", [{
     id: "thread-1",
     messages: [{
@@ -98,10 +98,11 @@ test("an unanswered persisted question exposes an interrupted run after restart"
     }]
   }], () => Date.parse("2026-08-01T10:00:03.000Z"));
 
-  assert.equal(snapshot.status, "failed");
+  assert.equal(snapshot.status, "unknown");
   assert.equal(snapshot.durationMs, 3_000);
-  assert.equal(snapshot.context.interrupted, true);
-  assert.match(snapshot.error, /请重试当前节点/);
+  assert.equal(snapshot.context.outcomeUnknown, true);
+  assert.match(snapshot.error, /结果需核对/);
+  assert.doesNotMatch(snapshot.error, /请重试/);
 });
 
 test("completed questions are not mistaken for interrupted runs", () => {

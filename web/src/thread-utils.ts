@@ -13,6 +13,7 @@ export function titleForSelection(selectedText: string): string {
 }
 
 export function findThreadForSelection(threads: Thread[], selection: SelectionContext, content?: string | null): Thread | null {
+  threads = threads.filter((thread) => !thread.independent);
   if (Number.isInteger(selection.anchor.start) && Number.isInteger(selection.anchor.end)) {
     return threads.find((thread) => {
       const location = content ? resolveThreadAnchor(content, thread) : null;
@@ -50,7 +51,10 @@ export function appendPendingMessage(
       content: command.content,
       nodeId: pendingNodeId,
       parentId: command.parentMessageId || null,
-      meta: command.branchSelection ? { branchSelection: command.branchSelection } : {},
+      meta: {
+        ...(command.branchSelection ? { branchSelection: command.branchSelection } : {}),
+        ...(command.references?.length ? { references: command.references } : {})
+      },
       createdAt: now
     }
   ];

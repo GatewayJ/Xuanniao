@@ -2,14 +2,17 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import type { ViewUpdate } from "@codemirror/view";
 import { api } from "./api";
+import { documentCreationCommand, prepareDocumentCreationRetry, type DocumentCreationRetry, type NewDocumentCommand } from "./document-creation";
 import { coalesceAgentRunUpdates, createAgentRunId } from "./agent-run";
 import { DiagramViewer } from "./components/DiagramViewer";
 import { DEFAULT_DOCUMENT_MODE, DocumentPane, type Mode } from "./components/DocumentPane";
 import { FilePickerModal } from "./components/FilePickerModal";
-import { NewDocumentModal, type NewDocumentCommand } from "./components/NewDocumentModal";
+import { NewDocumentModal } from "./components/NewDocumentModal";
 import { SelectionAskPopover } from "./components/SelectionAskPopover";
 import { SettingsModal } from "./components/SettingsModal";
 import { ThreadRail } from "./components/ThreadRail";
+import { ReferenceComposer } from "./components/ReferenceComposer";
+import { OutcomeWorkspace } from "./components/OutcomeWorkspace";
 import { TopBar } from "./components/TopBar";
 import { WorkspaceTree } from "./components/WorkspaceTree";
 import { useRenderedPreview } from "./hooks/useRenderedPreview";
@@ -29,7 +32,7 @@ import {
   orderThreads,
   titleForSelection
 } from "./thread-utils";
-import type { AgentRunSnapshot, FileBrowserPayload, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
+import type { AgentRunSnapshot, FileBrowserPayload, OutcomeRecord, ReferenceSnapshot, SelectionContext, Thread, ThreadSpatialLayout } from "./types";
 
 const EXPLICIT_THREAD_ACTIVATION_HOLD_MS = 2500;
 const DOCUMENT_VIEWPORT_ANCHOR = 0.28;
@@ -58,11 +61,13 @@ const emptyFileBrowser: FileBrowserPayload = {
 
 export function App() {
   const [threads, setThreads] = useState<Thread[]>([]);
+  const [selectionReferences, setSelectionReferences] = useState<ReferenceSnapshot[]>([]);
   const [activeThreadId, setActiveThreadId] = useState<string | null>(null);
   const [mode, setMode] = useState<Mode>(DEFAULT_DOCUMENT_MODE);
   const [status, setStatus] = useState("正在加载");
   const [filePickerOpen, setFilePickerOpen] = useState(false);
   const [newDocumentOpen, setNewDocumentOpen] = useState(false);
+  const [newDocumentRetry, setNewDocumentRetry] = useState<DocumentCreationRetry | null>(null);
   const [newDocumentCreating, setNewDocumentCreating] = useState(false);
   const [newDocumentError, setNewDocumentError] = useState("");
   const [newDocumentRun, setNewDocumentRun] = useState<AgentRunSnapshot | null>(null);
@@ -115,6 +120,7 @@ export function App() {
     resolvePermissionRequest
   } = usePermissionInbox({ setStatus, sessionKey: documentData?.path ?? null });
   const conversation = useConversationCommands({
+    documentPath: documentData?.path || null,
     threadsRef,
     setThreads,
     setActiveThreadId,
@@ -167,6 +173,7 @@ export function App() {
   useEffect(() => {
     if (!documentData || !editorHostRef.current || editorRef.current) return;
     editorRef.current = new MarkdownThreadEditor(editorHostRef.current, documentData.content, handleEditorChange, handleEditorScroll, activateThread);
+    editorRef.current.setReadOnly(Boolean(openDocumentRequestRef.current || newDocumentRequestRef.current));
     editorRef.current.setThreads(threads, activeThreadId);
     scheduleThreadSpatialSync();
     return () => {
@@ -329,6 +336,8 @@ export function App() {
   }
 
   function openNewDocumentCreator() {
+    if (newDocumentRequestRef.current) return;
+    setNewDocumentRetry(null);
     setFilePickerOpen(false);
     setNewDocumentError("");
     setNewDocumentRun(null);
@@ -338,21 +347,39 @@ export function App() {
     setNewDocumentOpen(true);
   }
 
+  function retryDocumentCreation(record: OutcomeRecord) {
+    if (newDocumentRequestRef.current || openDocumentRequestRef.current) return;
+    try {
+      const retry = prepareDocumentCreationRetry(record, documentSession.currentPath());
+      openNewDocumentCreator();
+      setNewDocumentRetry(retry);
+    } catch (caught) { setStatus(caught instanceof Error ? caught.message : String(caught)); }
+  }
+
   async function createDocument(command: NewDocumentCommand) {
-    if (newDocumentCreating) return;
+    if (newDocumentRequestRef.current || newDocumentCreating || openDocumentRequestRef.current) return;
+    const session = documentSession.captureDocumentSession();
+    let request: ReturnType<typeof documentCreationCommand>;
+    try { request = documentCreationCommand(command, documentSession.currentPath(), newDocumentRetry); }
+    catch (caught) {
+      const message = caught instanceof Error ? caught.message : String(caught);
+      setNewDocumentError(message); setStatus(message); return;
+    }
     const controller = new AbortController();
     const agentRunId = createAgentRunId();
-    newDocumentRequestRef.current?.abort();
     newDocumentRunCloseRef.current?.();
     newDocumentRequestRef.current = controller;
+    editorRef.current?.setReadOnly(true);
     setNewDocumentCreating(true);
     setNewDocumentError("");
     setNewDocumentRun(null);
     setStatus("正在创建文档");
 
     try {
-      if (documentData && !await documentSession.flushDocumentSave()) return;
+      if (!await documentSession.flushDocumentSave()) return;
+      if (!documentSession.isDocumentSessionCurrent(session) || newDocumentRequestRef.current !== controller) return;
       const reserved = await api.reserveAgentRun(agentRunId, controller.signal);
+      if (!documentSession.isDocumentSessionCurrent(session) || newDocumentRequestRef.current !== controller) return;
       setNewDocumentRun(reserved);
       newDocumentRunCloseRef.current = api.subscribeAgentRun(agentRunId, {
         onSnapshot: setNewDocumentRun,
@@ -364,14 +391,15 @@ export function App() {
         onComplete: setNewDocumentRun
       }, controller.signal);
 
-      const payload = await api.createDocument(command, agentRunId, controller.signal);
-      if (newDocumentRequestRef.current !== controller) return;
+      const payload = await api.createDocument(request, agentRunId, controller.signal);
+      if (newDocumentRequestRef.current !== controller || !documentSession.isDocumentSessionCurrent(session)) return;
       documentSession.loadDocument(payload.document, true, true);
-      conversation.resetConversationEditor();
+      conversation.cancelEdit();
       setSelectionAsk(null);
       setSelectionQuestion("");
       setFilePickerOpen(false);
       setNewDocumentOpen(false);
+      setNewDocumentRetry(null);
       setMode(DEFAULT_DOCUMENT_MODE);
       const loadedThreads = await conversation.resumeAgentRuns(payload.threads);
       if (newDocumentRequestRef.current !== controller) return;
@@ -387,6 +415,7 @@ export function App() {
         newDocumentRunCloseRef.current?.();
         newDocumentRunCloseRef.current = null;
         newDocumentRequestRef.current = null;
+        editorRef.current?.setReadOnly(Boolean(openDocumentRequestRef.current));
         setNewDocumentCreating(false);
       }
     }
@@ -424,9 +453,12 @@ export function App() {
   }
 
   async function openDocument(path: string) {
+    if (newDocumentRequestRef.current) { setStatus("文档正在创建，请等待结束后再切换。"); return; }
     openDocumentRequestRef.current?.abort();
     const controller = new AbortController();
     openDocumentRequestRef.current = controller;
+    // Freeze input before the first await; the outgoing snapshot must remain the saved one.
+    editorRef.current?.setReadOnly(true);
     setOpeningDocumentPath(path);
     setStatus("正在打开文档");
     try {
@@ -438,7 +470,7 @@ export function App() {
       if (openDocumentRequestRef.current !== controller) return;
       documentSession.loadDocument(payload.document, true, true);
       setMode(DEFAULT_DOCUMENT_MODE);
-      conversation.resetConversationEditor();
+      conversation.cancelEdit();
       setSelectionAsk(null);
       setSelectionQuestion("");
       setFilePickerOpen(false);
@@ -455,6 +487,7 @@ export function App() {
     } finally {
       if (openDocumentRequestRef.current === controller) {
         openDocumentRequestRef.current = null;
+        editorRef.current?.setReadOnly(Boolean(newDocumentRequestRef.current));
         setOpeningDocumentPath(null);
       }
     }
@@ -559,6 +592,26 @@ export function App() {
     return created.thread;
   }
 
+  async function createIndependentDiscussion(source: Thread, title: string, contextScope: "full" | "references") {
+    const operation = documentSession.captureDocumentSession();
+    if (!await documentSession.flushDocumentSave() || !documentSession.isDocumentSessionCurrent(operation)) {
+      throw new Error("请先完成当前文档的保存，再开始独立讨论。");
+    }
+    const currentSource = threadsRef.current.find((thread) => thread.id === source.id);
+    const documentPath = documentSession.currentPath();
+    const expectedRevision = documentSession.currentRevision();
+    if (!currentSource || !documentPath || !expectedRevision) throw new Error("来源讨论已不可用，请重新打开。");
+    const result = await api.createThread({
+      documentPath, expectedRevision, title,
+      selectedText: currentSource.selectedText, anchor: currentSource.anchor,
+      independent: true, contextScope, sourceThreadId: source.id
+    }, operation.signal);
+    if (!documentSession.isDocumentSessionCurrent(operation)) throw new Error("文档已切换，请在原文档中查看新讨论。");
+    setThreads((current) => insertThreadOnce(current, result.thread));
+    setActiveThreadId(result.thread.id);
+    return result.thread;
+  }
+
   function askSelection() {
     const capturedPreviewSelection = mode === "preview" &&
       previewSelectionRef.current?.content === documentData?.content
@@ -576,6 +629,7 @@ export function App() {
     });
     setSelectionQuestion("");
     setSelectionAskError("");
+    setSelectionReferences([]);
   }
 
   async function submitSelectionQuestion() {
@@ -595,26 +649,25 @@ export function App() {
       const thread = await openOrCreateThread(selectionAsk.selection);
       if (!thread) return;
       const question = selectionQuestion;
-      await conversation.send(
+      const sent = await conversation.send(
         {
           threadId: thread.id,
           content: question,
           draftKey: null,
+          references: selectionReferences,
+          parentMessageId: thread.messages.find((message) => message.role === "user" && !message.parentId)?.id || null,
           askAgent: true
         },
         {
-          onQueued: () => {
-            if (
-              selectionAskRef.current === submittedSelection &&
-              selectionQuestionRef.current === question
-            ) {
-              setSelectionAsk(null);
-              setSelectionQuestion("");
-            }
-            finishSubmission();
-          }
+          onQueued: () => setSelectionAskError(""),
+          onError: setSelectionAskError
         }
       );
+      if (sent && selectionAskRef.current === submittedSelection && selectionQuestionRef.current === question) {
+        setSelectionAsk(null);
+        setSelectionQuestion("");
+        setSelectionReferences([]);
+      }
     } catch (error) {
       if (error instanceof Error && error.name === "AbortError") return;
       const message = error instanceof Error ? error.message : String(error);
@@ -627,7 +680,7 @@ export function App() {
 
   async function deleteThread(thread: Thread) {
     const messageCount = thread.messages?.length || 0;
-    const confirmed = window.confirm(`确定删除这个讨论${messageCount ? `及其中的 ${messageCount} 条消息` : ""}吗？`);
+    const confirmed = window.confirm(`确定删除这个讨论${messageCount ? `及其中的 ${messageCount} 条消息` : ""}吗？已保存的提案、应用和执行快照将保留在成果记录中，正文不会撤回。`);
     if (!confirmed) return;
     const operation = documentSession.captureDocumentSession();
 
@@ -707,6 +760,12 @@ export function App() {
   }
 
   return (
+    <OutcomeWorkspace document={documentData} threads={threads} permission={agentSettings.settingsData?.permissionMode || "当前权限"}
+      permissionRequests={permissionRequests} resolvingPermissionIds={resolvingPermissionIds} onResolvePermission={resolvePermissionRequest}
+      flush={documentSession.flushDocumentSave} apply={documentSession.applyServerDocument} setThreads={setThreads}
+      select={activateThread} selection={currentSelection} createIndependent={createIndependentDiscussion}
+      setDraft={conversation.setMessageDraft} setReferences={conversation.setReferenceDraft} referenceDrafts={conversation.referenceDrafts}
+      openDocument={openDocument} onRetryCreation={retryDocumentCreation} setStatus={setStatus}>
     <div className="appShell" style={shellStyle}>
       <TopBar
         documentPath={documentData?.path || "正在加载…"}
@@ -728,6 +787,7 @@ export function App() {
           onToggleCollapsed={() => setFileTreeCollapsed((current) => !current)}
         />
         <DocumentPane
+          readOnly={Boolean(openingDocumentPath || newDocumentCreating)}
           mode={mode}
           documentData={documentData}
           activeThread={activeThread}
@@ -750,6 +810,10 @@ export function App() {
           editingMessage={conversation.editingMessage}
           editText={conversation.editText}
           messageDrafts={conversation.messageDrafts}
+          referenceDrafts={conversation.referenceDrafts}
+          sendErrors={conversation.sendErrors}
+          setReferenceDraft={conversation.setReferenceDraft}
+          onCreateIndependent={createIndependentDiscussion}
           onActivate={activateThread}
           onDelete={(thread) => void deleteThread(thread)}
           onAskSelection={askSelection}
@@ -779,6 +843,8 @@ export function App() {
         onOpenFile={(path) => void openDocument(path)}
       />
       <NewDocumentModal
+        key={newDocumentRetry?.recordId || "new-document"}
+        retry={newDocumentRetry}
         open={newDocumentOpen}
         workspaceRoot={workspaceRoot}
         creating={newDocumentCreating}
@@ -807,6 +873,10 @@ export function App() {
       />
       {selectionAsk && (
         <SelectionAskPopover
+          referenceControls={documentData && <ReferenceComposer document={documentData} threads={threads}
+            references={selectionReferences} onChange={setSelectionReferences} selectedText={selectionAsk.selection.selectedText}
+            inheritsHistory={Boolean(findThreadForSelection(threads, selectionAsk.selection, documentData.content)?.messages.length)}
+            disabled={creatingSelectionThread} />}
           selectedText={selectionAsk.selection.selectedText}
           anchorRect={selectionAsk.anchorRect}
           question={selectionQuestion}
@@ -823,6 +893,7 @@ export function App() {
       )}
       <DiagramViewer diagram={diagramViewer} onClose={() => setDiagramViewer(null)} />
     </div>
+    </OutcomeWorkspace>
   );
 }
 

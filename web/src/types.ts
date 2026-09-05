@@ -24,6 +24,8 @@ export type DocumentPayload = {
   content: string;
   revision: string;
   blocks: Block[];
+  referenceIdentity?: string;
+  referenceIdentityRequired?: boolean;
 };
 
 export type MarkdownFile = {
@@ -74,7 +76,7 @@ export type BranchSelection = {
 
 export type AgentOutcome = "completed" | "failed" | "not-requested";
 
-export type AgentRunStatus = "waiting" | "running" | "completed" | "failed";
+export type AgentRunStatus = "waiting" | "running" | "stopping" | "completed" | "failed" | "interrupted" | "unknown";
 
 export type AgentRunUpdate = {
   seq?: number;
@@ -138,6 +140,30 @@ export type ConversationMessageCommand = {
   parentMessageId?: string | null;
   branchSelection?: BranchSelection | null;
   agentRunId?: string | null;
+  references?: ReferenceInput[];
+};
+
+export type ReferenceInput = {
+  kind: "document" | "message";
+  documentPath?: string;
+  sourceIdentity?: string;
+  threadId?: string;
+  messageId?: string;
+  start: number;
+  end: number;
+  revision: string;
+};
+
+export type ReferenceSnapshot = ReferenceInput & {
+  id: string;
+  documentPath: string;
+  title: string;
+  content: string;
+  capturedAt?: string;
+  sourceLength?: number;
+  sourceScope?: "full" | "range";
+  contextBefore?: string;
+  contextAfter?: string;
 };
 
 export type PermissionOption = {
@@ -178,10 +204,59 @@ export type Thread = {
   id: string;
   title: string;
   selectedText: string;
+  contextScope?: "full" | "references";
+  independent?: boolean;
+  sourceThreadId?: string | null;
+  orphaned?: boolean;
   anchor: Anchor;
   messages: Message[];
   createdAt: string;
   updatedAt: string;
+};
+
+export type ProposalTarget = {
+  mode: "replace" | "insert" | "document";
+  start: number;
+  end: number;
+  label: string;
+};
+
+export type OutcomeRecord = {
+  id: string;
+  kind: "proposal" | "execution";
+  origin?: "outcome" | "discussion" | "document-creation";
+  status: "generating" | "review" | "applying" | "applied" | "discarded" | "conflict" | "running" | "stopping" | "completed" | "failed" | "interrupted" | "unknown" | "undone";
+  documentPath: string;
+  title: string;
+  source: ReferenceSnapshot;
+  references: ReferenceSnapshot[];
+  instruction: string;
+  createdAt: string;
+  updatedAt: string;
+  revision: number;
+  target?: ProposalTarget;
+  baseContent?: string;
+  baseRevision?: string;
+  proposedContent?: string;
+  replacement?: string;
+  appliedRevision?: string;
+  result?: string;
+  error?: string;
+  events?: AgentRunUpdate[];
+  threadId?: string;
+  messageId?: string;
+  retryOf?: string;
+  inverseOf?: string;
+  cwd?: string;
+  permissionMode?: string;
+  restrictions?: string;
+  acceptance?: string;
+  verification?: "not-checked" | "passed" | "failed";
+  verificationNote?: string;
+  recoveryAcknowledged?: boolean;
+  creationRequest?: { instruction: string; directory?: string | null; fileName?: string | null };
+  creationResult?: { path: string; relativePath: string; content: string };
+  newDocumentPath?: string;
 };
 
 export type AgentSession = {

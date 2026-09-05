@@ -1,0 +1,97 @@
+.threadModal.discussionWorkspace { display: flex; flex-direction: column; }
+.discussionWorkspace > .threadModalHeader { flex-shrink: 0; gap: 12px; min-height: 62px; }
+.discussionWorkspace .threadModalHeaderActions { flex-wrap: wrap; justify-content: flex-end; max-width: 70%; }
+.discussionWorkspace > .threadModalBody, .discussionComparisonHost, .discussionReviewHost { flex: 1; min-height: 0; }
+.discussionComparisonHost[hidden], .discussionReviewHost[hidden], .discussionWorkspace.view-compare > .threadModalBody, .discussionWorkspace.view-review > .threadModalBody { display: none; }
+.discussionWorkspaceToolbar, .discussionSelectionBar { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; padding: 8px 18px; border-bottom: 1px solid #dde5ee; background: #f8fafc; flex-shrink: 0; }
+.discussionWorkspaceToolbar button, .discussionSelectionBar button, .discussionNodeReader button, .discussionPinned button, .discussionComparison button, .discussionReviewView button { font-size: 12px; padding: 6px 9px; }
+.discussionWorkspaceToolbar select, .discussionWorkspaceToolbar input, .discussionComparison select, .synthesisPaths select { min-width: 0; max-width: 100%; border: 1px solid #ced9e6; border-radius: 6px; padding: 6px 8px; background: #fff; color: #334155; font-size: 12px; }
+.discussionViewSwitcher { display: flex; gap: 3px; padding: 3px; border: 1px solid #dbe4ee; border-radius: 9px; background: #fff; }
+.discussionViewSwitcher button { border-color: transparent; background: transparent; }
+.discussionViewSwitcher button[aria-pressed="true"], .discussionWorkspaceToolbar > button[aria-pressed="true"], .discussionContentTabs [aria-selected="true"] { color: #0e7490; background: #e8f6fa; border-color: #9bcddb; }
+.discussionNodeJump { display: flex; align-items: center; gap: 5px; font-size: 11px; color: #64748b; margin-left: auto; min-width: 0; }
+.discussionNodeJump select { max-width: 220px; }
+.discussionSelectionBar { background: #f0f8fc; font-size: 12px; }
+.discussionSelectionBar small { color: #6b7f97; }
+.discussionRelated { position: relative; font-size: 12px; }
+.discussionRelated summary { cursor: pointer; padding: 8px; }
+.discussionRelated[open] { background: white; border: 1px solid #d9e5ef; border-radius: 7px; }
+.discussionRelated button { display: block; text-align: left; max-width: 240px; font-size: 12px; }
+.discussionOrphan { font-size: 11px; color: #a46315; }
+.discussionOrphan button { font-size: 11px; padding: 4px; }
+.discussionNodeCheckbox { position: absolute; left: 5px; top: -24px; display: flex; align-items: center; gap: 3px; color: #0e7490; background: #fff; border-radius: 5px; font-size: 11px; padding: 2px 5px; }
+.threadCanvasNode[data-comparison-selected="true"] { outline: 3px solid #0891b2; outline-offset: 3px; }
+.view-overview .threadCanvasNode[data-search-match="false"] { opacity: .28; }
+.discussionNodeOutcomes { position: absolute; top: -18px; right: 2px; color: #0e7490; background: #e8f6fa; border-radius: 5px; padding: 2px 5px; font-size: 10px; }
+.discussionWorkspace.view-focus .threadModalBody { grid-template-columns: minmax(0, 1fr) !important; }
+.discussionWorkspace.view-focus .threadDocumentContext, .discussionWorkspace.view-focus .threadPaneDivider, .discussionWorkspace.view-focus .threadCanvasViewport { display: none; }
+.discussionWorkspace.view-overview .threadModalBody { grid-template-columns: minmax(0, 1fr) !important; }
+.discussionWorkspace.view-overview .threadDocumentContext, .discussionWorkspace.view-overview .threadPaneDivider, .discussionWorkspace.view-overview .threadContentPane, .discussionWorkspace.view-overview .discussionPinned { display: none; }
+.discussionWorkspace .threadModalBody.hasPinned { grid-template-columns: minmax(0, 1fr) 6px minmax(170px, .5fr) minmax(250px, .85fr) !important; }
+.discussionWorkspace .hasPinned > .threadDocumentContext, .discussionWorkspace .hasPinned > .documentDivider { display: none; }
+.discussionWorkspace.view-focus .threadModalBody.hasPinned { grid-template-columns: minmax(0, 1fr) minmax(260px, .7fr) !important; }
+.discussionWorkspace.view-overview .threadModalBody.hasPinned { grid-template-columns: minmax(0, 1fr) !important; }
+.discussionPinned { display: flex; flex-direction: column; min-height: 0; min-width: 0; overflow: hidden; border-left: 1px solid #cddde9; background: #f7fafc; }
+.discussionPinned > header { padding: 10px 14px; display: flex; align-items: center; justify-content: space-between; gap: 6px; font-size: 12px; }
+.discussionPinned > p { font-size: 11px; padding: 0 14px; margin: 0 0 8px; color: #6e8097; }
+.discussionPinnedActions { display: flex; flex-wrap: wrap; gap: 5px; padding: 0 14px 10px; }
+.discussionNodeReader { display: flex; flex-direction: column; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.discussionReaderPath { padding: 10px 16px; color: #718096; font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; max-height: 80px; overflow: auto; flex-shrink: 0; }
+.discussionLocateNode { align-self: flex-start; margin: 0 16px 6px; }
+.discussionReaderScroll { flex: 1; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 0 18px 32px; }
+.discussionReaderMessage { padding: 16px 0; border-bottom: 1px solid #e1e8ef; }
+.discussionReaderMessage > header { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; font-size: 12px; color: #6c7c93; }
+.discussionReaderMessage .messageContent { font-size: 14px; overflow-wrap: anywhere; line-height: 1.85; }
+.discussionReaderMessage .messageContent pre { overflow: auto; max-width: 100%; }
+.discussionAnswerActions { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; padding: 8px 0; }
+.discussionAnswerActions button { color: #0e7490; font-size: 11px; padding: 5px 8px; border: 1px solid #d5e5ed; border-radius: 6px; background: #f5fafc; }
+.discussionAnswerActions button:disabled { opacity: .45; }
+.discussionAnswerActions small { font-size: 11px; color: #7a879a; }
+.threadSelectionComposer .discussionAnswerActions { width: 100%; flex-wrap: wrap; }
+.discussionReaderSelection { padding: 9px 14px; background: #edf7fb; border-block: 1px solid #c6e2ef; font-size: 11px; flex-shrink: 0; }
+.discussionComparison { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.discussionComparisonHeader { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; padding: 12px 20px; font-size: 13px; }
+.discussionComparisonList { display: flex; flex-wrap: wrap; gap: 6px 22px; margin: 0; padding: 6px 20px 12px 38px; font-size: 12px; max-height: 100px; overflow: auto; flex-shrink: 0; color: #4f657d; }
+.discussionComparisonList li { overflow-wrap: anywhere; max-width: 100%; }
+.discussionComparisonColumns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); flex: 1; min-height: 0; border-top: 1px solid #dde5ee; }
+.discussionComparisonColumn { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.discussionComparisonColumn + .discussionComparisonColumn { border-left: 1px solid #d9e5ef; }
+.discussionComparisonColumn > label { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 10px 16px; font-size: 12px; background: #f8fafc; }
+.discussionComparisonColumn select { flex: 1; }
+.discussionContentTabs { display: none; }
+.discussionReviewHost { overflow: auto; }
+.discussionReviewView { max-width: 1000px; padding: 24px; margin: auto; color: #45566d; }
+.discussionReviewView > header { display: flex; justify-content: space-between; align-items: center; }
+.discussionReviewView > button { display: flex; justify-content: space-between; align-items: center; gap: 16px; width: 100%; text-align: left; margin: 10px 0; padding: 16px; }
+.discussionReviewView strong { overflow-wrap: anywhere; }
+.discussionReviewView span { flex-shrink: 0; }
+.synthesisPaths { background: #f5f9fc; border: 1px solid #dce8ef; border-radius: 9px; padding: 12px; font-size: 12px; color: #52647b; overflow-wrap: anywhere; }
+.synthesisPaths p { line-height: 1.7; }
+.synthesisPaths label { display: grid; gap: 7px; }
+.discussionWorkspace :focus-visible { outline: 2px solid #0891b2; outline-offset: 2px; }
+@media (max-width: 900px) {
+  .discussionWorkspace > .threadModalHeader { padding: 8px 12px; flex-wrap: wrap; }
+  .discussionWorkspace .threadModalHeaderActions { max-width: 100%; }
+  .discussionWorkspace .threadModalHeading { flex: 1; }
+  .discussionWorkspaceToolbar, .discussionSelectionBar { padding: 7px 10px; gap: 5px; }
+  .discussionNodeJump { margin-left: 0; }
+  .discussionWorkspace .threadModalBody, .discussionWorkspace .threadModalBody.hasPinned, .discussionWorkspace.view-focus .threadModalBody.hasPinned { grid-template-columns: minmax(0, 1fr) !important; }
+  .discussionWorkspace .threadPaneDivider, .discussionWorkspace .threadCanvasViewport { display: none; }
+  .discussionWorkspace.view-overview .threadCanvasViewport { display: block; }
+  .discussionWorkspace .threadModalBody.mobile-work > .threadDocumentContext, .discussionWorkspace .threadModalBody.mobile-work > .discussionPinned { display: none; }
+  .discussionWorkspace .threadModalBody.mobile-reference > .threadContentPane { display: none; }
+  .discussionWorkspace .threadModalBody.mobile-reference > .threadDocumentContext { display: grid; }
+  .discussionWorkspace .threadModalBody.hasPinned.mobile-reference > .threadDocumentContext { display: none; }
+  .discussionWorkspace .threadModalBody.hasPinned.mobile-reference > .discussionPinned { display: flex; }
+  .discussionWorkspace.view-overview .threadModalBody > .threadDocumentContext, .discussionWorkspace.view-overview .threadModalBody > .discussionPinned { display: none; }
+  .discussionContentTabs { display: flex; gap: 6px; padding: 7px 12px; border-bottom: 1px solid #dce6ef; background: #f7fafc; }
+  .discussionWorkspace.view-overview > .discussionContentTabs { display: none; }
+  .discussionContentTabs button { flex: 1; font-size: 12px; }
+  .discussionComparisonColumns { grid-template-columns: minmax(0, 1fr); }
+  .discussionComparison.mobile-work .referenceColumn, .discussionComparison.mobile-reference .workingColumn { display: none; }
+  .discussionComparisonColumn + .discussionComparisonColumn { border-left: 0; }
+  .discussionReaderScroll { padding-inline: 14px; }
+  .discussionComparisonList { max-height: 80px; }
+  .discussionWorkspace .threadFocusComposer { padding: 10px 14px; max-height: 48dvh; }
+  .discussionWorkspace .threadCanvasFocusHeader { padding: 12px 14px; }
+}

@@ -118,10 +118,10 @@ export function agentRunForMessage(message: Message): AgentRunState | null {
   const updates = message.meta?.updates;
   const durationMs = message.meta?.durationMs;
   const visibleUpdates = Array.isArray(updates) ? updates.filter(isAgentRunUpdate) : [];
-  if (visibleUpdates.length === 0 && !Number.isFinite(durationMs)) return null;
+  if (visibleUpdates.length === 0 && !Number.isFinite(durationMs) && !message.meta?.interrupted && !message.meta?.outcomeUnknown) return null;
   return {
     id: message.id,
-    status: message.error ? "failed" : "completed",
+    status: message.meta?.outcomeUnknown ? "unknown" : message.meta?.interrupted ? "interrupted" : message.error ? "failed" : "completed",
     startedAt: message.createdAt,
     completedAt: message.updatedAt || message.createdAt,
     durationMs: Number.isFinite(durationMs) ? Number(durationMs) : null,

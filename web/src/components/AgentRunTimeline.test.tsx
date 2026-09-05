@@ -5,6 +5,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import type { AgentRunState, Message } from "../types";
 import { AgentRunTimeline } from "./AgentRunTimeline";
 
+test("unknown and interrupted results never claim execution is still running or safely failed", () => {
+  for (const [status, label] of [["unknown", "结果未知"], ["interrupted", "已中断"]] as const) {
+    const html = renderToStaticMarkup(<AgentRunTimeline variant="floating" message={messageWithRun({ status })} />);
+    assert.ok(html.includes(label));
+    assert.doesNotMatch(html, /正在等待 Codex|Codex 正在执行|执行失败/);
+  }
+});
+
 test("floating progress renders the current plan, diff totals, and expandable subagents", () => {
   const html = renderToStaticMarkup(
     <AgentRunTimeline

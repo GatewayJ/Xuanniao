@@ -5,11 +5,12 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent as ReactPointerEvent,
   type WheelEvent
 } from "react";
 import { createPortal } from "react-dom";
-import { activeAgentRunMessage } from "../agent-run";
+import { activeAgentRunMessage, agentRunForMessage } from "../agent-run";
 import { agentSettingsSummary } from "../agent-settings-view";
 import { useMessageSelection } from "../hooks/useMessageSelection";
 import { AgentRunTimeline } from "./AgentRunTimeline";
@@ -37,6 +38,18 @@ import {
 } from "../thread-tree";
 import type { AgentSettingsPayload, BranchSelection, ConversationMessageCommand, ConversationNodeKind, DocumentPayload, Message, NodeQuickAction, PermissionRequest, Thread, ThreadSpatialLayout } from "../types";
 import { PermissionRequestPanel } from "./PermissionRequestPanel";
+import { ReferenceComposer, ReferenceHistory } from "./ReferenceComposer";
+import { IndependentDiscussion, type DiscussionPreparation, type IndependentDiscussionRequest } from "./IndependentDiscussion";
+import { appendReference, discussionSources, messageReferences, snapshotReference, selectedReferenceRange, REFERENCE_DRAG_TYPE } from "../discussion-references";
+import type { ReferenceSnapshot } from "../types";
+
+import { DiscussionAnswerActions } from "./DiscussionAnswerActions";
+import { DiscussionComparison, DiscussionContentTabs, DiscussionNodeReader, DiscussionReviewView, DiscussionViewSwitcher } from "./DiscussionViews";
+import { locateReferenceSource, useDiscussionWorkspace, type DiscussionWorkspaceActions } from "./DiscussionWorkspaceContext";
+import { comparisonPair, nodeOutcomeCounts, readWorkspaceDraft, reframeCanvas, saveWorkspaceDraft, stableMessage, synthesisSources, workspaceEscapeTarget, workspaceStorageKey, type DiscussionPosition, type DiscussionView } from "./discussion-view-state";
+import { WorkspaceNavigation } from "./WorkspaceNavigation";
+import { resolveThreadAnchor } from "../thread-anchors";
+const discussionViewStyles = new URL("./discussion-views.css", import.meta.url).href;
 
 const THREAD_PANE_DIVIDER_WIDTH = 6;
 
@@ -52,8 +65,13 @@ const NODE_KIND_META: Record<ConversationNodeKind, { label: string; shortLabel: 
 
 type NodeCreationMode = "child" | "branch";
 type ThreadQuestionCommand = Omit<ConversationMessageCommand, "threadId" | "askAgent">;
+type ReferenceDraftProps = {
+  referenceDrafts?: Record<string, ReferenceSnapshot[]>;
+  setReferenceDraft?: (key: string, references: ReferenceSnapshot[]) => void;
+  sendErrors?: Record<string, string>;
+};
 
-type ThreadRailProps = {
+type ThreadRailProps = ReferenceDraftProps & {
   documentData: DocumentPayload | null;
   agentSettings: AgentSettingsPayload | null;
   threads: Thread[];
@@ -79,9 +97,13 @@ type ThreadRailProps = {
   setEditText: (value: string) => void;
   setMessageDraft: (draftKey: string, value: string) => void;
   onSend: (command: ConversationMessageCommand) => Promise<boolean>;
+  onCreateIndependent?: (source: Thread, title: string, scope: "full" | "references") => Promise<Thread>;
 };
 
 export function ThreadRail(props: ThreadRailProps) {
+  const workspace = useDiscussionWorkspace();
+  const handledNavigationRef = useRef<number | null>(null);
+  const [navigationTarget, setNavigationTarget] = useState<DiscussionWorkspaceActions["navigation"] | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
   const cardRefs = useRef<Map<string, HTMLElement>>(new Map());
   const applyingScrollRef = useRef(false);
@@ -90,6 +112,16 @@ export function ThreadRail(props: ThreadRailProps) {
   const [cardHeights, setCardHeights] = useState<Record<string, number>>({});
   const [railViewportHeight, setRailViewportHeight] = useState(0);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
+  const [referenceTarget, setReferenceTarget] = useState<ReferenceSnapshot | null>(null);
+
+  useEffect(() => {
+    const target = workspace?.navigation;
+    if (!target || handledNavigationRef.current === target.nonce || !props.threads.some((thread) => thread.id === target.threadId)) return;
+    handledNavigationRef.current = target.nonce;
+    setReferenceTarget(target.reference || null);
+    setNavigationTarget(target);
+    setOpenThreadId(target.threadId);
+  }, [workspace?.navigation, props.threads]);
 
   useEffect(() => {
     if (openThreadId && !props.threads.some((thread) => thread.id === openThreadId)) {
@@ -167,6 +199,7 @@ export function ThreadRail(props: ThreadRailProps) {
   }
 
   function openThread(thread: Thread) {
+    setNavigationTarget(null);
     props.onActivate(thread);
     setOpenThreadId(thread.id);
   }
@@ -323,6 +356,7 @@ export function ThreadRail(props: ThreadRailProps) {
                       type="button"
                       className="threadDeleteButton"
                       aria-label="删除讨论"
+                      disabled={Boolean(workspace?.busy)}
                       title="删除讨论"
                       onClick={(event) => {
                         event.stopPropagation();
@@ -348,6 +382,33 @@ export function ThreadRail(props: ThreadRailProps) {
           documentData={props.documentData}
           agentSettings={props.agentSettings}
           thread={openThreadDetail}
+          referenceTarget={referenceTarget}
+          navigationTarget={navigationTarget}
+          onLocateReference={(reference) => locateReferenceSource(reference, props.documentData?.path, {
+            preview: (reference) => workspace?.previewReference?.(reference),
+            locate: (reference) => {
+              setNavigationTarget(null);
+              setReferenceTarget({ ...reference });
+              if (reference.threadId) setOpenThreadId(reference.threadId);
+            }
+          })}
+          threads={props.threads}
+          onOpenThread={(threadId) => { setNavigationTarget(null); setReferenceTarget(null); setOpenThreadId(threadId); }}
+          referenceDrafts={props.referenceDrafts}
+          sendErrors={props.sendErrors}
+          setReferenceDraft={props.setReferenceDraft}
+          onStartIndependent={props.onCreateIndependent ? async (request) => {
+            const thread = await props.onCreateIndependent!(openThreadDetail, questionSummary(request.content), request.scope);
+            const key = threadNodeDraftKey(thread.id, null);
+            props.setMessageDraft(key, request.content);
+            props.setReferenceDraft?.(key, request.references);
+            setNavigationTarget(null);
+            setReferenceTarget(null);
+            setOpenThreadId(thread.id);
+            void props.onSend({ threadId: thread.id, content: request.content, references: request.references, draftKey: key, askAgent: true, parentMessageId: null, nodeId: null });
+          } : undefined}
+          onOpenSource={openThreadDetail.sourceThreadId && props.threads.some((thread) => thread.id === openThreadDetail.sourceThreadId)
+            ? () => { setNavigationTarget(null); setReferenceTarget(null); setOpenThreadId(openThreadDetail.sourceThreadId!); } : undefined}
           permissionRequests={props.permissionRequests.filter((request) => (
             request.threadId === openThreadDetail.id || (!request.threadId && openThreadDetail.id === props.activeThreadId)
           ))}
@@ -355,7 +416,7 @@ export function ThreadRail(props: ThreadRailProps) {
           editingMessage={props.editingMessage}
           editText={props.editText}
           messageDrafts={props.messageDrafts}
-          onClose={() => setOpenThreadId(null)}
+          onClose={() => { setNavigationTarget(null); setOpenThreadId(null); }}
           onRevealSource={() => {
             props.onActivate(openThreadDetail);
             setOpenThreadId(null);
@@ -378,10 +439,17 @@ export function ThreadRail(props: ThreadRailProps) {
   );
 }
 
-export function ThreadDetailModal(props: {
+export function ThreadDetailModal(props: ReferenceDraftProps & {
   documentData: DocumentPayload | null;
   agentSettings: AgentSettingsPayload | null;
   thread: Thread;
+  threads?: Thread[];
+  onStartIndependent?: (request: IndependentDiscussionRequest) => Promise<void>;
+  onOpenSource?: () => void;
+  onOpenThread?: (threadId: string) => void;
+  referenceTarget?: ReferenceSnapshot | null;
+  navigationTarget?: DiscussionWorkspaceActions["navigation"] | null;
+  onLocateReference?: (reference: ReferenceSnapshot) => void;
   permissionRequests: PermissionRequest[];
   resolvingPermissionIds: Set<string>;
   editingMessage: string | null;
@@ -401,12 +469,30 @@ export function ThreadDetailModal(props: {
   setMessageDraft: (draftKey: string, value: string) => void;
   onSend: (command: ConversationMessageCommand) => Promise<boolean>;
 }) {
+  const workspace = useDiscussionWorkspace();
+  useLayoutEffect(() => {
+    workspace?.onDiscussionVisibilityChange?.(true);
+    return () => workspace?.onDiscussionVisibilityChange?.(false);
+  }, [workspace?.onDiscussionVisibilityChange]);
+  const storageKey = workspaceStorageKey(props.documentData?.path, props.thread.id);
+  const [savedPosition] = useState(() => readWorkspaceDraft<DiscussionPosition>(storageKey));
+  const [view, setView] = useState<DiscussionView>(savedPosition?.view || "discussion");
+  const previousViewRef = useRef<DiscussionView>("discussion");
+  const [selecting, setSelecting] = useState(savedPosition?.selecting || false);
+  const [comparisonIds, setComparisonIds] = useState<string[]>(savedPosition?.selection || []);
+  const [pair, setPair] = useState<[string, string]>(savedPosition?.pair || ["", ""]);
+  const [pinnedNodeId, setPinnedNodeId] = useState<string | null>(savedPosition?.pinnedNodeId || null);
+  const [mobileTab, setMobileTab] = useState<"work" | "reference">("work");
+  const [nodeSearch, setNodeSearch] = useState("");
+  const [preparation, setPreparation] = useState<DiscussionPreparation | undefined>();
+  const scrollPositions = useRef<Record<string, number>>(savedPosition?.scroll || {});
   const modalRef = useRef<HTMLElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const composerRef = useRef<HTMLTextAreaElement | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const modalBodyRef = useRef<HTMLDivElement | null>(null);
   const documentContextRef = useRef<HTMLElement | null>(null);
+  const documentReferenceRef = useRef<ReferenceSnapshot | null>(null);
   const inspectorRef = useRef<HTMLElement | null>(null);
   const messageSelectionSurfaceRef = useRef<HTMLDivElement | null>(null);
   const inspectorOpenRef = useRef(false);
@@ -423,20 +509,22 @@ export function ThreadDetailModal(props: {
     divider: "document-content" | "content-tree";
     pointerId: number;
   } | null>(null);
-  const paneWidthsCustomizedRef = useRef(false);
+  const paneWidthsCustomizedRef = useRef(Boolean(savedPosition?.paneWidths.document));
   const tree = useMemo(() => buildConversationTree(props.thread.messages), [props.thread.messages]);
   const nodes = useMemo(() => flattenConversationTree(tree), [tree]);
   const canvasLayout = useMemo(() => layoutConversationTree(tree), [tree]);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() => tree[0]?.id || null);
-  const [inspectorOpen, setInspectorOpen] = useState(() => tree.length > 0);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(() => savedPosition ? savedPosition.selectedNodeId : tree[0]?.id || null);
+  const [inspectorOpen, setInspectorOpen] = useState(() => savedPosition?.inspectorOpen ?? tree.length > 0);
   const [contentPaneElement, setContentPaneElement] = useState<HTMLElement | null>(null);
-  const [documentContextOpen, setDocumentContextOpen] = useState(true);
+  const [documentContextOpen, setDocumentContextOpen] = useState(savedPosition?.documentOpen ?? true);
   const [isPanning, setIsPanning] = useState(false);
   const [selectionSending, setSelectionSending] = useState(false);
+  const [independentOpen, setIndependentOpen] = useState(false);
+  const [referenceError, setReferenceError] = useState("");
   const [resizingPane, setResizingPane] = useState<"document-content" | "content-tree" | null>(null);
-  const [paneWidths, setPaneWidths] = useState({ document: 0, content: 0 });
+  const [paneWidths, setPaneWidths] = useState(savedPosition?.paneWidths || { document: 0, content: 0 });
   const [canvasSize, setCanvasSize] = useState({ width: 0, height: 0 });
-  const [canvasTransform, setCanvasTransform] = useState({ x: 0, y: 0, scale: 1 });
+  const [canvasTransform, setCanvasTransform] = useState(savedPosition?.transform || { x: 0, y: 0, scale: 1 });
   const contentScaleRef = useRef({ scale: 1 });
   const {
     selectionPopover,
@@ -455,8 +543,56 @@ export function ThreadDetailModal(props: {
   inspectorOpenRef.current = inspectorOpen;
   selectionPopoverOpenRef.current = Boolean(selectionPopover);
   const knownNodeIdsRef = useRef(new Set(nodes.map((node) => node.id)));
-  const centeredThreadRef = useRef<string | null>(null);
-  const overviewTransformRef = useRef<{ x: number; y: number; scale: number } | null>(null);
+  useEffect(() => {
+    const target = props.navigationTarget;
+    if (!target || target.threadId !== props.thread.id) return;
+    setView("discussion");
+    setMobileTab("work");
+    setSelectedNodeId(target.nodeId);
+    setInspectorOpen(true);
+    clearCapturedMessageSelection();
+    if (target.focusComposer === false) return;
+    const frame = window.requestAnimationFrame(() => composerRef.current?.focus({ preventScroll: true }));
+    return () => window.cancelAnimationFrame(frame);
+  }, [props.navigationTarget?.nonce, props.thread.id]);
+  useEffect(() => {
+    const reference = props.referenceTarget;
+    if (!reference) return;
+    if (reference.documentPath !== props.documentData?.path) { documentReferenceRef.current = null; return; }
+    if (reference.kind === "document") {
+      documentReferenceRef.current = reference;
+      setDocumentContextOpen(true);
+      const frame = window.requestAnimationFrame(scrollDocumentContextToAnchor);
+      return () => window.cancelAnimationFrame(frame);
+    }
+    const source = props.thread.messages.find((message) => message.id === reference.messageId);
+    if (source) {
+      setSelectedNodeId(source.nodeId || source.id);
+      setInspectorOpen(true);
+    }
+  }, [props.referenceTarget, props.documentData?.path]);
+  const savedViewport = savedPosition?.viewport;
+  const hasSavedViewport = Boolean(savedViewport && Number.isFinite(savedViewport.width) && savedViewport.width > 0 && Number.isFinite(savedViewport.height) && savedViewport.height > 0);
+  const canvasInitializedRef = useRef(hasSavedViewport);
+  const canvasViewportRef = useRef(hasSavedViewport ? savedViewport! : null);
+  const centeredNodeRef = useRef<string | null>(savedPosition?.selectedNodeId || null);
+  const overviewTransformRef = useRef<{ x: number; y: number; scale: number } | null>(hasSavedViewport ? savedPosition?.overviewTransform || null : null);
+  const positionRef = useRef<DiscussionPosition | null>(null);
+  positionRef.current = { view, selectedNodeId, inspectorOpen, pinnedNodeId, selection: comparisonIds, selecting, pair, documentOpen: documentContextOpen,
+    transform: canvasTransform, overviewTransform: overviewTransformRef.current, paneWidths, scroll: scrollPositions.current, viewport: canvasViewportRef.current || undefined };
+  function savePosition() { if (positionRef.current) saveWorkspaceDraft(storageKey, { ...positionRef.current, viewport: canvasViewportRef.current || undefined }); }
+  useEffect(savePosition, [view, selectedNodeId, inspectorOpen, pinnedNodeId, comparisonIds, selecting, pair, documentContextOpen, canvasTransform, paneWidths]);
+  useEffect(() => () => savePosition(), [storageKey]);
+  useEffect(() => {
+    const ids = new Set(nodes.map((node) => node.id));
+    setComparisonIds((current) => current.every((id) => ids.has(id)) ? current : current.filter((id) => ids.has(id)));
+    setPinnedNodeId((current) => current && !ids.has(current) ? null : current);
+    if (positionRef.current?.view === "compare" && positionRef.current.selection.filter((id) => ids.has(id)).length < 2) setView("discussion");
+  }, [nodes]);
+  useLayoutEffect(() => {
+    if (messageSelectionSurfaceRef.current?.clientHeight) messageSelectionSurfaceRef.current.scrollTop = scrollPositions.current[`work:${selectedNodeId}`] || 0;
+    if (documentContextRef.current?.clientHeight) scrollDocumentContextToAnchor();
+  }, [selectedNodeId, contentPaneElement, inspectorOpen, view, mobileTab, pinnedNodeId, documentContextOpen]);
   const documentContent = props.documentData?.content ?? null;
   const renderedDocumentContent = documentContextOpen ? documentContent : null;
   const documentPreviewThreads = useMemo(() => [props.thread], [props.thread]);
@@ -507,6 +643,7 @@ export function ThreadDetailModal(props: {
     const body = modalBodyRef.current;
     if (!body) return;
     const updateWidths = () => {
+      if (!body.clientWidth) return;
       setPaneWidths((current) => paneWidthsCustomizedRef.current
         ? fitThreadPaneWidths(body.clientWidth, current, documentContextOpen)
         : defaultThreadPaneWidths(body.clientWidth, documentContextOpen));
@@ -518,17 +655,6 @@ export function ThreadDetailModal(props: {
   }, [documentContextOpen]);
 
   useEffect(() => {
-    if (!canvasSize.width || !canvasSize.height) return;
-    const isNewThread = centeredThreadRef.current !== props.thread.id;
-    centeredThreadRef.current = props.thread.id;
-    setCanvasTransform((current) => ({
-      x: canvasSize.width / 2,
-      y: canvasSize.height / 2,
-      scale: isNewThread ? 1 : current.scale
-    }));
-  }, [canvasSize, props.thread.id]);
-
-  useEffect(() => {
     if (props.permissionRequests.length === 0 || inspectorOpen) return;
     if (!selectedNodeId) {
       const node = nodes.at(-1) || null;
@@ -537,17 +663,21 @@ export function ThreadDetailModal(props: {
     setInspectorOpen(true);
   }, [inspectorOpen, nodes, props.permissionRequests.length, selectedNodeId]);
 
-  useEffect(() => {
-    if (!selectedNodeId || !canvasSize.width || !canvasSize.height) return;
+  useLayoutEffect(() => {
+    // Hidden views measure zero; retain the last visible viewport until they return.
+    if (!canvasSize.width || !canvasSize.height) return;
     const selectedLayout = selectedNodeId
       ? canvasLayout.nodes.find((item) => item.node.id === selectedNodeId)
       : null;
-    if (!selectedLayout) return;
-    setCanvasTransform((current) => ({
-      x: canvasSize.width / 2 - selectedLayout.x * current.scale,
-      y: canvasSize.height / 2 - selectedLayout.y * current.scale,
-      scale: current.scale
-    }));
+    const center = !canvasInitializedRef.current
+      ? selectedLayout || { x: 0, y: 0 }
+      : centeredNodeRef.current !== selectedNodeId ? selectedLayout || undefined : undefined;
+    const previous = canvasViewportRef.current;
+    if (overviewTransformRef.current) overviewTransformRef.current = reframeCanvas(overviewTransformRef.current, previous, canvasSize);
+    setCanvasTransform((current) => reframeCanvas(current, previous, canvasSize, center));
+    canvasViewportRef.current = canvasSize;
+    canvasInitializedRef.current = true;
+    centeredNodeRef.current = selectedNodeId;
   }, [canvasLayout.nodes, canvasSize.height, canvasSize.width, selectedNodeId]);
 
   useEffect(() => {
@@ -557,12 +687,19 @@ export function ThreadDetailModal(props: {
     closeButtonRef.current?.focus();
 
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.defaultPrevented || [...document.querySelectorAll<HTMLElement>("[data-discussion-overlay]")].some((element) => element.getClientRects().length > 0)) return;
       if (event.key === "Escape") {
-        if (threadDetailEscapeTarget(selectionPopoverOpenRef.current) === "selection") {
+        const disclosure = event.target instanceof Element ? event.target.closest("details[open]") : null;
+        if (disclosure instanceof HTMLDetailsElement) { event.preventDefault(); disclosure.open = false; disclosure.querySelector("summary")?.focus(); return; }
+        event.preventDefault();
+        const target = workspaceEscapeTarget(selectionPopoverOpenRef.current, positionRef.current?.selecting || false, positionRef.current?.view || "discussion");
+        if (target === "selection") {
           clearCapturedMessageSelection();
           window.getSelection()?.removeAllRanges();
           return;
         }
+        if (target === "multiselect") { setSelecting(false); return; }
+        if (target === "view") { changeView(positionRef.current?.view === "review" ? previousViewRef.current : "discussion"); return; }
         props.onClose();
         return;
       }
@@ -585,6 +722,8 @@ export function ThreadDetailModal(props: {
       }
       if (
         !inspectorOpenRef.current
+        || positionRef.current?.view === "compare"
+        || positionRef.current?.view === "review"
         || event.metaKey
         || event.ctrlKey
         || event.altKey
@@ -628,6 +767,16 @@ export function ThreadDetailModal(props: {
   nodeNavigationRef.current = selectedNodeNavigation;
   const draftKey = threadNodeDraftKey(props.thread.id, selectedNodeId);
   const messageDraft = props.messageDrafts[draftKey] || "";
+  const draftReferences = props.referenceDrafts?.[draftKey] || [];
+  const referenceComposer = props.documentData && props.setReferenceDraft ? <>
+    <ReferenceComposer key={draftKey} document={props.documentData} threads={props.threads || [props.thread]}
+      references={draftReferences} onChange={(references) => props.setReferenceDraft?.(draftKey, references)}
+      onLocate={props.onLocateReference}
+      scope={props.thread.contextScope} selectedText={props.thread.selectedText} inheritsHistory={Boolean(selectedNode)} history={selectedNodeBreadcrumb}
+      selectionUnavailable={Boolean(props.thread.orphaned || (props.thread.selectedText && !resolveThreadAnchor(props.documentData.content, props.thread)))} />
+    {props.sendErrors?.[draftKey] && <p className="workbenchError" role="alert">{props.sendErrors[draftKey]}</p>}
+    {referenceError && <p className="workbenchError" role="alert">{referenceError}</p>}
+  </> : null;
   const canvasDraftPreview = useMemo(() => (
     inspectorOpen && messageDraft.trim()
       ? layoutConversationTreeWithDraft(tree, selectedNodeId)
@@ -639,7 +788,37 @@ export function ThreadDetailModal(props: {
   const selectedNodeKind = selectedNode ? conversationNodeKind(selectedNode) : "question";
   const effectiveAgentSettings = agentSettingsSummary(props.agentSettings);
   const quickActions = nodeQuickActions(props.agentSettings);
-  const semanticStats = useMemo(() => conversationSemanticStats(nodes), [nodes]);
+  const unansweredCount = nodes.filter((node) => conversationNodeStatus(node) === "unanswered").length;
+  const validComparisonIds = comparisonIds.filter((id) => nodes.some((node) => node.id === id));
+  const pinnedNode = nodes.find((node) => node.id === pinnedNodeId) || null;
+  const canCompare = validComparisonIds.length >= 2;
+  const canSynthesize = canCompare && !synthesisSources(props.thread, validComparisonIds).generating;
+  const relatedThreads = (props.threads || []).filter((thread) => thread.sourceThreadId === props.thread.id);
+  const orphaned = Boolean(props.thread.orphaned || (props.documentData && props.thread.selectedText && !resolveThreadAnchor(props.documentData.content, props.thread)));
+  function changeView(next: DiscussionView) {
+    const current = positionRef.current;
+    if (next === "compare" && (current?.selection.length || 0) < 2) return;
+    clearCapturedMessageSelection();
+    if (next === "review" && workspace?.openResults) { workspace.openResults(props.thread.id); return; }
+    if (next === "review" && current?.view !== "review") previousViewRef.current = current?.view || "discussion";
+    if (next === "overview" && current?.view !== "overview" && overviewTransformRef.current) {
+      setCanvasTransform(overviewTransformRef.current);
+    } else if (current?.view === "overview" && next !== "overview") {
+      overviewTransformRef.current = current.transform;
+    }
+    setView(next);
+    setMobileTab("work");
+  }
+  function toggleComparison(nodeId: string) {
+    setSelecting(true);
+    setComparisonIds((current) => current.includes(nodeId) ? current.filter((id) => id !== nodeId) : [...current, nodeId]);
+  }
+  function prepareComparison(mode: DiscussionPreparation["mode"], ids = validComparisonIds) {
+    const plan = synthesisSources(props.thread, ids);
+    if (plan.selected.length < 2 || plan.generating) return;
+    setPreparation({ mode, nodeIds: [...ids] });
+    setIndependentOpen(true);
+  }
   function applyNodeQuickAction(action: NodeQuickAction) {
     if (!selectedNode) return;
     clearCapturedMessageSelection();
@@ -649,7 +828,10 @@ export function ThreadDetailModal(props: {
   }
 
   function openNode(nodeId: string, startComposer = false) {
-    if (!inspectorOpenRef.current) overviewTransformRef.current = canvasTransform;
+    documentReferenceRef.current = null;
+    if (!inspectorOpenRef.current || view === "overview") overviewTransformRef.current = canvasTransform;
+    if (view === "compare" || view === "overview" || view === "review") setView("discussion");
+    setMobileTab("work");
     setSelectedNodeId(nodeId);
     clearCapturedMessageSelection();
     setInspectorOpen(true);
@@ -661,20 +843,25 @@ export function ThreadDetailModal(props: {
   }
 
   function navigateToNode(nodeId: string | null | undefined) {
+    documentReferenceRef.current = null;
     if (!nodeId) return;
     setSelectedNodeId(nodeId);
     clearCapturedMessageSelection();
     window.getSelection()?.removeAllRanges();
     window.requestAnimationFrame(() => {
       scrollDocumentContextToAnchor();
-      if (messageSelectionSurfaceRef.current) messageSelectionSurfaceRef.current.scrollTop = 0;
+      if (messageSelectionSurfaceRef.current) messageSelectionSurfaceRef.current.scrollTop = scrollPositions.current[`work:${nodeId}`] || 0;
     });
   }
 
   function scrollDocumentContextToAnchor() {
     const root = documentContextRef.current;
-    if (!root || !props.documentData?.content) return;
-    const target = root.querySelector<HTMLElement>(
+    if (!root?.clientHeight || !props.documentData?.content) return;
+    const reference = documentReferenceRef.current;
+    if (!reference && scrollPositions.current.document !== undefined) { root.scrollTop = scrollPositions.current.document; return; }
+    const referenceBlock = reference ? [...root.querySelectorAll<HTMLElement>("[data-source-start][data-source-end]")]
+      .find((element) => Number(element.dataset.sourceStart) <= reference.start && Number(element.dataset.sourceEnd) > reference.start) : null;
+    const target = referenceBlock || root.querySelector<HTMLElement>(
       `[data-preview-thread-id~="${CSS.escape(props.thread.id)}"]`
     )
       || findPreviewBlockForThread(root, props.thread, props.documentData.content);
@@ -746,7 +933,7 @@ export function ThreadDetailModal(props: {
   }
 
   function handleCanvasWheel(event: WheelEvent<HTMLDivElement>) {
-    if ((event.target as HTMLElement).closest(".threadCanvasFocusNode")) return;
+    if ((event.target as HTMLElement).closest(".threadCanvasFocusNode, .threadCanvasControls, .discussionNodeReader")) return;
     event.preventDefault();
     if (event.ctrlKey || event.metaKey) {
       const rect = event.currentTarget.getBoundingClientRect();
@@ -847,9 +1034,28 @@ export function ThreadDetailModal(props: {
   function sendQuestion(command: ThreadQuestionCommand): Promise<boolean> {
     return props.onSend({
       ...command,
+      references: command.draftKey ? draftReferences : command.references,
       threadId: props.thread.id,
       askAgent: true
     });
+  }
+
+  async function quoteMessage(messageId: string, text?: string, threadId = props.thread.id) {
+    if (!props.documentData || !props.setReferenceDraft) return;
+    setReferenceError("");
+    try {
+      const sourceThread = (props.threads || [props.thread]).find((thread) => thread.id === threadId);
+      if (!sourceThread?.messages.some((message) => message.id === messageId && stableMessage(message))) throw new Error("来源尚未完成或已不可用。");
+      const source = discussionSources(props.documentData, props.threads || [props.thread]).find((item) => item.messageId === messageId && item.threadId === threadId);
+      if (!source) throw new Error("来源尚未完成或已不可用。");
+      const range = selectedReferenceRange(source, text);
+      const reference = await snapshotReference(source, range.start, range.end);
+      const next = appendReference(draftReferences, reference);
+      if (next.length > 24 || next.reduce((sum, item) => sum + item.content.length, 0) > 160_000) throw new Error("引用资料过多，请缩小范围或移除已有引用。");
+      props.setReferenceDraft(draftKey, next);
+      clearCapturedMessageSelection();
+      composerRef.current?.focus();
+    } catch (error) { setReferenceError(error instanceof Error ? error.message : String(error)); }
   }
 
   async function submitSelectionQuestion() {
@@ -882,12 +1088,28 @@ export function ThreadDetailModal(props: {
 
   return (
     <div className="modalBackdrop threadModalBackdrop" role="presentation" onMouseDown={props.onClose}>
+      <link rel="stylesheet" href={discussionViewStyles} precedence="discussion-views" />
       <section
         ref={modalRef}
-        className="threadModal"
+        className={`threadModal discussionWorkspace view-${view}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="thread-modal-title"
+        inert={independentOpen}
+        onDragOver={(event) => {
+          if (event.target instanceof HTMLTextAreaElement && event.dataTransfer.types.includes(REFERENCE_DRAG_TYPE)) event.preventDefault();
+        }}
+        onDrop={(event) => {
+          if (!(event.target instanceof HTMLTextAreaElement)) return;
+          const data = event.dataTransfer.getData(REFERENCE_DRAG_TYPE);
+          if (!data) return;
+          event.preventDefault();
+          try {
+            const input = JSON.parse(data);
+            if (typeof input.messageId !== "string" || typeof input.threadId !== "string" || typeof input.text !== "string") return;
+            void quoteMessage(input.messageId, input.text, input.threadId);
+          } catch { setReferenceError("拖入的引用无效，请通过‘添加引用’选择来源。"); }
+        }}
         onMouseDown={(event) => event.stopPropagation()}
       >
         <header className="threadModalHeader">
@@ -895,6 +1117,14 @@ export function ThreadDetailModal(props: {
             <h2 id="thread-modal-title">{threadDisplayTitle(props.thread)}</h2>
           </div>
           <div className="threadModalHeaderActions">
+            {props.thread.independent && <span className="independentBadge">独立讨论</span>}
+            {props.onOpenSource && <button type="button" className="threadContextToggle" onClick={props.onOpenSource}>来源讨论 ↗</button>}
+            {props.thread.sourceThreadId && !props.onOpenSource && <span className="contextToken">来源讨论已删除</span>}
+            {props.onStartIndependent && <button type="button" className="threadContextToggle" disabled={Boolean(activeAgentRunMessage(props.thread.messages))} onClick={() => { setPreparation(undefined); setIndependentOpen(true); }}>开启独立讨论</button>}
+            {relatedThreads.length > 0 && <details className="discussionRelated"><summary>相关讨论 {relatedThreads.length}</summary>
+              {relatedThreads.map((thread) => <button type="button" key={thread.id} disabled={!props.onOpenThread} onClick={() => props.onOpenThread?.(thread.id)}>{thread.title} ↗</button>)}
+            </details>}
+            {orphaned && <span className="discussionOrphan">原文位置已变化 <button type="button" disabled={!workspace?.reanchor || workspace.busy} title="先在当前文档选中要关联的原文" onClick={() => workspace?.reanchor?.(props.thread)}>重新关联原文</button></span>}
             <button
               type="button"
               className={`threadContextToggle ${documentContextOpen ? "active" : ""}`}
@@ -909,14 +1139,43 @@ export function ThreadDetailModal(props: {
             </button>
           </div>
         </header>
-
+        <WorkspaceNavigation placement="discussion" />
+        <div className="discussionWorkspaceToolbar">
+          <DiscussionViewSwitcher view={view} onChange={changeView} canCompare={canCompare} />
+          <button type="button" aria-pressed={selecting} onClick={() => setSelecting(!selecting)}>选择节点</button>
+          <label className="discussionNodeJump">工作节点<select aria-label="选择工作节点" value={selectedNodeId || ""} onChange={(event) => openNode(event.target.value)}>
+            <option value="" disabled>选择节点…</option>{nodes.map((node) => <option key={node.id} value={node.id}>{questionSummary(node.question.content)}</option>)}
+          </select></label>
+          {selectedNode && <button type="button" aria-pressed={pinnedNodeId === selectedNodeId} onClick={() => setPinnedNodeId(pinnedNodeId === selectedNodeId ? null : selectedNodeId)}>固定为参考</button>}
+          {view === "overview" && <input aria-label="搜索讨论节点" placeholder="搜索节点…" value={nodeSearch} onChange={(event) => setNodeSearch(event.target.value)} />}
+        </div>
+        {(selecting || validComparisonIds.length > 0) && <div className="discussionSelectionBar">
+          <strong>已选 {validComparisonIds.length} 个节点</strong>
+          <button type="button" disabled={!canCompare} onClick={() => { setPair(comparisonPair(validComparisonIds, pair)); changeView("compare"); }}>并排查看</button>
+          <button type="button" disabled={!canSynthesize || !props.onStartIndependent || !props.documentData} onClick={() => prepareComparison("compare")}>比较方案</button>
+          <button type="button" disabled={!canSynthesize || !props.onStartIndependent || !props.documentData} onClick={() => prepareComparison("synthesize")}>生成综合结论</button>
+          <button type="button" onClick={() => { setSelecting(false); setComparisonIds([]); if (view === "compare") changeView("discussion"); }}>取消选择</button>
+          {!canCompare && <small>至少选择两个节点 · Ctrl / ⌘ 点击可多选</small>}
+          {canCompare && !canSynthesize && <small>所选回答生成中，可并排阅读，完成后再综合</small>}
+        </div>}
+        <div className="discussionComparisonHost" hidden={view !== "compare"}>
+          {view === "compare" && <DiscussionComparison thread={props.thread} nodes={nodes} selectedIds={validComparisonIds} pair={pair} onPairChange={setPair}
+            scroll={scrollPositions.current} onSaveScroll={savePosition} onOpen={openNode}
+            onQuote={props.setReferenceDraft ? (id, text) => { void quoteMessage(id, text); changeView("discussion"); } : undefined} />}
+        </div>
+        <div className="discussionReviewHost" hidden={view !== "review"}><DiscussionReviewView thread={props.thread} onBack={() => changeView(previousViewRef.current)} /></div>
+        {view !== "compare" && view !== "review" && <DiscussionContentTabs value={mobileTab} onChange={setMobileTab} />}
         <div
           ref={modalBodyRef}
-          className={`threadModalBody ${documentContextOpen ? "" : "contextCollapsed"} ${resizingPane ? "resizing" : ""}`}
+          className={`threadModalBody ${documentContextOpen ? "" : "contextCollapsed"} ${resizingPane ? "resizing" : ""} ${pinnedNode ? "hasPinned" : ""} mobile-${mobileTab}`}
           style={{
-            gridTemplateColumns: documentContextOpen
-              ? `${paneWidths.document}px ${THREAD_PANE_DIVIDER_WIDTH}px ${paneWidths.content}px ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 1fr)`
-              : `${paneWidths.content}px ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 1fr)`
+            gridTemplateColumns: paneWidths.content > 0
+              ? documentContextOpen
+                ? `${paneWidths.document}px ${THREAD_PANE_DIVIDER_WIDTH}px ${paneWidths.content}px ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 1fr)`
+                : `${paneWidths.content}px ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 1fr)`
+              : documentContextOpen
+                ? `minmax(0, 3fr) ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 5fr) ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 2fr)`
+                : `minmax(0, 5fr) ${THREAD_PANE_DIVIDER_WIDTH}px minmax(0, 2fr)`
           }}
           onPointerMove={handlePaneResize}
           onPointerUp={finishPaneResize}
@@ -934,6 +1193,7 @@ export function ThreadDetailModal(props: {
                 <article
                   ref={documentContextRef}
                   className="threadContextDocument preview"
+                  onScroll={(event) => { if (!event.currentTarget.clientHeight) return; scrollPositions.current.document = event.currentTarget.scrollTop; savePosition(); }}
                 />
               ) : (
                 <div className="threadContextEmpty">文章内容暂不可用。</div>
@@ -942,7 +1202,7 @@ export function ThreadDetailModal(props: {
           )}
           {documentContextOpen && (
             <div
-              className={`threadPaneDivider ${resizingPane === "document-content" ? "active" : ""}`}
+              className={`threadPaneDivider documentDivider ${resizingPane === "document-content" ? "active" : ""}`}
               role="separator"
               aria-label="调整文档预览与节点内容宽度"
               aria-orientation="vertical"
@@ -969,7 +1229,7 @@ export function ThreadDetailModal(props: {
             )}
           </main>
           <div
-            className={`threadPaneDivider ${resizingPane === "content-tree" ? "active" : ""}`}
+            className={`threadPaneDivider treeDivider ${resizingPane === "content-tree" ? "active" : ""}`}
             role="separator"
             aria-label="调整节点内容与讨论树宽度"
             aria-orientation="vertical"
@@ -992,10 +1252,8 @@ export function ThreadDetailModal(props: {
             onPointerCancel={finishCanvasPan}
           >
           <div className="threadCanvasInsightStrip" aria-label="讨论计划摘要">
-            <span>任务 {semanticStats.task}</span>
-            <span>风险 {semanticStats.risk}</span>
-            <span>决策 {semanticStats.decision}</span>
-            <span>未答 {semanticStats.unanswered}</span>
+            <span>问答 {nodes.length}</span>
+            <span>未答 {unansweredCount}</span>
           </div>
           <div className="threadCanvasControls" aria-label="画布控制">
             <button type="button" aria-label="缩小" title="缩小" onClick={() => zoomCanvasAt(0.85)}>−</button>
@@ -1039,7 +1297,12 @@ export function ThreadDetailModal(props: {
                   active={selectedNodeId === item.node.id}
                   x={item.x}
                   y={item.y}
-                  onOpen={() => openNode(item.node.id)}
+                  selecting={selecting}
+                  checked={validComparisonIds.includes(item.node.id)}
+                  onToggle={() => toggleComparison(item.node.id)}
+                  searchMatch={!nodeSearch || item.node.messages.some((message) => message.content.toLowerCase().includes(nodeSearch.toLowerCase()))}
+                  outcomes={nodeOutcomeCounts(workspace?.records || [], props.thread.id, item.node.messages.map((message) => message.id))}
+                  onOpen={(event) => { if (event.ctrlKey || event.metaKey || event.shiftKey || selecting) toggleComparison(item.node.id); else openNode(item.node.id); }}
                   onCreate={() => openNode(item.node.id, true)}
                 />
                 {inspectorOpen && selectedNodeId === item.node.id && contentPaneElement && createPortal(
@@ -1069,8 +1332,9 @@ export function ThreadDetailModal(props: {
                       </nav>
                       {selectedNode && (
                         <div className="threadNodeMetaBar">
-                          <label>
-                            <span>类型</span>
+                          <details className="legacyNodeLabel">
+                            <summary>标签</summary>
+                            <label><span>可选历史标签</span>
                             <select
                               value={selectedNodeKind}
                               onChange={(event) => props.onUpdateMessageMeta(
@@ -1083,7 +1347,8 @@ export function ThreadDetailModal(props: {
                                 <option key={kind} value={kind}>{NODE_KIND_META[kind].label}</option>
                               ))}
                             </select>
-                          </label>
+                            </label>
+                          </details>
                           <div className="threadNodeQuickActions" aria-label="AI 快捷操作">
                             {quickActions.map((action) => (
                               <button
@@ -1120,7 +1385,13 @@ export function ThreadDetailModal(props: {
                           void submitSelectionQuestion();
                         }}
                       >
+                        {(() => {
+                          const message = props.thread.messages.find((message) => message.id === selectionPopover.sourceMessageId);
+                          return message ? <DiscussionAnswerActions thread={props.thread} message={message} text={selectionPopover.text} onAction={clearCapturedMessageSelection} /> : null;
+                        })()}
+                        <small className="selectionContextHint">本轮参考：{props.thread.contextScope === "references" ? "所选资料" : "完整文档背景"} + 分支历史 + 当前片段</small>
                         <div>
+                          {props.setReferenceDraft && <button type="button" disabled={selectionSending || !props.thread.messages.some((message) => message.id === selectionPopover.sourceMessageId && stableMessage(message))} onClick={() => void quoteMessage(selectionPopover.sourceMessageId, selectionPopover.text)}>引用到输入框</button>}
                           <input
                             ref={selectionComposerRef}
                             value={selectionPopover.prompt}
@@ -1154,7 +1425,7 @@ export function ThreadDetailModal(props: {
                     className="threadModalContent threadCanvasInspectorContent"
                     onPointerDown={beginMessageSelection}
                     onKeyUp={captureMessageSelection}
-                    onScroll={clearCapturedMessageSelection}
+                    onScroll={(event) => { if (!event.currentTarget.clientHeight) return; clearCapturedMessageSelection(); scrollPositions.current[`work:${selectedNodeId}`] = event.currentTarget.scrollTop; savePosition(); }}
                   >
                     {selectedNodeOrigin && (
                       <div className="threadNodeOriginQuote">
@@ -1164,8 +1435,12 @@ export function ThreadDetailModal(props: {
                     )}
                     {selectedNode?.messages.map((message) => (
                       <ThreadMessageDetail
+                        onQuote={props.setReferenceDraft ? (messageId) => void quoteMessage(messageId) : undefined}
+                        threads={props.threads}
+                        onLocateReference={props.onLocateReference}
                         key={message.id}
                         threadId={props.thread.id}
+                        thread={props.thread}
                         message={message}
                         editingMessage={props.editingMessage}
                         editText={props.editText}
@@ -1228,13 +1503,14 @@ export function ThreadDetailModal(props: {
                         <AgentRunTimeline message={activeRunMessage} variant="floating" />
                       </div>
                     )}
+                    {referenceComposer}
                     <div className="threadFocusComposerTopline">
                       <div className="threadCreationMode" aria-label="新节点创建方式">
                         <span>{nodeCreationMode === "branch" ? "分支" : "子节点"}</span>
                       </div>
                       <label htmlFor="thread-canvas-question">
                         {nodeCreationMode === "branch"
-                          ? "从当前节点创建另一条独立分支"
+                          ? "从当前节点继续另一条分支"
                           : "在当前叶子节点下创建下一步"}
                       </label>
                     </div>
@@ -1261,7 +1537,7 @@ export function ThreadDetailModal(props: {
                     />
                     <div className="threadModalComposerActions">
                       <div className="threadComposerContext">
-                        <span>新问题会成为独立节点 · 自动继承当前路径上下文</span>
+                        <span>沿当前路径继续讨论 · 继承分支历史</span>
                         {effectiveAgentSettings && <small>{effectiveAgentSettings}</small>}
                       </div>
                       <button
@@ -1282,7 +1558,7 @@ export function ThreadDetailModal(props: {
               </Fragment>
             ))}
 
-            {canvasLayout.nodes.length === 0 && (
+            {(canvasLayout.nodes.length === 0 || (inspectorOpen && !selectedNodeId)) && (
               <>
               {inspectorOpen && contentPaneElement && createPortal(
                 <article
@@ -1309,6 +1585,7 @@ export function ThreadDetailModal(props: {
                       });
                     }}
                   >
+                    {referenceComposer}
                     <textarea
                       id="thread-canvas-question"
                       ref={composerRef}
@@ -1334,10 +1611,10 @@ export function ThreadDetailModal(props: {
                 </article>,
                 contentPaneElement
               )}
-              <button type="button" className="threadCanvasRootPlaceholder" onClick={openRootComposer}>
+              {canvasLayout.nodes.length === 0 && <button type="button" className="threadCanvasRootPlaceholder" onClick={openRootComposer}>
                 <span>+</span>
                 创建根问题
-              </button>
+              </button>}
               </>
             )}
 
@@ -1354,8 +1631,29 @@ export function ThreadDetailModal(props: {
           </div>
 
           </div>
+          {pinnedNode && <aside className="discussionPinned" aria-label="固定参考节点">
+            <header><strong>固定参考 · 仅显示</strong><button type="button" onClick={() => setPinnedNodeId(null)}>取消固定</button></header>
+            <p>不会自动加入 AI 上下文。需要时请明确引用。</p>
+            <div className="discussionPinnedActions">
+              <button type="button" disabled={!selectedNode || selectedNode.id === pinnedNode.id} onClick={() => {
+                const workScroll = scrollPositions.current[`work:${selectedNodeId}`] || 0;
+                const pinScroll = scrollPositions.current[`pinned:${pinnedNode.id}`] || 0;
+                scrollPositions.current[`work:${pinnedNode.id}`] = pinScroll;
+                scrollPositions.current[`pinned:${selectedNodeId}`] = workScroll;
+                setPinnedNodeId(selectedNodeId); openNode(pinnedNode.id);
+              }}>交换工作与参考</button>
+              <button type="button" disabled={!selectedNode || selectedNode.id === pinnedNode.id || !props.onStartIndependent || Boolean(synthesisSources(props.thread, [selectedNode.id, pinnedNode.id]).generating)} onClick={() => selectedNode && prepareComparison("synthesize", [selectedNode.id, pinnedNode.id])}>综合这两个节点</button>
+            </div>
+            <DiscussionNodeReader thread={props.thread} node={pinnedNode} label="固定参考问答" scrollKey={`pinned:${pinnedNode.id}`} visibilityKey={`${view}:${mobileTab}`}
+              scroll={scrollPositions.current} onSaveScroll={savePosition} onOpen={openNode} onQuote={props.setReferenceDraft ? (id, text) => void quoteMessage(id, text) : undefined} />
+          </aside>}
         </div>
       </section>
+      {props.documentData && props.onStartIndependent && <IndependentDiscussion
+        preparation={preparation}
+        open={independentOpen} document={props.documentData} threads={props.threads || [props.thread]}
+        source={props.thread} messageIds={selectedNode?.messages.filter((message) => !message.id.startsWith("pending-")).map((message) => message.id) || []}
+        onClose={() => setIndependentOpen(false)} onStart={props.onStartIndependent} />}
     </div>
   );
 }
@@ -1366,8 +1664,13 @@ function ConversationCanvasNode(props: {
   active: boolean;
   x: number;
   y: number;
-  onOpen: () => void;
+  onOpen: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onCreate: () => void;
+  selecting: boolean;
+  checked: boolean;
+  onToggle: () => void;
+  searchMatch: boolean;
+  outcomes: ReturnType<typeof nodeOutcomeCounts>;
 }) {
   const legacyTurnCount = props.node.messages.filter((message) => message.role === "user").length;
   const status = conversationNodeStatus(props.node);
@@ -1378,11 +1681,16 @@ function ConversationCanvasNode(props: {
     unanswered: "未回答",
     thinking: "Codex 执行中…",
     answered: "已回答",
-    failed: "回答失败"
+    failed: "回答失败",
+    interrupted: "已中断",
+    unknown: "结果未知 · 需核对",
+    stopping: "正在停止…"
   }[status];
   return (
     <article
       className={`threadCanvasNode ${props.root ? "root" : ""} ${props.active ? "active" : ""} kind-${kind} status-${status}`}
+      data-comparison-selected={props.checked || undefined}
+      data-search-match={props.searchMatch}
       style={{
         left: props.x - THREAD_CANVAS_NODE_WIDTH / 2,
         top: props.y - THREAD_CANVAS_NODE_HEIGHT / 2,
@@ -1390,6 +1698,8 @@ function ConversationCanvasNode(props: {
         height: THREAD_CANVAS_NODE_HEIGHT
       }}
     >
+      {props.selecting && <label className="discussionNodeCheckbox"><input type="checkbox" checked={props.checked} onChange={props.onToggle} aria-label={`选择节点 ${questionSummary(props.node.question.content)}`} /><span>比较</span></label>}
+      {props.outcomes.total > 0 && <span className="discussionNodeOutcomes" title={`已应用 ${props.outcomes.applied} · 执行 ${props.outcomes.executions}`}>成果 {props.outcomes.total}</span>}
       <button type="button" className="threadCanvasNodeMain" onClick={props.onOpen}>
         <span className="threadCanvasNodeTopline">
           <span className={`threadNodeKindPill kind-${kind}`}>{NODE_KIND_META[kind].shortLabel}</span>
@@ -1409,7 +1719,7 @@ function ConversationCanvasNode(props: {
             type="button"
             className="threadCanvasNodeAdd branch"
             aria-label={`从 ${questionSummary(props.node.question.content)} 新建分支`}
-            title="从这里新建独立分支"
+            title="从这里继续另一条分支，继承此前历史"
             onClick={props.onCreate}
           >
             <span aria-hidden="true">⑂</span>
@@ -1516,29 +1826,12 @@ function messageBranchSelection(message: Message): BranchSelection | null {
   return sourceMessageId && text ? { sourceMessageId, text } : null;
 }
 
-function conversationSemanticStats(nodes: ReturnType<typeof flattenConversationTree>) {
-  const stats: Record<ConversationNodeKind, number> & { unanswered: number } = {
-    question: 0,
-    idea: 0,
-    assumption: 0,
-    evidence: 0,
-    risk: 0,
-    decision: 0,
-    task: 0,
-    unanswered: 0
-  };
-  for (const node of nodes) {
-    stats[conversationNodeKind(node)] += 1;
-    if (conversationNodeStatus(node) === "unanswered") stats.unanswered += 1;
-  }
-  return stats;
-}
-
 export function promptForNodeQuickAction(prompt: string): string {
   return prompt.trim();
 }
 
-function ThreadMessageDetail(props: {
+export function ThreadMessageDetail(props: {
+  thread: Thread;
   threadId: string;
   message: Message;
   editingMessage: string | null;
@@ -1550,12 +1843,24 @@ function ThreadMessageDetail(props: {
   onDeleteMessage: (threadId: string, messageId: string) => void;
   setEditText: (value: string) => void;
   hideLiveAgentRun?: boolean;
+  threads?: Thread[];
+  onLocateReference?: (reference: ReferenceSnapshot) => void;
+  onQuote?: (messageId: string) => void;
 }) {
   const message = props.message;
+  const workspace = useDiscussionWorkspace();
+  const question = props.thread.messages.find((item) => item.id === message.parentId);
+  const retryThroughOutcome = Boolean(question?.meta?.executionId) || agentRunForMessage(message)?.status === "unknown";
   return (
     <section
       className={`message ${message.role} ${message.error ? "error" : ""}`}
       data-thread-message-id={message.id}
+      onDragStart={(event) => {
+        const text = window.getSelection()?.toString();
+        if (!text || !stableMessage(message)) { event.preventDefault(); return; }
+        event.dataTransfer.setData(REFERENCE_DRAG_TYPE, JSON.stringify({ threadId: props.threadId, messageId: message.id, text }));
+        event.dataTransfer.effectAllowed = "copy";
+      }}
     >
       <span className="messageAvatar" aria-hidden="true">{message.role === "assistant" ? "C" : "Y"}</span>
       <div className="messageBody">
@@ -1563,16 +1868,22 @@ function ThreadMessageDetail(props: {
           <span className="messageMeta">
             {message.role === "assistant" ? "Codex" : "你"} <time>{formatRelativeTime(message.createdAt)}</time>
             {message.role === "assistant" && !message.id.startsWith("pending-") && (
-              <button type="button" onClick={() => props.onRetryAssistant(props.threadId, message.id)}>重试</button>
+              <button type="button" disabled={Boolean(workspace?.busy && !retryThroughOutcome) || (retryThroughOutcome && !workspace)} onClick={() => {
+                if (workspace?.busy && !retryThroughOutcome) return;
+                if (retryThroughOutcome) { workspace?.openResults(props.thread.id); return; }
+                props.onRetryAssistant(props.threadId, message.id);
+              }}>{retryThroughOutcome ? "执行记录" : "重试"}</button>
             )}
           </span>
           {!message.id.startsWith("pending-") && (
             <span className="messageActions">
+              {props.onQuote && <button type="button" disabled={!stableMessage(message)} onClick={() => props.onQuote?.(message.id)}>引用</button>}
               {message.role === "user" && <button type="button" onClick={() => props.onEdit(message)}>编辑</button>}
-              <button type="button" onClick={() => props.onDeleteMessage(props.threadId, message.id)}>删除</button>
+              <button type="button" disabled={Boolean(workspace?.busy)} onClick={() => props.onDeleteMessage(props.threadId, message.id)}>删除</button>
             </span>
           )}
         </div>
+        <DiscussionAnswerActions thread={props.thread} message={message} />
         {props.editingMessage === message.id ? (
           <div>
             <textarea className="editMessageBox" value={props.editText} onChange={(event) => props.setEditText(event.target.value)} />
@@ -1585,6 +1896,9 @@ function ThreadMessageDetail(props: {
         ) : (
           <>
             {message.role === "assistant" && !props.hideLiveAgentRun && <AgentRunTimeline message={message} />}
+            {message.meta?.contextRecovery === "rebuilt" && <p className="contextRecovery" role="status">本轮未沿用原生会话，已依据保存的问答重建上下文。部分执行过程和工具状态可能缺失；继续执行前请核对必要的文件状态。</p>}
+            <ReferenceHistory references={messageReferences(message.meta)} threads={props.threads} onLocate={props.onLocateReference}
+              onReevaluate={workspace && stableMessage(message) ? (references) => workspace.reevaluate(props.thread, message, references) : undefined} />
             {message.content && (
               <div className="messageContent" dangerouslySetInnerHTML={{ __html: renderMessageMarkdown(message.content) }} />
             )}

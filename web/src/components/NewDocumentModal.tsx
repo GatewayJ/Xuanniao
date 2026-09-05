@@ -1,17 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
 
+import type { DocumentCreationRetry, NewDocumentCommand } from "../document-creation";
 import type { AgentRunSnapshot, FileBrowserPayload, Message, PermissionRequest } from "../types";
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { DirectoryPickerModal } from "./DirectoryPickerModal";
 import { PermissionRequestPanel } from "./PermissionRequestPanel";
-
-export type NewDocumentCommand = {
-  instruction: string;
-  directory: string | null;
-  fileName: string | null;
-};
+import { useDiscussionWorkspace } from "./DiscussionWorkspaceContext";
 
 type NewDocumentModalProps = {
+  retry?: DocumentCreationRetry | null;
   open: boolean;
   workspaceRoot: string;
   creating: boolean;
@@ -29,19 +26,22 @@ type NewDocumentModalProps = {
 };
 
 export function NewDocumentModal(props: NewDocumentModalProps) {
-  const [instruction, setInstruction] = useState("");
-  const [directory, setDirectory] = useState("");
-  const [fileName, setFileName] = useState("");
+  const workspace = useDiscussionWorkspace();
+  const [instruction, setInstruction] = useState(props.retry?.command.instruction || "");
+  const [directory, setDirectory] = useState(props.retry?.command.directory || "");
+  const [fileName, setFileName] = useState(props.retry?.command.fileName || "");
+  const [retryReviewed, setRetryReviewed] = useState(false);
   const [directoryPickerOpen, setDirectoryPickerOpen] = useState(false);
 
   useEffect(() => {
     if (props.open && !props.creating) {
-      setInstruction("");
-      setDirectory("");
-      setFileName("");
+      setInstruction(props.retry?.command.instruction || "");
+      setDirectory(props.retry?.command.directory || "");
+      setFileName(props.retry?.command.fileName || "");
+      setRetryReviewed(false);
       setDirectoryPickerOpen(false);
     }
-  }, [props.open]);
+  }, [props.open, props.retry?.recordId]);
 
   const runMessage = useMemo(() => props.run ? messageForRun(props.run) : null, [props.run]);
   const creationThreadId = props.run ? `document-creation-${props.run.id}` : null;
@@ -52,7 +52,7 @@ export function NewDocumentModal(props: NewDocumentModalProps) {
   if (!props.open) return null;
 
   function submit() {
-    if (!instruction.trim() || props.creating) return;
+    if (!instruction.trim() || props.creating || (props.retry && !retryReviewed)) return;
     props.onCreate({
       instruction: instruction.trim(),
       directory: directory || null,
@@ -62,7 +62,7 @@ export function NewDocumentModal(props: NewDocumentModalProps) {
 
   return (
     <>
-      <div className="modalBackdrop newDocumentBackdrop" role="presentation" onMouseDown={() => !props.creating && props.onClose()}>
+      <div className="modalBackdrop newDocumentBackdrop" role="presentation" onMouseDown={props.onClose}>
         <section
           className="newDocumentModal"
           role="dialog"
@@ -75,9 +75,16 @@ export function NewDocumentModal(props: NewDocumentModalProps) {
             <h2 id="new-document-title">创建新文档</h2>
             <p>用自然语言描述目标，Codex 会分析工作区并生成首版 Markdown。</p>
           </div>
-          <button type="button" className="ghostButton" disabled={props.creating} onClick={props.onClose}>关闭</button>
+          <button type="button" className="ghostButton" onClick={props.onClose}>关闭</button>
         </header>
 
+        {props.retry && <section className="newDocumentRetry" aria-label="重新创建文档核对">
+          <p>来源文档：{props.retry.documentPath}</p>
+          {props.retry.createdPath && <p>已创建文件：{props.retry.createdPath}</p>}
+          <p>将创建新的执行记录，前次输出和已创建文件保留。请核对已有文件，并在必要时调整目标文件名。</p>
+          <details open><summary>前次输出</summary><pre tabIndex={0} aria-label="前次创建输出">{props.retry.previousResult}</pre></details>
+          <label><input type="checkbox" checked={retryReviewed} disabled={props.creating} onChange={(event) => setRetryReviewed(event.target.checked)} />已核对前次输出和已创建文件，准备重新创建</label>
+        </section>}
         <label className="newDocumentPrompt">
           <span>你想从什么工作开始？</span>
           <textarea
@@ -150,12 +157,14 @@ export function NewDocumentModal(props: NewDocumentModalProps) {
         )}
 
         {props.error && <div className="fileBrowserError" role="alert">{props.error}</div>}
+        {props.run?.status === "unknown" && workspace && <button type="button" onClick={() => { props.onClose(); workspace.openResults(); }}>查看运行记录并核对</button>}
 
         <footer className="newDocumentFooter">
-          <span>可在描述中指定 Issue、代码仓库、输出结构和文件名。</span>
+          <span>{props.creating ? "关闭面板后继续生成；停止不会撤销已经创建的文件。" : "可在描述中指定 Issue、代码仓库、输出结构和文件名。"}</span>
           <div>
-            <button type="button" disabled={props.creating} onClick={props.onClose}>取消</button>
-            <button type="button" className="primaryButton" disabled={!instruction.trim() || props.creating} onClick={submit}>
+            <button type="button" onClick={props.onClose}>{props.creating ? "后台继续" : "取消"}</button>
+            {props.creating && <button type="button" disabled={!workspace?.canStop} onClick={() => workspace?.stop()}>停止创建</button>}
+            <button type="button" className="primaryButton" disabled={!instruction.trim() || props.creating || Boolean(props.retry && !retryReviewed)} onClick={submit}>
               {props.creating ? "正在创建…" : "创建文档"}
             </button>
           </div>

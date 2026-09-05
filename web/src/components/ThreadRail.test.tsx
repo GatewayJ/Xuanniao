@@ -61,6 +61,8 @@ test("thread detail opens with the root conversation node selected", () => {
   );
 
   assert.match(html, /class="threadCanvasNode root active kind-task status-answered"/);
+  assert.match(html, /grid-template-columns:minmax\(0, 3fr\) 6px minmax\(0, 5fr\) 6px minmax\(0, 2fr\)/);
+  assert.doesNotMatch(html, /grid-template-columns:0px/);
   assert.match(html, /class="threadNodeKindPill kind-task">任<\/span>/);
   assert.match(html, />任务 · 1 个子节点</);
   assert.match(html, />README\.md</);

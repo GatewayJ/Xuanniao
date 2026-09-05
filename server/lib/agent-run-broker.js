@@ -25,15 +25,15 @@ export function interruptedAgentRunSnapshot(id, threads, now = () => Date.now())
     if (answered) return null;
     const completedAt = new Date(now()).toISOString();
     const startedAt = question.updatedAt || question.createdAt || null;
-    const message = "Codex 任务已因服务重启或运行状态丢失而中断，请重试当前节点。";
+    const message = "执行状态无法确认，结果需核对；过程记录可能不完整。请在成果记录中检查当前文件并确认原进程已经结束。";
     return {
       id,
-      status: "failed",
+      status: "unknown",
       startedAt,
       completedAt,
       durationMs: elapsedMs(startedAt, completedAt),
       error: message,
-      context: { threadId: thread.id, questionMessageId: question.id, interrupted: true },
+      context: { threadId: thread.id, questionMessageId: question.id, outcomeUnknown: true },
       events: [{ type: "error", status: "failed", message, seq: 1, at: completedAt }]
     };
   }
@@ -77,7 +77,7 @@ export class AgentRunBroker {
     if (!id || !update || typeof update !== "object") return null;
     const run = this.ensure(id);
     if (run.status === "waiting") this.start(id);
-    if (run.status === "completed" || run.status === "failed") return null;
+    if (["completed", "failed", "interrupted", "unknown"].includes(run.status)) return null;
     const event = {
       ...update,
       seq: run.nextSeq,
@@ -103,7 +103,7 @@ export class AgentRunBroker {
     if (!id) return null;
     const run = this.ensure(id);
     if (run.status === "waiting") run.startedAt = new Date(this.now()).toISOString();
-    run.status = status === "failed" ? "failed" : "completed";
+    run.status = ["failed", "interrupted", "unknown"].includes(status) ? status : "completed";
     run.completedAt = new Date(this.now()).toISOString();
     run.durationMs = Number.isFinite(details.durationMs)
       ? Math.max(0, Math.round(details.durationMs))
@@ -141,7 +141,7 @@ export class AgentRunBroker {
     run.subscribers.add(listener);
     const snapshot = this.snapshot(id);
     listener({ type: "snapshot", data: snapshot });
-    if (run.status === "completed" || run.status === "failed") {
+    if (["completed", "failed", "interrupted", "unknown"].includes(run.status)) {
       listener({ type: "complete", data: snapshot });
     }
     return () => run.subscribers.delete(listener);
@@ -204,7 +204,7 @@ export class AgentRunBroker {
   evictIfNeeded() {
     if (this.runs.size < this.maxRuns) return true;
     const terminal = [...this.runs.values()].find((run) => (
-      run.status === "completed" || run.status === "failed"
+      ["completed", "failed", "interrupted", "unknown"].includes(run.status)
     ));
     const waiting = [...this.runs.values()].find((run) => (
       run.status === "waiting" && run.subscribers.size === 0

@@ -116,6 +116,7 @@ test("a same-tick question can be sent for a thread just created by the caller",
 
   function Harness() {
     commands = useConversationCommands({
+      documentPath: "/workspace/document.md",
       threadsRef,
       setThreads: () => undefined,
       setActiveThreadId: () => undefined,

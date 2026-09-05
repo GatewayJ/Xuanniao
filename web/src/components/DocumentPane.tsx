@@ -5,6 +5,7 @@ export type Mode = "edit" | "preview" | "outline";
 export const DEFAULT_DOCUMENT_MODE: Mode = "preview";
 
 type DocumentPaneProps = {
+  readOnly?: boolean;
   mode: Mode;
   documentData: DocumentPayload | null;
   activeThread: Thread | null;
@@ -17,6 +18,7 @@ type DocumentPaneProps = {
 };
 
 export function DocumentPane({
+  readOnly = false,
   mode,
   documentData,
   activeThread,
@@ -38,7 +40,7 @@ export function DocumentPane({
           <button type="button" className={mode === "edit" ? "tab active" : "tab"} onClick={() => onModeChange("edit")}>编辑</button>
           <button type="button" className={mode === "outline" ? "tab active" : "tab"} onClick={() => onModeChange("outline")}>大纲</button>
         </div>
-        <div className="selectionInfo">{activeThread ? `讨论位于第 ${activeThread.anchor.lineStart || "-"} 行` : "当前没有活动讨论"}</div>
+        <div className="selectionInfo" role="status">{readOnly ? "正在准备切换文档 · 暂时只读" : activeThread?.orphaned ? "原文位置已变化 · 可重新关联" : activeThread ? `讨论位于第 ${activeThread.anchor.lineStart || "-"} 行` : "当前没有活动讨论"}</div>
       </div>
       <div className={mode === "edit" ? "editorHost" : "editorHost hidden"} ref={editorHostRef} />
       <article

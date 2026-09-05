@@ -6,6 +6,7 @@ import {
 } from "./conversation-model.js";
 import { branchThreadForQuestion } from "./thread-tree.js";
 import { normalizeAgentRunId } from "./agent-run-broker.js";
+import { captureReferences } from "./discussion-context.js";
 
 export class ConversationService {
   constructor({
@@ -13,8 +14,13 @@ export class ConversationService {
     document,
     agent,
     agentRuns = null,
+    gate = null,
+    resolveDocument = undefined,
+    beforeRun = null,
+    onRunFailure = null,
     onAgentError = () => {}
   }) {
+    Object.assign(this, { gate, resolveDocument, beforeRun, onRunFailure });
     this.threadStore = threadStore;
     this.document = document;
     this.agent = agent;
@@ -27,7 +33,7 @@ export class ConversationService {
   addQuestion(threadId, command) {
     return this.withThreadOperation(
       threadId,
-      () => this.addQuestionWithinOperation(threadId, command)
+      () => this.guardedRun(() => this.addQuestionWithinOperation(threadId, command), command)
     );
   }
 
@@ -35,13 +41,20 @@ export class ConversationService {
     const agentRunId = normalizeAgentRunId(command.agentRunId);
     const thread = await this.threadStore.get(threadId);
     const planned = planConversationQuestion(thread, command);
+    const references = command.references === undefined ? [] : await captureReferences(command.references, {
+      document: await this.document.payload(), threadStore: this.threadStore, resolveDocument: this.resolveDocument
+    });
     const userMessage = await this.threadStore.addMessage(threadId, {
       ...planned.message,
       meta: {
         ...(planned.message.meta || {}),
+        ...(command.executionId ? { executionId: command.executionId } : {}),
+        ...(references.length ? { references } : {}),
         ...(planned.askAgent && agentRunId ? { agentRunId } : {})
       }
     });
+
+    await command.onQuestion?.(userMessage);
 
     if (!planned.askAgent) {
       return {
@@ -57,7 +70,8 @@ export class ConversationService {
       threadId,
       planned.message.content,
       userMessage.id,
-      agentRunId
+      agentRunId,
+      command.onUpdate
     );
     return {
       userMessage,
@@ -69,7 +83,7 @@ export class ConversationService {
   reviseQuestion(threadId, messageId, command) {
     return this.withThreadOperation(
       threadId,
-      () => this.reviseQuestionWithinOperation(threadId, messageId, command)
+      () => this.guardedRun(() => this.reviseQuestionWithinOperation(threadId, messageId, command), command)
     );
   }
 
@@ -111,7 +125,7 @@ export class ConversationService {
   updateQuestion(threadId, messageId, options) {
     return this.withThreadOperation(
       threadId,
-      () => this.updateQuestionWithinOperation(threadId, messageId, options)
+      () => this.guardedRun(() => this.updateQuestionWithinOperation(threadId, messageId, options), options)
     );
   }
 
@@ -133,6 +147,7 @@ export class ConversationService {
       (message) => message.id === messageId && message.role === "user"
     );
     if (!storedMessage) throw new Error(`question message not found: ${messageId}`);
+    if (storedMessage.meta?.executionId) throw new ConversationRuleError("请在成果记录中准备新的执行；原执行记录和回答会保留。");
     if (storedMessage.content.trim() !== normalizedContent) {
       throw new ConversationRuleError(
         "message content changes must create a revision branch"
@@ -194,12 +209,25 @@ export class ConversationService {
     await this.threadStore.delete(threadId);
   }
 
+  async guardedRun(operation, command) {
+    if (!this.gate) return operation();
+    return this.gate.run("讨论执行", async () => {
+      await this.beforeRun?.();
+      return operation();
+    }, command.operationToken);
+  }
+
+  isBusy() {
+    return this.activeThreadOperations.size > 0 || this.activeReplies.size > 0;
+  }
+
   async deleteMessage(threadId, messageId) {
     this.assertThreadIdle(threadId, "delete a message");
     return this.threadStore.deleteMessage(threadId, messageId);
   }
 
   assertThreadIdle(threadId, action) {
+    this.gate?.assertIdle();
     const prefix = `${threadId}:`;
     if (
       (this.activeThreadOperations.get(threadId) || 0) > 0 ||
@@ -228,7 +256,7 @@ export class ConversationService {
     }
   }
 
-  createAssistantReply(threadId, content, questionMessageId, agentRunId = null) {
+  createAssistantReply(threadId, content, questionMessageId, agentRunId = null, onUpdate = null) {
     const key = activeReplyKey(threadId, questionMessageId);
     const activeReply = this.activeReplies.get(key);
     if (activeReply?.content === content) {
@@ -237,6 +265,7 @@ export class ConversationService {
     }
 
     const progress = {
+      onUpdate,
       runIds: new Set(),
       events: [],
       error: null,
@@ -251,13 +280,13 @@ export class ConversationService {
       (reply) => {
         this.completeAgentRuns(
           progress,
-          reply.agentOutcome === "failed" ? "failed" : "completed",
+          progress.error?.code === "AGENT_INTERRUPTED" ? "interrupted" : ["AGENT_RUNTIME_LOST", "AGENT_STOP_TIMEOUT"].includes(progress.error?.code) ? "unknown" : reply.agentOutcome === "failed" ? "failed" : "completed",
           progress.error
         );
         return reply;
       },
       (error) => {
-        this.completeAgentRuns(progress, "failed", error);
+        this.completeAgentRuns(progress, ["AGENT_RUNTIME_LOST", "AGENT_STOP_TIMEOUT"].includes(error?.code) ? "unknown" : error?.code === "AGENT_INTERRUPTED" ? "interrupted" : "failed", error);
         throw error;
       }
     );
@@ -292,6 +321,7 @@ export class ConversationService {
     let answer;
 
     try {
+      if (this.gate?.active?.stopping) throw Object.assign(new Error("操作已中断"), { code: "AGENT_INTERRUPTED" });
       answer = await this.agent.runTurn({
         question: content,
         document: agentSnapshot.document,
@@ -335,6 +365,7 @@ export class ConversationService {
   }
 
   publishAgentUpdate(progress, update) {
+    progress.onUpdate?.(update);
     progress.events.push(update);
     if (progress.events.length > 120) progress.events = selectProgressEvents(progress.events, 120);
     for (const runId of progress.runIds) this.agentRuns?.publish(runId, update);
@@ -366,17 +397,20 @@ export class ConversationService {
       code: error?.code || null,
       message: errorMessage
     });
+    await this.onRunFailure?.({ threadId, questionMessageId, error, agentSnapshot, events: progress?.events || [] });
     const completed = await this.document.completeAgentTurnFromSnapshot({
       snapshot: agentSnapshot,
       threadId,
       userMessageId: questionMessageId,
       message: {
         role: "assistant",
-        content: agentFailureContent(errorMessage),
+        content: [typeof error?.content === "string" ? error.content : "", error?.code === "AGENT_INTERRUPTED" ? "执行已中断，已发生的文件修改和过程记录保留。" : ["AGENT_RUNTIME_LOST", "AGENT_STOP_TIMEOUT"].includes(error?.code) ? "执行状态无法确认，结果需核对。请在成果记录中检查文件与原进程后继续。" : agentFailureContent(errorMessage)].filter(Boolean).join("\n\n"),
         error: true,
         meta: {
           durationMs: Number.isFinite(error?.durationMs) ? error.durationMs : null,
-          updates: Array.isArray(error?.updates) ? error.updates : [],
+          updates: Array.isArray(error?.updates) ? error.updates : progress?.events || [],
+          interrupted: error?.code === "AGENT_INTERRUPTED",
+          outcomeUnknown: ["AGENT_RUNTIME_LOST", "AGENT_STOP_TIMEOUT"].includes(error?.code),
           model: typeof error?.model === "string" ? error.model : null,
           reasoningEffort: typeof error?.reasoningEffort === "string" ? error.reasoningEffort : null
         }
@@ -417,7 +451,8 @@ function assistantMessageForAnswer(answer) {
       updates: answer.updates,
       durationMs: Number.isFinite(answer.durationMs) ? answer.durationMs : null,
       model: typeof answer.model === "string" ? answer.model : null,
-      reasoningEffort: typeof answer.reasoningEffort === "string" ? answer.reasoningEffort : null
+      reasoningEffort: typeof answer.reasoningEffort === "string" ? answer.reasoningEffort : null,
+      contextRecovery: answer.contextRecovery || null
     }
   };
 }

@@ -160,7 +160,7 @@ test("removing a shared-session leaf also seals its surviving checkpoints", asyn
   }
 });
 
-test("anchor synchronization deletes removed threads from the store", async () => {
+test("legacy deleted anchor IDs detach locations without deleting threads", async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-thread-store-test-"));
   const storePath = path.join(tempDir, "threads.json");
 
@@ -188,9 +188,11 @@ test("anchor synchronization deletes removed threads from the store", async () =
       [removed.id]
     );
 
-    assert.equal(threads.length, 1);
-    assert.equal(threads[0].id, kept.id);
-    assert.equal(threads[0].selectedText, "kept");
+    assert.equal(threads.length, 2);
+    assert.equal(threads.find((item) => item.id === kept.id).selectedText, "kept");
+    assert.equal(threads.find((item) => item.id === removed.id).selectedText, "remove");
+    assert.equal(threads.find((item) => item.id === removed.id).orphaned, true);
+    assert.equal(threads.find((item) => item.id === removed.id).anchor.start, null);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
@@ -694,4 +696,43 @@ test("anchor reconciliation and agent completion commit in one store mutation", 
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }
+});
+
+test("orphan creation persists the marker and cannot match or reactivate an existing ordinary discussion", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-create-orphan-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new ThreadStore(path.join(dir, "threads.json"));
+  const anchor = { start: 0, end: 4, lineStart: 1, lineEnd: 1, blockId: "old" };
+  const source = await store.create({ title: "Orphan", selectedText: "text", anchor, orphaned: true });
+  const reloaded = await new ThreadStore(store.filePath).get(source.id);
+  assert.equal(reloaded.orphaned, true);
+  assert.deepEqual(reloaded.anchor, { start: null, end: null, lineStart: null, lineEnd: null, blockId: null });
+  const ordinary = await store.create({ title: "Ordinary", selectedText: "text", anchor: {} });
+  assert.notEqual(ordinary.id, source.id);
+  const freshOrphan = await store.create({ title: "Another orphan", selectedText: "text", anchor: {}, orphaned: true });
+  assert.notEqual(freshOrphan.id, ordinary.id);
+  const independent = await store.create({ title: "Independent", selectedText: "text", anchor, orphaned: true, independent: true, sourceThreadId: source.id, contextScope: "references" });
+  assert.equal(independent.orphaned, true);
+  assert.deepEqual(independent.messages, []);
+});
+
+test("stale ordinary anchor updates cannot clear the orphan marker or replace its saved source snapshot", async (t) => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "xuanniao-stale-orphan-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const store = new ThreadStore(path.join(dir, "threads.json"));
+  const thread = await store.create({ title: "Saved", selectedText: "original", anchor: { start: 0, end: 8 } });
+  const question = await store.addMessage(thread.id, { role: "user", content: "Keep", meta: { references: [{ content: "Snapshot" }] } });
+  await store.completeAgentTurn(thread.id, question.id, { role: "assistant", content: "Result" }, { adapter: "codex-app-server", sessionId: "checkpoint", turnId: "turn", documentHash: "hash" });
+  const before = await store.get(thread.id);
+  await store.updateAnchors([{ ...thread, orphaned: true, selectedText: "untrusted", anchor: { start: null, end: null } }]);
+  await store.updateAnchors([{ ...thread, orphaned: false, selectedText: "untrusted" }]);
+  await store.reconcileAnchors(async () => ({ patches: [{ ...thread, orphaned: false }], deletedThreadIds: [] }));
+  const orphan = await new ThreadStore(store.filePath).get(thread.id);
+  assert.equal(orphan.orphaned, true);
+  assert.equal(orphan.selectedText, before.selectedText);
+  assert.equal(orphan.anchor.start, null);
+  assert.deepEqual(orphan.messages, before.messages);
+  assert.equal(branchRevisionForQuestion(orphan, question.id), branchRevisionForQuestion(before, question.id));
+  await store.delete(thread.id);
+  assert.deepEqual(await store.list(), []);
 });

@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { atomicWriteText } from "./atomic-file.js";
 import { buildBlockIndex } from "./block-index.js";
-import { reconcileThreadsForContent, remapThreadsForReplacement } from "./thread-anchor-remap.js";
+import { orphanThread, reconcileThreadsForContent, remapThreadsForReplacement } from "./thread-anchor-remap.js";
 
 const mutationLocks = new Map();
 const agentTurnLocks = new Map();
@@ -46,15 +46,34 @@ export class DocumentWorkspace {
     this.controlledState = controlledDocumentStates.get(this.filePath);
   }
 
-  async payload() {
-    await this.waitForMutations();
-    return payloadFor(this.filePath, await readFile(this.filePath, "utf8"));
+  #payloadForContent(content) {
+    return {
+      ...payloadFor(this.filePath, content),
+      ...(this.referenceIdentity ? { referenceIdentity: this.referenceIdentity } : {}),
+      ...(this.referenceIdentityRequired ? { referenceIdentityRequired: true } : {})
+    };
   }
 
-  async createThread({ title, selectedText, anchor, expectedRevision }) {
+  async payload() {
+    await this.waitForMutations();
+    return this.#payloadForContent(await readFile(this.filePath, "utf8"));
+  }
+
+  async createThread({ title, selectedText, anchor, expectedRevision, independent = false, contextScope = "full", sourceThreadId = null }) {
     return this.withMutation(async () => {
       const current = await this.snapshot();
       assertRevision(current, expectedRevision);
+      if (!["full", "references"].includes(contextScope) || (!independent && contextScope !== "full")) {
+        throw new DocumentConflictError("缩小资料范围需要开启独立讨论", current.revision);
+      }
+      const sourceThread = sourceThreadId ? await this.threadStore.get(sourceThreadId) : null;
+      if (independent && sourceThread?.orphaned) {
+        // A new discussion may quote a lost location, but cannot restore it implicitly.
+        return this.threadStore.create({
+          title, selectedText: sourceThread.selectedText, anchor: orphanThread(sourceThread).anchor,
+          independent, contextScope, sourceThreadId, orphaned: true
+        });
+      }
       const start = anchor?.start;
       const end = anchor?.end;
       const canonicalSelectedText = Number.isInteger(start) && Number.isInteger(end)
@@ -65,6 +84,7 @@ export class DocumentWorkspace {
         !Number.isInteger(end) ||
         start < 0 ||
         end <= start ||
+        end > current.content.length ||
         normalizeSelectedText(canonicalSelectedText) !== normalizeSelectedText(selectedText)
       ) {
         throw new DocumentConflictError(
@@ -72,7 +92,24 @@ export class DocumentWorkspace {
           current.revision
         );
       }
-      return this.threadStore.create({ title, selectedText: canonicalSelectedText, anchor });
+      return this.threadStore.create({ title, selectedText: canonicalSelectedText, anchor, independent, contextScope, sourceThreadId });
+    });
+  }
+
+  async reanchor(threadId, { start, end, expectedRevision }) {
+    return this.withMutation(async () => {
+      const current = await this.snapshot();
+      assertRevision(current, expectedRevision);
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > current.content.length) throw new DocumentConflictError("请在当前文档选择新的定位片段。", current.revision);
+      const thread = await this.threadStore.get(threadId);
+      const lineStart = current.content.slice(0, start).split("\n").length;
+      const lineEnd = current.content.slice(0, end).split("\n").length;
+      const block = buildBlockIndex(current.content).find((item) => item.lineStart <= lineStart && item.lineEnd >= lineEnd);
+      return this.threadStore.updateAnchors([{
+        id: thread.id, orphaned: false, selectedText: current.content.slice(start, end),
+        anchor: { start, end, lineStart, lineEnd, blockId: block?.id || null,
+          contextBefore: current.content.slice(Math.max(0, start - 32), start), contextAfter: current.content.slice(end, end + 32) }
+      }], [], { allowReanchor: true });
     });
   }
 
@@ -87,11 +124,24 @@ export class DocumentWorkspace {
         const threads = await this.reconcileThreads(content, anchorPatches, deletedThreadIds);
         if (changed) this.recordControlledContent(content);
         return {
-          document: payloadFor(this.filePath, content),
+          document: this.#payloadForContent(content),
           threads
         };
       } catch (error) {
-        if (changed) await atomicWriteText(this.filePath, before.content);
+        if (changed) {
+          // The file is also editable outside our in-process lock. Roll back only
+          // our own post-image; never replace a newer edit or recreate a removed file.
+          const current = await this.snapshot().catch((readError) => {
+            if (readError.code === "ENOENT") return null;
+            throw readError;
+          });
+          if (current?.content === content) await atomicWriteText(this.filePath, before.content);
+          else {
+            const conflict = new DocumentConflictError("Document changed while anchor persistence failed. The current file was preserved; reload before retrying.", current?.revision || null);
+            conflict.cause = error;
+            throw conflict;
+          }
+        }
         throw error;
       }
     });
@@ -111,7 +161,7 @@ export class DocumentWorkspace {
       if (changed && this.controlledState.mutationEpoch !== snapshot.mutationEpoch) {
         throw new AgentDocumentMutationError(
           this.filePath,
-          payloadFor(this.filePath, current.content)
+          this.#payloadForContent(current.content)
         );
       }
       const completedMessage = {
@@ -162,7 +212,7 @@ export class DocumentWorkspace {
       this.recordControlledContent(current.content);
       return {
         assistantMessage: committed.assistantMessage,
-        document: payloadFor(this.filePath, current.content),
+        document: this.#payloadForContent(current.content),
         threads: committed.threads,
         changed: true
       };
@@ -173,7 +223,7 @@ export class DocumentWorkspace {
     return this.withMutation(async () => {
       const snapshot = await this.snapshot();
       return {
-        document: payloadFor(this.filePath, snapshot.content),
+        document: this.#payloadForContent(snapshot.content),
         content: snapshot.content,
         revision: snapshot.revision,
         mutationEpoch: this.controlledState.mutationEpoch
@@ -189,17 +239,17 @@ export class DocumentWorkspace {
       if (this.controlledState.mutationEpoch !== snapshot.mutationEpoch) {
         const controlled = this.controlledState.snapshot;
         if (controlled?.revision === current.revision) {
-          return payloadFor(this.filePath, current.content);
+          return this.#payloadForContent(current.content);
         }
         throw new AgentDocumentMutationError(
           this.filePath,
-          payloadFor(this.filePath, current.content)
+          this.#payloadForContent(current.content)
         );
       }
 
       throw new AgentDocumentMutationError(
         this.filePath,
-        payloadFor(this.filePath, current.content)
+        this.#payloadForContent(current.content)
       );
     });
   }
@@ -227,14 +277,16 @@ export class DocumentWorkspace {
   async reconcileThreads(content, anchorProposals = null, deletedThreadIds = []) {
     const deletedIds = new Set(deletedThreadIds);
     return this.threadStore.reconcileAnchors((storedThreads) => {
-      const currentThreads = storedThreads.filter((thread) => !deletedIds.has(thread.id));
+      // Older editors reported removed selections as deleted IDs. They detach locations,
+      // never delete discussion history; explicit thread deletion uses ThreadStore.delete.
+      const currentThreads = storedThreads.map((thread) => deletedIds.has(thread.id) ? orphanThread(thread) : thread);
       const candidates = anchorProposals
         ? applyValidAnchorProposals(currentThreads, anchorProposals, content)
         : currentThreads;
       const reconciled = reconcileThreadsForContent(candidates, content);
       return {
         patches: reconciled.threads,
-        deletedThreadIds: [...new Set([...deletedIds, ...reconciled.deletedThreadIds])]
+        deletedThreadIds: []
       };
     });
   }
@@ -283,6 +335,8 @@ function applyValidAnchorProposals(threads, proposals, content) {
   const proposalById = new Map(proposals.map((proposal) => [proposal.id, proposal]));
   return threads.map((thread) => {
     const proposal = proposalById.get(thread.id);
+    if (proposal?.orphaned) return orphanThread(thread);
+    if (thread.orphaned) return thread;
     const start = proposal?.anchor?.start;
     const end = proposal?.anchor?.end;
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end <= start || end > content.length) {

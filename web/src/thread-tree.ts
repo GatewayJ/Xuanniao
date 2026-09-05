@@ -1,3 +1,4 @@
+import { agentRunForMessage } from "./agent-run";
 import type { ConversationNodeKind, Message } from "./types";
 
 export type ConversationNode = {
@@ -15,7 +16,7 @@ export type ConversationNavigation = {
   down: ConversationNode | null;
 };
 
-export type ConversationNodeStatus = "unanswered" | "thinking" | "answered" | "failed";
+export type ConversationNodeStatus = "unanswered" | "thinking" | "answered" | "failed" | "interrupted" | "unknown" | "stopping";
 
 export const CONVERSATION_NODE_KINDS: ConversationNodeKind[] = [
   "question",
@@ -110,7 +111,11 @@ export function conversationBreadcrumb(roots: ConversationNode[], nodeId: string
 export function conversationNodeStatus(node: ConversationNode): ConversationNodeStatus {
   const latestAssistant = node.messages.filter((message) => message.role === "assistant").at(-1);
   if (!latestAssistant) return "unanswered";
-  if (latestAssistant.id.startsWith("pending-")) return "thinking";
+  const run = agentRunForMessage(latestAssistant);
+  if (run?.status === "unknown" || latestAssistant.meta?.outcomeUnknown) return "unknown";
+  if (run?.status === "interrupted" || latestAssistant.meta?.interrupted) return "interrupted";
+  if (run?.status === "stopping") return "stopping";
+  if (latestAssistant.id.startsWith("pending-") || run?.status === "running" || run?.status === "waiting") return "thinking";
   if (latestAssistant.error) return "failed";
   return "answered";
 }

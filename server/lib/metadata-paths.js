@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 export function xuanniaoMetadataRoot() {
-  return path.join(os.homedir(), "xuanniao");
+  return process.env.XUANNIAO_DATA_DIR ? path.resolve(process.env.XUANNIAO_DATA_DIR) : path.join(os.homedir(), "xuanniao");
 }
 
 export function agentSettingsPath(root = xuanniaoMetadataRoot()) {

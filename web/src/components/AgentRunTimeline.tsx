@@ -41,7 +41,7 @@ export function AgentRunTimeline({ message, variant = "inline" }: AgentRunTimeli
   const summary = summarizeAgentRun(run);
   const duration = displayDuration(run);
   const execution = executionLabel(message);
-  const label = run.status === "failed"
+  const label = run.status === "unknown" ? "结果未知 · 需核对" : run.status === "interrupted" ? "已中断" : run.status === "stopping" ? "正在停止" : run.status === "failed"
     ? "执行失败"
     : isRunning(run.status)
       ? summary.plan
@@ -80,9 +80,9 @@ export function AgentRunTimeline({ message, variant = "inline" }: AgentRunTimeli
               ))}
             </ol>
           ) : summary.mainEvents.length === 0 && summary.subagents.length === 0 ? (
-            <div className="agentRunEmpty">正在等待 Codex 开始执行…</div>
+            <div className="agentRunEmpty">{isRunning(run.status) ? "正在等待 Codex 开始执行…" : "没有已保存的过程记录。"}</div>
           ) : (
-            <div className="agentRunEmpty active">Codex 正在执行，尚未发布计划。</div>
+            <div className="agentRunEmpty active">{isRunning(run.status) ? "Codex 正在执行，尚未发布计划。" : "执行过程已留档。"}</div>
           )}
 
           {summary.subagents.length > 0 && (
@@ -276,6 +276,7 @@ function stepTitle(event: AgentRunUpdate): string {
     case "subagent": return `Subagent${event.agentName ? ` · ${event.agentName}` : ""}`;
     case "imageView": return `查看图片${event.path ? ` · ${event.path}` : ""}`;
     case "contextCompaction": return "整理上下文";
+    case "contextRecovery": return "已用保存的问答重建上下文";
     case "error": return event.message || "执行出错";
     default: return event.title || event.type || "执行步骤";
   }

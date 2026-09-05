@@ -2,6 +2,7 @@ import { useRef, useState } from "react";
 import type { Dispatch, SetStateAction } from "react";
 
 import { api } from "../api.ts";
+import { conversationDraftsFor, updateConversationDrafts, type DocumentConversationDrafts } from "../conversation-drafts";
 import {
   applyAgentRunSnapshot,
   applyAgentRunUpdate,
@@ -21,10 +22,12 @@ import type {
   ConversationNodeKind,
   DocumentPayload,
   Message,
+  ReferenceSnapshot,
   Thread
 } from "../types";
 
 type ConversationCommandOptions = {
+  documentPath: string | null;
   threadsRef: { current: Thread[] };
   setThreads: Dispatch<SetStateAction<Thread[]>>;
   setActiveThreadId: Dispatch<SetStateAction<string | null>>;
@@ -37,9 +40,11 @@ type ConversationCommandOptions = {
 
 type ConversationSendOptions = {
   onQueued?: () => void;
+  onError?: (message: string) => void;
 };
 
 export function useConversationCommands({
+  documentPath,
   threadsRef,
   setThreads,
   setActiveThreadId,
@@ -49,7 +54,19 @@ export function useConversationCommands({
   captureDocumentSession,
   isDocumentSessionCurrent
 }: ConversationCommandOptions) {
-  const [messageDrafts, setMessageDrafts] = useState<Record<string, string>>({});
+  const [documentDrafts, setDocumentDrafts] = useState<DocumentConversationDrafts>({});
+  const { messages: messageDrafts, references: referenceDrafts, errors: sendErrors } = conversationDraftsFor(documentDrafts, documentPath);
+  const setMessageDrafts: Dispatch<SetStateAction<Record<string, string>>> = (update) => {
+    setDocumentDrafts((current) => updateConversationDrafts(current, documentPath, "messages", update));
+  };
+  const setReferenceDrafts: Dispatch<SetStateAction<Record<string, ReferenceSnapshot[]>>> = (update) => {
+    setDocumentDrafts((current) => updateConversationDrafts(current, documentPath, "references", update));
+  };
+  const setSendErrors: Dispatch<SetStateAction<Record<string, string>>> = (update) => {
+    setDocumentDrafts((current) => updateConversationDrafts(current, documentPath, "errors", update));
+  };
+  const referenceDraftsRef = useRef(referenceDrafts);
+  referenceDraftsRef.current = referenceDrafts;
   const [editingMessage, setEditingMessage] = useState<string | null>(null);
   const [editText, setEditText] = useState("");
   const sendRegistryRef = useRef(new ConversationSendRegistry());
@@ -65,6 +82,7 @@ export function useConversationCommands({
       return false;
     }
     const sendKey = conversationSendKey(command);
+    if (command.draftKey) setSendErrors((current) => ({ ...current, [command.draftKey!]: "" }));
     const sendToken = sendRegistryRef.current.begin(sendKey);
     if (!sendToken) {
       setStatus("这个节点的问题正在发送");
@@ -72,7 +90,10 @@ export function useConversationCommands({
     }
 
     try {
-      if (!await flushDocumentSave() || !isDocumentSessionCurrent(operation)) return false;
+      if (!await flushDocumentSave() || !isDocumentSessionCurrent(operation)) {
+        options.onError?.("文档尚未保存或已切换，请检查后重新提交。");
+        return false;
+      }
       const agentRunId = command.askAgent ? createAgentRunId() : null;
       const normalized = { ...command, content, agentRunId };
       if (agentRunId) await api.reserveAgentRun(agentRunId, operation.signal);
@@ -91,6 +112,7 @@ export function useConversationCommands({
           nodeId: command.nodeId,
           parentMessageId: command.parentMessageId,
           branchSelection: command.branchSelection,
+          references: command.references,
           agentRunId
         }, operation.signal);
       } finally {
@@ -100,13 +122,28 @@ export function useConversationCommands({
       setThreads(payload.threads);
       const documentApplied = payload.document ? applyDocument(payload.document) : true;
       setActiveThreadId(command.threadId);
-      clearSubmittedDraft(command.draftKey, content);
+      const currentReferences = command.draftKey ? referenceDraftsRef.current[command.draftKey] : undefined;
+      if (currentReferences === command.references || (!currentReferences?.length && !command.references?.length)) {
+        clearSubmittedDraft(command.draftKey, content);
+      }
+      if (command.draftKey) {
+        setReferenceDrafts((current) => {
+          if (current[command.draftKey!] !== command.references) return current;
+          const next = { ...current };
+          delete next[command.draftKey!];
+          return next;
+        });
+      }
       if (documentApplied) {
-        setStatus(statusForOutcome(payload.agentOutcome, command.askAgent ? "Codex 已回答" : "评论已保存"));
+        setStatus(statusForOutcome(payload.agentOutcome, command.askAgent ? "Codex 已回答" : "评论已保存", payload.assistantMessage));
       }
       return true;
     } catch (error) {
-      if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
+      if (isDocumentSessionCurrent(operation)) {
+        options.onError?.(error instanceof Error ? error.message : String(error));
+        if (command.draftKey) setSendErrors((current) => ({ ...current, [command.draftKey!]: error instanceof Error ? error.message : String(error) }));
+        await recoverThreads(error, operation);
+      }
       return false;
     } finally {
       sendRegistryRef.current.finish(sendKey, sendToken);
@@ -161,7 +198,7 @@ export function useConversationCommands({
       setEditingMessage(null);
       setEditText("");
       if (documentApplied) {
-        setStatus(statusForOutcome(payload.agentOutcome, "Codex 已回答"));
+        setStatus(statusForOutcome(payload.agentOutcome, "Codex 已回答", payload.assistantMessage));
       }
     } catch (error) {
       if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
@@ -246,7 +283,7 @@ export function useConversationCommands({
       const documentApplied = payload.document ? applyDocument(payload.document) : true;
       setActiveThreadId(threadId);
       if (documentApplied) {
-        setStatus(statusForOutcome(payload.agentOutcome, "Codex 已回答"));
+        setStatus(statusForOutcome(payload.agentOutcome, "Codex 已回答", payload.assistantMessage));
       }
     } catch (error) {
       if (isDocumentSessionCurrent(operation)) await recoverThreads(error, operation);
@@ -268,13 +305,13 @@ export function useConversationCommands({
         ? countDescendantNodes(thread.messages, target.nodeId)
         : 0;
     const confirmed = window.confirm(
-      descendantCount > 0
+      (descendantCount > 0
         ? `确定删除这个问题、对应回答以及 ${descendantCount} 个子问题吗？`
         : deletesReply
           ? "确定删除这个问题及其 Codex 回答吗？"
           : target?.role === "user"
             ? "确定删除这个问题吗？"
-            : "确定删除这条 Codex 回答吗？"
+            : "确定删除这条 Codex 回答吗？") + " 已保存的提案、应用和执行快照将保留在成果记录中，正文不会撤回。"
     );
     if (!confirmed) return;
     const operation = captureDocumentSession();
@@ -303,11 +340,6 @@ export function useConversationCommands({
 
   function setMessageDraft(draftKey: string, value: string) {
     setMessageDrafts((current) => ({ ...current, [draftKey]: value }));
-  }
-
-  function resetConversationEditor() {
-    setMessageDrafts({});
-    cancelEdit();
   }
 
   function clearSubmittedDraft(draftKey: string | null, submittedContent: string) {
@@ -354,9 +386,9 @@ export function useConversationCommands({
       if (entry.snapshot.status === "waiting" || entry.snapshot.status === "running") {
         restored = restorePendingAgentRun(restored, entry.candidate, entry.snapshot);
       } else {
-        if (entry.snapshot.status === "failed" || !terminalRun) {
+        if (entry.snapshot.status !== "completed" || !terminalRun) {
           terminalRun = {
-            status: entry.snapshot.status === "failed" ? "failed" : "completed",
+            status: entry.snapshot.status !== "completed" ? "failed" : "completed",
             error: entry.snapshot.error
           };
         }
@@ -419,7 +451,7 @@ export function useConversationCommands({
           setThreads((current) => applyAgentRunSnapshot(current, threadId, agentRunId, snapshot));
           void refreshAfterAgentRun(
             operation,
-            snapshot.status === "failed" ? "failed" : "completed",
+            snapshot.status !== "completed" ? "failed" : "completed",
             snapshot.error
           );
         }
@@ -432,13 +464,17 @@ export function useConversationCommands({
 
   return {
     messageDrafts,
+    referenceDrafts,
+    sendErrors,
+    setReferenceDraft: (key: string, references: ReferenceSnapshot[]) => {
+      setReferenceDrafts((current) => ({ ...current, [key]: references }));
+    },
     editingMessage,
     editText,
     setEditText,
     setMessageDraft,
     beginEdit,
     cancelEdit,
-    resetConversationEditor,
     send,
     saveEditedMessage,
     updateMessageMeta,
@@ -492,7 +528,9 @@ export function conversationRevisionKey(threadId: string, messageId: string): st
   return `${threadId}:revision:${messageId}`;
 }
 
-export function statusForOutcome(outcome: AgentOutcome, successStatus: string): string {
+export function statusForOutcome(outcome: AgentOutcome, successStatus: string, message?: Message | null): string {
+  if (message?.meta?.outcomeUnknown) return "执行结果未知，请在成果记录中核对";
+  if (message?.meta?.interrupted) return "执行已中断，已有变化与过程保留";
   return outcome === "failed" ? "Codex 请求失败，请查看错误回答" : successStatus;
 }
 

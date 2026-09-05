@@ -136,6 +136,13 @@ test("reports honest node answer states", () => {
     { id: "a", role: "assistant", content: "Failed", nodeId: "q", parentId: "q", error: true, createdAt: at }
   ])[0];
   assert.equal(conversationNodeStatus(failed), "failed");
+  for (const state of ["unknown", "interrupted", "stopping"] as const) {
+    const node = buildConversationTree([unanswered.question, {
+      id: "pending-saved-run", role: "assistant", content: "", nodeId: "q", parentId: "q", createdAt: at,
+      meta: { agentRun: { id: "run", status: state, events: [] } }
+    }])[0];
+    assert.equal(conversationNodeStatus(node), state);
+  }
 });
 
 test("reads semantic node kind from message metadata", () => {

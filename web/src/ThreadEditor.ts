@@ -1,6 +1,6 @@
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { markdown } from "@codemirror/lang-markdown";
-import { EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, RangeSetBuilder, StateEffect, StateField, type Extension } from "@codemirror/state";
 import { Decoration, type DecorationSet, EditorView, keymap, ViewPlugin, type ViewUpdate } from "@codemirror/view";
 import { anchorContextForRange, compareThreadsByAnchor, resolveThreadAnchor } from "./thread-anchors";
 import type { SelectionContext, Thread, ThreadSpatialLayout } from "./types";
@@ -36,6 +36,7 @@ export class MarkdownThreadEditor {
   private readonly scrollListener: () => void;
   private suppressNextChange = false;
   private threads: Thread[] = [];
+  private readonly editability = new Compartment();
 
   constructor(parent: HTMLElement, content: string, onChange: ChangeListener, onScroll: ScrollListener, onThreadActivate?: ThreadActivateListener) {
     const owner = this;
@@ -67,6 +68,7 @@ export class MarkdownThreadEditor {
           history(),
           keymap.of([...defaultKeymap, ...historyKeymap]),
           markdown(),
+          this.editability.of([EditorState.readOnly.of(false), EditorView.editable.of(true)]),
           threadDecorationField,
           changePlugin,
           threadClickPlugin,
@@ -85,6 +87,13 @@ export class MarkdownThreadEditor {
 
   getContent(): string {
     return this.view.state.doc.toString();
+  }
+
+  setReadOnly(readOnly: boolean) {
+    if (this.view.state.readOnly === readOnly) return;
+    this.view.dispatch({ effects: this.editability.reconfigure([
+      EditorState.readOnly.of(readOnly), EditorView.editable.of(!readOnly)
+    ]) });
   }
 
   setContent(content: string) {

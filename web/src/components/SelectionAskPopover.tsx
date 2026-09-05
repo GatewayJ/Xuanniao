@@ -1,4 +1,4 @@
-import { useEffect, useRef, type CSSProperties } from "react";
+import { useEffect, useRef, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 
 type ViewportRect = {
@@ -16,6 +16,7 @@ type SelectionAskPopoverProps = {
   question: string;
   error: string;
   creating: boolean;
+  referenceControls?: ReactNode;
   onQuestionChange: (value: string) => void;
   onCancel: () => void;
   onSubmit: () => void;
@@ -35,13 +36,14 @@ export function SelectionAskPopover(props: SelectionAskPopoverProps) {
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
       if (event.key === "Escape") {
         event.preventDefault();
         props.onCancel();
         return;
       }
       if (event.key !== "Tab" || !formRef.current) return;
-      const focusable = [...formRef.current.querySelectorAll<HTMLElement>("button:not(:disabled), textarea:not(:disabled)")];
+      const focusable = [...formRef.current.querySelectorAll<HTMLElement>("button:not(:disabled), textarea:not(:disabled), input:not(:disabled), summary")].filter((element) => element.offsetParent !== null);
       if (focusable.length === 0) return;
       const first = focusable[0];
       const last = focusable.at(-1)!;
@@ -82,6 +84,10 @@ export function SelectionAskPopover(props: SelectionAskPopoverProps) {
           <button type="button" className="ghostButton" aria-label="取消提问" onClick={props.onCancel}>×</button>
         </header>
         <blockquote title={props.selectedText}>{props.selectedText}</blockquote>
+        {props.referenceControls || <details className="selectionContextHint">
+          <summary>本轮参考：完整文档背景 + 选中文字</summary>
+          <p>选区是本次关注点，不限制文档背景范围。新根问题不继承其他分支历史；资料范围不改变文件访问权限。进入讨论详情后可添加引用或开启独立讨论。</p>
+        </details>}
         <textarea
           ref={textareaRef}
           value={props.question}

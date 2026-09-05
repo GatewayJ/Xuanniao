@@ -22,7 +22,7 @@ export function remapThreadsForChange(
     const remapped = remapThreadForChange(thread, previousContent, content, changes, thread.id === preservedThreadId);
     if (remapped === null) {
       changed = true;
-      deletedThreadIds.push(thread.id);
+      nextThreads.push({ ...thread, orphaned: true, anchor: { ...thread.anchor, start: null, end: null, lineStart: null, lineEnd: null, blockId: null } });
       continue;
     }
     if (remapped !== thread) changed = true;
@@ -36,6 +36,11 @@ export function remapThreadsForChange(
 }
 
 function remapThreadForChange(thread: Thread, previousContent: string, content: string, changes: ChangeSet, preserveReplacement: boolean): Thread | null {
+  if (thread.orphaned) {
+    return [thread.anchor.start, thread.anchor.end, thread.anchor.lineStart, thread.anchor.lineEnd, thread.anchor.blockId].every((value) => value === null)
+      ? thread
+      : { ...thread, anchor: { ...thread.anchor, start: null, end: null, lineStart: null, lineEnd: null, blockId: null } };
+  }
   const start = thread.anchor.start;
   const end = thread.anchor.end;
   if (

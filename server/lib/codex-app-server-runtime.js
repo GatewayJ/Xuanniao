@@ -46,6 +46,10 @@ export class CodexAppServerRuntime {
     this.subagentOwners = new Map();
     this.abandonedTurnIds = new Set();
     this.sessionLocks = new Map();
+    this.runs = new Map();
+    this.finishedRuns = new Map();
+    this.runtimeId = randomUUID();
+    this.processInfo = null;
     this.loadedThreads = new Set();
     this.threadOwners = new Map();
     this.threadSettings = new Map();
@@ -75,6 +79,9 @@ export class CodexAppServerRuntime {
       permissionMode: this.permissionMode,
       initialized: this.initialized,
       running: this.rpc.running,
+      busy: this.isBusy(),
+      process: this.runtimeProcessInfo(),
+      runs: [...this.runs.values()].map((run) => this.runSnapshot(run)),
       sessionCount: this.loadedThreads.size,
       pendingPermissions: this.pendingPermissions.size,
       model: this.model,
@@ -91,9 +98,156 @@ export class CodexAppServerRuntime {
         mcpElicitation: false,
         dynamicClientTools: false,
         modelSelection: true,
-        permissionSelection: true
+        permissionSelection: true,
+        interrupt: true,
+        readOnlyProposal: true
       }
     };
+  }
+
+  // Select by Xuanniao thread id (string), or { runId, threadId, sessionKey }.
+  // Busy includes queued, starting, approval-waiting, stopping and unknown runs.
+  isBusy(target = null) {
+    if (this.recoveryResetRequest || this.recoveryResetFailed) return true;
+    return [...this.runs.values()].some((run) => matchesRun(run, target));
+  }
+
+  runtimeProcessInfo() {
+    return {
+      runtimeId: this.runtimeId,
+      servicePid: process.pid,
+      pid: this.rpc.process?.pid ?? this.recoveryProcess?.pid ?? this.processInfo?.pid ?? null,
+      startedAt: this.processInfo?.startedAt ?? null,
+      exitedAt: this.processInfo?.exitedAt ?? null
+    };
+  }
+
+  runSnapshot(run) {
+    return {
+      runId: run.id, threadId: run.threadId, sessionKey: run.sessionKey,
+      sessionId: run.sessionId, turnId: run.turnId, mode: run.mode,
+      status: run.status, terminal: Boolean(run.terminal),
+      process: run.process || this.runtimeProcessInfo()
+    };
+  }
+
+  async interrupt(target = null) {
+    return this.stop(target);
+  }
+
+  // Resolves only for an observed terminal state, or cancellation before submission.
+  // An RPC acknowledgement is not completion. Unknown outcomes reject with .result.
+  // AGENT_STOP_TIMEOUT keeps the run busy and awaits late native events. A lost
+  // runtime stays busy until its owner verifies the old execution and replaces it.
+  // This method never restores files; the service owns document reconciliation.
+  async stop(target = null) {
+    const matches = [...this.runs.values()].filter((run) => matchesRun(run, target));
+    if (matches.length > 1) throw runtimeError("AGENT_STOP_AMBIGUOUS", "Select a runId to stop one of multiple runs.");
+    const run = matches[0];
+    if (!run) {
+      const previous = [...this.finishedRuns.values()].reverse().find((entry) => matchesRun(entry, target));
+      if (previous) return previous.result;
+      if (target) throw runtimeError("AGENT_RUN_NOT_FOUND", "No tracked run matches this target; a previous process may have owned it.");
+      return { status: "idle", terminal: true, runId: null };
+    }
+    if (run.status === "unknown") throw runtimeError("AGENT_RUNTIME_LOST", "The native runtime was lost; verify the previous execution before retrying.", this.runSnapshot(run));
+    if (run.stopPromise) return run.stopPromise;
+    let timer;
+    run.stopPromise = Promise.race([
+      run.done,
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(runtimeError(
+          "AGENT_STOP_TIMEOUT", "Stop was requested, but native termination is not confirmed.",
+          { ...this.runSnapshot(run), status: "unknown", terminal: false }
+        )), this.interruptGraceMs);
+      })
+    ]).then((result) => {
+      if (!result.terminal) throw runtimeError("AGENT_RUNTIME_LOST", "The native runtime exited without confirming termination.", result);
+      return result;
+    }).finally(() => clearTimeout(timer));
+    run.stopRequested = true;
+    this.emitRunStatus(run, "stopping");
+    if (!run.submitted) run.cancelStart(runtimeError("AGENT_INTERRUPTED", "Stopped before native turn submission."));
+    this.interruptRun(run);
+    return run.stopPromise;
+  }
+
+  emitRunStatus(run, status) {
+    run.status = status;
+    const update = { type: "run", ...this.runSnapshot(run) };
+    run.updates.push(update);
+    this.emitTurnUpdate(run, update);
+  }
+
+  finishRun(run, status, extra = {}) {
+    if (run.result) return;
+    run.terminal = status !== "unknown";
+    this.emitRunStatus(run, status);
+    run.result = { ...this.runSnapshot(run), ...extra };
+    if (run.terminal) {
+      this.runs.delete(run.id);
+      this.finishedRuns.set(run.id, run);
+      if (this.finishedRuns.size > 120) this.finishedRuns.delete(this.finishedRuns.keys().next().value);
+    }
+    run.resolveDone(run.result);
+  }
+
+  interruptRun(run) {
+    this.cancelPermissionsForRun(run);
+    if ((!run.stopRequested && !run.draining) || run.result) return;
+    const state = run.turnId && this.turns.get(run.turnId);
+    if (state) this.pauseTurnTimeout(state);
+    if (run.turnId && !run.nativeTerminal) this.sendInterrupt(run, run.sessionId, run.turnId);
+    for (const owner of this.subagentOwners.values()) {
+      if (owner.state.run !== run || isTerminalSubagentStatus(owner.agentStatus)) continue;
+      if (owner.turnId) {
+        this.sendInterrupt(run, owner.threadId, owner.turnId);
+      } else if (!run.readingChildren.has(owner.threadId)) {
+        run.readingChildren.add(owner.threadId);
+        void this.request("thread/read", { threadId: owner.threadId, includeTurns: true }, this.interruptGraceMs).then((response) => {
+          if (run.result || !this.subagentOwners.has(owner.threadId)) return;
+          const turn = response?.thread?.turns?.findLast((entry) => entry.status === "inProgress");
+          if (turn) {
+            const current = this.subagentOwners.get(owner.threadId);
+            current.turnId = turn.id;
+            this.sendInterrupt(run, owner.threadId, turn.id);
+          } else if (["idle", "notLoaded"].includes(response?.thread?.status?.type)) {
+            this.registerSubagent(owner.state, { threadId: owner.threadId, agentStatus: "shutdown" });
+            this.completeStoppedTurn(owner.state);
+          }
+        }).catch((error) => this.rpc.appendDiagnostic(`\nCannot inspect child ${owner.threadId}: ${error.message}`));
+      }
+    }
+  }
+
+  sendInterrupt(run, threadId, turnId) {
+    const key = `${threadId}:${turnId}`;
+    if (run.interrupts.has(key)) return;
+    run.interrupts.add(key);
+    void this.request("turn/interrupt", { threadId, turnId }, this.interruptGraceMs).catch((error) => {
+      // Keep ownership and await a terminal notification even when the RPC fails.
+      this.rpc.appendDiagnostic(`\nFailed to interrupt ${turnId}: ${error.message}`);
+    });
+  }
+
+  cancelPermissionsForRun(run) {
+    for (const [id, permission] of this.pendingPermissions) {
+      if (this.runForSession(permission.sessionId) !== run) continue;
+      this.pendingPermissions.delete(id);
+      try { this.writeMessage({ id: permission.requestId, result: permission.cancelOption }); } catch { /* Process unavailable. */ }
+    }
+  }
+
+  runForSession(sessionId, visited = new Set()) {
+    if (!sessionId || visited.has(sessionId)) return null;
+    visited.add(sessionId);
+    const run = this.subagentOwners.get(sessionId)?.state.run
+      || [...this.runs.values()].find((candidate) => candidate.sessionId === sessionId);
+    if (run) return run;
+    for (const [parentId, children] of this.pendingSubagentThreads) {
+      if (children.some((child) => child.id === sessionId)) return this.runForSession(parentId, visited);
+    }
+    return null;
   }
 
   configure({ model = null, reasoningEffort = null, permissionMode = "request-approval" } = {}) {
@@ -140,7 +294,48 @@ export class CodexAppServerRuntime {
     await this.ensureInitialized();
   }
 
+  // Only the owner's explicit recovery acknowledgement may discard unknown runs.
+  // ChildProcess.killed means a signal was sent, so wait for close before unlocking.
+  async resetRecovery({ confirmed = false } = {}) {
+    if (confirmed !== true) throw runtimeError("AGENT_RECOVERY_CONFIRMATION_REQUIRED", "Confirm the previous execution cannot continue before resetting it.");
+    if (this.recoveryResetRequest) return this.recoveryResetRequest;
+    this.recoveryResetRequest = Promise.resolve().then(async () => {
+      const child = this.recoveryProcess || this.process;
+      this.recoveryProcess = child;
+      const previousProcess = this.runtimeProcessInfo();
+      const tasks = [...this.sessionLocks.values()];
+      const closed = child && child.exitCode == null && child.signalCode == null
+        ? new Promise((resolve, reject) => {
+          if (typeof child.once !== "function") reject(runtimeError("AGENT_RUNTIME_RESET_UNCONFIRMED", "Native process termination cannot be observed."));
+          else child.once("close", resolve);
+        })
+        : Promise.resolve();
+      void closed.catch(() => {});
+      this.dispose();
+      try { await recoveryDeadline(closed, this.interruptGraceMs); }
+      catch (error) {
+        if (error.code !== "AGENT_RUNTIME_RESET_TIMEOUT" || !child) throw error;
+        child.kill("SIGKILL");
+        await recoveryDeadline(closed, this.interruptGraceMs);
+      }
+      await recoveryDeadline(Promise.allSettled(tasks), this.interruptGraceMs);
+      this.runs.clear();
+      this.finishedRuns.clear();
+      this.sessionLocks.clear();
+      this.processInfo = null;
+      this.recoveryProcess = null;
+      this.recoveryResetFailed = false;
+      this.runtimeId = randomUUID();
+      return { reset: true, previousProcess, process: this.runtimeProcessInfo() };
+    });
+    try { return await this.recoveryResetRequest; }
+    catch (error) { this.recoveryResetFailed = true; throw error; }
+    finally { this.recoveryResetRequest = null; }
+  }
+
   dispose() {
+    // Keep the handle even after RPC disposal so recovery can prove it exited.
+    this.recoveryProcess ||= this.process;
     const error = new Error("Codex app-server runtime closed.");
     this.cancelPendingPermissions();
     this.failRuntimeState(error);
@@ -183,92 +378,167 @@ export class CodexAppServerRuntime {
     }
   }
 
-  async runTurn({ question, document, thread, mode = "chat", onUpdate = null }) {
+  // Interrupted turns reject with AGENT_INTERRUPTED, preserving content, updates,
+  // session (when available), and .result with the confirmed native terminal state.
+  // Proposal sessions are independent and must never replace a normal session.
+  async runTurn({ question, document, thread, mode = "chat", onUpdate = null, runId = randomUUID() }) {
+    if (this.recoveryResetRequest) throw runtimeError("AGENT_RUNTIME_RESETTING", "Native runtime recovery is still in progress.");
+    if (this.recoveryResetFailed) throw runtimeError("AGENT_RUNTIME_LOST", "The old process has not been confirmed closed; retry recovery before running again.");
     const lockKey = thread.sessionKey || thread.id;
-    return this.withSessionLock(lockKey, async () => {
-      await this.ensureInitialized();
-      const turnPermissionMode = this.permissionMode;
-      const turnAccessMode = permissionAccessMode(this.permissionMode);
-      const session = await this.ensureThread(thread, turnPermissionMode);
-      const effectiveSettings = await this.resolveTurnSettings(session);
-      const hash = documentHash(document.content);
-      const previousDocument = this.documentSnapshots.get(session.sessionId);
-      const includeDocument = session.documentHash !== hash;
-      const supplementalHistory = session.historyMode === "fresh"
-        ? thread.messages || []
-        : session.historyMode === "resumed"
-          ? thread.unsyncedCurrentNodeMessages || []
-          : [];
-      const prompt = buildAgentPrompt({
-        question,
-        document,
-        thread,
-        mode,
-        accessMode: turnAccessMode,
-        includeDocument,
-        supplementalHistory,
-        previousDocument: includeDocument ? (previousDocument ?? null) : null,
-        maxChars: this.contextMaxChars
-      });
+    if (this.runs.has(runId) || this.finishedRuns.has(runId)) {
+      throw runtimeError("AGENT_RUN_EXISTS", "This runId has already been submitted.");
+    }
+    if ([...this.runs.values()].some((run) => run.status === "unknown")) {
+      throw runtimeError("AGENT_RUNTIME_LOST", "Verify the previous execution before starting another run.");
+    }
+    const run = {
+      id: runId, threadId: thread.id, sessionKey: lockKey, mode, onUpdate,
+      sessionId: null, turnId: null, status: "queued", terminal: false,
+      stopRequested: false, submitted: false, updates: [],
+      interrupts: new Set(), readingChildren: new Set()
+    };
+    run.done = new Promise((resolve) => { run.resolveDone = resolve; });
+    run.started = new Promise((resolve) => { run.observeStart = resolve; });
+    run.cancelled = new Promise((_, reject) => { run.cancelStart = reject; });
+    this.runs.set(run.id, run);
+    const checkStopped = () => {
+      if (run.result?.status === "unknown") throw runtimeError("AGENT_RUNTIME_LOST", "Native runtime unavailable.", run.result);
+      if (run.stopRequested) throw runtimeError("AGENT_INTERRUPTED", "Stopped before native turn submission.");
+    };
+    try {
+      const answer = await Promise.race([this.withSessionLock(lockKey, async () => {
+        checkStopped();
+        run.status = "starting";
+        await this.ensureInitialized();
+        checkStopped();
+        run.process = this.runtimeProcessInfo();
+        const turnPermissionMode = mode === "proposal" ? "proposal" : this.permissionMode;
+        const turnAccessMode = permissionAccessMode(turnPermissionMode);
+        const session = mode === "proposal"
+          ? await this.createThread(thread, turnPermissionMode)
+          : await this.ensureThread(thread, turnPermissionMode);
+        run.sessionId = session.sessionId;
+        checkStopped();
+        this.emitRunStatus(run, "starting");
+        const effectiveSettings = await this.resolveTurnSettings(session);
+        checkStopped();
+        const hash = documentHash(document.content);
+        const previousDocument = this.documentSnapshots.get(session.sessionId);
+        const includeDocument = session.documentHash !== hash;
+        const supplementalHistory = session.historyMode === "fresh"
+          ? thread.messages || []
+          : session.historyMode === "resumed"
+            ? thread.unsyncedCurrentNodeMessages || []
+            : [];
+        const contextRecovery = mode !== "proposal" && session.historyMode === "fresh" && supplementalHistory.length > 0;
+        const recoveryUpdate = contextRecovery ? {
+          type: "contextRecovery", status: "completed",
+          title: "已用保存的问答重建上下文",
+          message: "本轮未沿用原生会话，部分执行过程和工具状态可能缺失；继续执行前请核对必要的文件状态。"
+        } : null;
+        if (recoveryUpdate && onUpdate) onUpdate(recoveryUpdate);
+        const prompt = buildAgentPrompt({
+          question,
+          document,
+          thread,
+          mode,
+          accessMode: turnAccessMode,
+          includeDocument,
+          supplementalHistory,
+          rebuildingHistory: contextRecovery,
+          previousDocument: includeDocument ? (previousDocument ?? null) : null,
+          maxChars: this.contextMaxChars
+        });
 
-      this.prepareRootTurnStart(session.sessionId);
-      let start;
-      try {
-        start = await this.request(
-          "turn/start",
-          compactObject({
-            threadId: session.sessionId,
-            input: [{ type: "text", text: prompt }],
-            cwd: this.cwd,
-            model: effectiveSettings.model,
-            effort: effectiveSettings.reasoningEffort
-          })
-        );
-      } catch (error) {
-        this.cancelRootTurnStart(session.sessionId);
-        throw error;
-      }
-      const turnId = start?.turn?.id;
-      if (!turnId) {
-        this.cancelRootTurnStart(session.sessionId);
-        throw new Error("Codex turn/start did not return a turn id.");
-      }
-      this.threadSettings.set(session.sessionId, effectiveSettings);
-      const turnResult = this.waitForTurn(session.sessionId, turnId, { onUpdate });
-      this.startingRootThreads.delete(session.sessionId);
-
-      let result;
-      try {
-        result = await turnResult;
-      } catch (error) {
-        if (error && typeof error === "object") {
-          if (Array.isArray(error.updates)) {
-            error.updates = selectPersistentUpdates(error.updates, MAX_PERSISTED_UPDATES);
-          }
-          error.model = effectiveSettings.model;
-          error.reasoningEffort = effectiveSettings.reasoningEffort;
+        this.prepareRootTurnStart(session.sessionId);
+        let start;
+        try {
+          checkStopped();
+          run.submitted = true;
+          start = await Promise.race([this.request(
+            "turn/start",
+            compactObject({
+              threadId: session.sessionId,
+              input: [{ type: "text", text: prompt }],
+              cwd: this.cwd,
+              model: effectiveSettings.model,
+              effort: effectiveSettings.reasoningEffort,
+              ...(mode === "proposal" ? {
+                approvalPolicy: "never",
+                approvalsReviewer: "user",
+                sandboxPolicy: { type: "readOnly", networkAccess: false }
+              } : {})
+            })
+          ), run.started]);
+        } catch (error) {
+          this.cancelRootTurnStart(session.sessionId);
+          throw error;
         }
-        throw error;
-      }
-      const agentSession = {
-        adapter: adapterName,
-        sessionId: session.sessionId,
-        turnId,
-        documentHash: hash
-      };
-      this.documentSnapshots.set(session.sessionId, document.content);
+        const turnId = start?.turn?.id;
+        if (!turnId) {
+          this.cancelRootTurnStart(session.sessionId);
+          throw new Error("Codex turn/start did not return a turn id.");
+        }
+        run.turnId = turnId;
+        this.threadSettings.set(session.sessionId, effectiveSettings);
+        const turnResult = this.waitForTurn(session.sessionId, turnId, { onUpdate, run });
+        this.startingRootThreads.delete(session.sessionId);
+        if (run.stopRequested || run.draining) this.interruptRun(run);
+        else if (!run.nativeTerminal) this.emitRunStatus(run, "running");
 
-      return {
-        content: result.content || "Codex completed without returning text.",
-        stopReason: result.turn?.status ?? null,
-        transport: adapterName,
-        updates: selectPersistentUpdates(result.updates, MAX_PERSISTED_UPDATES),
-        durationMs: result.durationMs,
-        model: effectiveSettings.model,
-        reasoningEffort: effectiveSettings.reasoningEffort,
-        session: agentSession
-      };
-    });
+        let result;
+        try {
+          result = await turnResult;
+        } catch (error) {
+          if (error && typeof error === "object") {
+            if (Array.isArray(error.updates)) {
+              error.updates = selectPersistentUpdates([...(recoveryUpdate ? [recoveryUpdate] : []), ...error.updates], MAX_PERSISTED_UPDATES);
+            }
+            error.model = effectiveSettings.model;
+            error.reasoningEffort = effectiveSettings.reasoningEffort;
+          }
+          throw error;
+        }
+        const agentSession = {
+          adapter: adapterName,
+          sessionId: session.sessionId,
+          turnId,
+          documentHash: hash
+        };
+        if (mode === "proposal") agentSession.mode = "proposal";
+        this.documentSnapshots.set(session.sessionId, document.content);
+
+        return {
+          content: result.content || (result.turn?.status === "interrupted" ? "" : "Codex completed without returning text."),
+          stopReason: result.turn?.status ?? null,
+          transport: adapterName,
+          updates: selectPersistentUpdates([...(recoveryUpdate ? [recoveryUpdate] : []), ...(result.updates || [])], MAX_PERSISTED_UPDATES),
+          durationMs: result.durationMs,
+          model: effectiveSettings.model,
+          reasoningEffort: effectiveSettings.reasoningEffort,
+          contextRecovery: contextRecovery
+            ? "rebuilt" : null,
+          session: agentSession
+        };
+      }), run.cancelled]);
+      this.finishRun(run, answer.stopReason || "completed");
+      if (answer.stopReason === "interrupted") {
+        throw Object.assign(runtimeError("AGENT_INTERRUPTED", "Codex turn was interrupted."), answer);
+      }
+      return { ...answer, ...this.runSnapshot(run), updates: selectPersistentUpdates([...answer.updates, ...run.updates], MAX_PERSISTED_UPDATES) };
+    } catch (cause) {
+      const error = Object.assign(new Error(cause.message, { cause }), cause);
+      const unknown = error.code === "AGENT_RUNTIME_LOST" || (run.submitted && !run.nativeTerminal);
+      const interrupted = !unknown && (error.code === "AGENT_INTERRUPTED" || run.nativeTerminal === "interrupted");
+      this.finishRun(run, unknown ? "unknown" : interrupted ? "interrupted" : run.nativeTerminal || "failed");
+      error.code = unknown ? "AGENT_RUNTIME_LOST" : interrupted ? "AGENT_INTERRUPTED" : error.code || "AGENT_TURN_FAILED";
+      error.result = run.result;
+      error.content ||= "";
+      error.stopReason = run.result.status;
+      error.transport = adapterName;
+      error.updates = selectPersistentUpdates([...(error.updates || []), ...run.updates], MAX_PERSISTED_UPDATES);
+      throw error;
+    }
   }
 
   async resolveTurnSettings(session) {
@@ -297,6 +567,8 @@ export class CodexAppServerRuntime {
   }
 
   async ensureInitialized() {
+    if (this.recoveryResetRequest) throw runtimeError("AGENT_RUNTIME_RESETTING", "Native runtime recovery is still in progress.");
+    if (this.recoveryResetFailed) throw runtimeError("AGENT_RUNTIME_LOST", "Native runtime recovery must finish before initialization.");
     if (this.initialized && this.rpc.running) return;
     if (this.initializing) return this.initializing;
 
@@ -324,7 +596,7 @@ export class CodexAppServerRuntime {
   }
 
   async ensureThread(thread, permissionMode = this.permissionMode) {
-    const stored = sessionForAdapter(thread.agentSession, adapterName);
+    const stored = thread.agentSession?.mode === "proposal" ? null : sessionForAdapter(thread.agentSession, adapterName);
     if (stored) {
       if (!this.loadedThreads.has(stored.sessionId)) {
         try {
@@ -352,7 +624,7 @@ export class CodexAppServerRuntime {
       };
     }
 
-    const parent = sessionForAdapter(thread.parentAgentSession, adapterName);
+    const parent = thread.parentAgentSession?.mode === "proposal" ? null : sessionForAdapter(thread.parentAgentSession, adapterName);
     if (parent) {
       try {
         const forked = await this.request(
@@ -394,6 +666,9 @@ export class CodexAppServerRuntime {
     if (!sessionId) {
       throw new Error("Codex thread/start did not return a thread id.");
     }
+    if (permissionMode === "proposal" && (started.sandbox?.type !== "readOnly" || started.approvalPolicy !== "never")) {
+      throw runtimeError("AGENT_PROPOSAL_SANDBOX_UNCONFIRMED", "Native runtime did not confirm read-only sandbox and disabled approval escalation.");
+    }
     this.loadedThreads.add(sessionId);
     this.threadOwners.set(sessionId, thread.id);
     this.rememberThreadSettings(sessionId, started);
@@ -434,6 +709,9 @@ export class CodexAppServerRuntime {
   async startProcess() {
     this.rpc.commandLine = this.commandLine;
     await this.rpc.start();
+    if (this.processInfo?.pid !== this.rpc.process?.pid || this.processInfo?.exitedAt) {
+      this.processInfo = { pid: this.rpc.process?.pid ?? null, startedAt: new Date().toISOString(), exitedAt: null };
+    }
   }
 
   request(method, params, timeoutMs = this.timeoutMs) {
@@ -454,6 +732,8 @@ export class CodexAppServerRuntime {
   }
 
   handleProcessExit(error) {
+    this.processInfo = { ...this.processInfo, exitedAt: new Date().toISOString() };
+    error.code = "AGENT_RUNTIME_LOST";
     this.failRuntimeState(error);
     this.initialized = false;
     this.loadedThreads.clear();
@@ -498,6 +778,11 @@ export class CodexAppServerRuntime {
       || [...this.turns.values()].find((turn) => turn.threadId === sessionId)
       || subagentOwner?.state;
     const turnId = activeTurn?.turnId || requestedTurnId || null;
+    const run = activeTurn?.run || this.runForSession(sessionId);
+    if (run?.stopRequested || run?.draining || run?.result || this.threadPermissionModes.get(sessionId) === "proposal" || run?.mode === "proposal") {
+      this.writeMessage({ id: message.id, result: approval.cancelResult });
+      return;
+    }
     const owner = this.threadOwners.get(sessionId) || sessionId;
     this.pendingPermissions.set(id, {
       requestId: message.id,
@@ -535,6 +820,12 @@ export class CodexAppServerRuntime {
     }
     const turnId = params.turnId || params.turn?.id;
     if (!turnId) return;
+    const startingRun = [...this.runs.values()].find((run) => run.sessionId === params.threadId && run.submitted && !run.turnId && !run.result);
+    if (startingRun && message.method === "turn/started" && !this.abandonedTurnIds.has(turnId)) {
+      startingRun.turnId = turnId;
+      startingRun.observeStart({ turn: { id: turnId } });
+      if (startingRun.stopRequested) this.interruptRun(startingRun);
+    }
     if (this.abandonedTurnIds.has(turnId)) {
       if (message.method === "turn/completed") this.abandonedTurnIds.delete(turnId);
       return;
@@ -594,6 +885,7 @@ export class CodexAppServerRuntime {
       parentThreadId: owner.parentThreadId,
       agentStatus: threadStatusToAgentStatus(status)
     });
+    if (owner.state.run?.stopRequested || owner.state.run?.draining) this.completeStoppedTurn(owner.state);
   }
 
   replayPendingSubagentThreads(parentThreadId, state) {
@@ -655,6 +947,7 @@ export class CodexAppServerRuntime {
       model: optionalString(details.model) || existing?.model || null,
       reasoningEffort: optionalString(details.reasoningEffort) || existing?.reasoningEffort || null,
       agentStatus: optionalString(details.agentStatus) || existing?.agentStatus || "running",
+      turnId: details.turnId || existing?.turnId || null,
       result: optionalString(details.result) || existing?.result || null,
       startedAt: existing?.startedAt || now,
       durationMs: existing?.durationMs ?? null
@@ -663,6 +956,7 @@ export class CodexAppServerRuntime {
       owner.durationMs = existing?.durationMs ?? Math.max(0, now - owner.startedAt);
     }
     this.subagentOwners.set(threadId, owner);
+    if (state.run?.mode === "proposal") this.threadPermissionModes.set(threadId, "proposal");
     const xuanniaoThreadId = this.threadOwners.get(state.threadId);
     if (xuanniaoThreadId) this.threadOwners.set(threadId, xuanniaoThreadId);
     this.adoptPendingSubagentPermissions(owner, xuanniaoThreadId || state.threadId);
@@ -671,13 +965,22 @@ export class CodexAppServerRuntime {
     this.emitTurnUpdate(state, update);
     this.replayPendingSubagentThreads(threadId, state);
     this.replayEarlySubagentEvents(owner);
+    if (state.run?.stopRequested || state.run?.draining) {
+      this.interruptRun(state.run);
+      this.completeStoppedTurn(state);
+    }
     return owner;
   }
 
   adoptPendingSubagentPermissions(owner, xuanniaoThreadId) {
     let adopted = false;
-    for (const permission of this.pendingPermissions.values()) {
+    for (const [id, permission] of this.pendingPermissions) {
       if (permission.sessionId !== owner.threadId) continue;
+      if (owner.state.run?.stopRequested || owner.state.run?.draining || owner.state.run?.mode === "proposal") {
+        this.pendingPermissions.delete(id);
+        this.writeMessage({ id: permission.requestId, result: permission.cancelOption });
+        continue;
+      }
       permission.turnId = owner.state.turnId;
       permission.snapshot.threadId = xuanniaoThreadId;
       permission.snapshot.sourceThreadId = owner.threadId;
@@ -695,11 +998,12 @@ export class CodexAppServerRuntime {
     }
   }
 
-  waitForTurn(threadId, turnId, { onUpdate = null } = {}) {
+  waitForTurn(threadId, turnId, { onUpdate = null, run = null } = {}) {
     return new Promise((resolve, reject) => {
       const state = {
         threadId,
         turnId,
+        run,
         chunks: [],
         completedText: "",
         updates: [],
@@ -733,6 +1037,7 @@ export class CodexAppServerRuntime {
           if (error && typeof error === "object") {
             if (!Array.isArray(error.updates)) error.updates = state.updates;
             if (!Number.isFinite(error.durationMs)) error.durationMs = Date.now() - state.startedAt;
+            error.content = state.chunks.join("").trim() || state.completedText.trim();
           }
           reject(error);
         }
@@ -751,6 +1056,8 @@ export class CodexAppServerRuntime {
     if (
       state.settled
       || state.timeoutError
+      || state.run?.stopRequested
+      || state.run?.draining
       || this.turns.get(state.turnId) !== state
       || this.hasPendingPermissionsForTurn(state)
     ) return;
@@ -814,6 +1121,7 @@ export class CodexAppServerRuntime {
   }
 
   applyTurnEvent(state, { method, params }) {
+    if (state.settled) return;
     if (method !== "turn/completed") this.refreshTurnTimeout(state);
     if (method === "item/agentMessage/delta") {
       state.chunks.push(params.delta || "");
@@ -896,29 +1204,51 @@ export class CodexAppServerRuntime {
       return;
     }
     if (method === "turn/completed") {
-      this.flushCommandOutput(state);
-      this.finalizeSubagentsForState(state, params.turn?.status);
-      this.discardPendingSubagentsForState(state);
-      this.turns.delete(state.turnId);
-      this.cancelPendingPermissionsForTurn(state.turnId);
-      const content = state.chunks.join("").trim() || state.completedText.trim();
-      if (state.timeoutError) {
-        state.reject(state.timeoutError);
-      } else if (params.turn?.status === "failed") {
-        const error = new Error(params.turn?.error?.message || "Codex turn failed.");
-        error.updates = state.updates;
-        error.durationMs = Date.now() - state.startedAt;
-        state.reject(error);
-      } else {
-        state.resolve({
-          content,
-          turn: params.turn,
-          updates: state.updates,
-          durationMs: Date.now() - state.startedAt
-        });
+      if (!["completed", "failed", "interrupted"].includes(params.turn?.status)) return;
+      state.completion = params;
+      if (state.run) state.run.nativeTerminal = params.turn?.status;
+      const activeChildren = [...this.subagentOwners.values()].some((owner) => owner.state === state && !isTerminalSubagentStatus(owner.agentStatus));
+      if (state.run && (state.run.stopRequested || activeChildren)) {
+        state.run.draining = true;
+        if (!state.run.stopRequested) this.emitRunStatus(state.run, "stopping");
+        this.interruptRun(state.run);
+        this.completeStoppedTurn(state);
+        return;
       }
-      this.releaseSubagentsForState(state);
+      this.finishNativeTurn(state, params);
     }
+  }
+
+  completeStoppedTurn(state) {
+    if (!state.completion || state.settled) return;
+    if ([...this.subagentOwners.values()].some((owner) => owner.state === state && !isTerminalSubagentStatus(owner.agentStatus))) return;
+    this.finishNativeTurn(state, state.completion);
+  }
+
+  finishNativeTurn(state, params) {
+    if (state.settled) return;
+    this.flushCommandOutput(state);
+    if (!state.run) this.finalizeSubagentsForState(state, params.turn?.status);
+    this.discardPendingSubagentsForState(state);
+    this.turns.delete(state.turnId);
+    this.cancelPendingPermissionsForTurn(state.turnId);
+    const content = state.chunks.join("").trim() || state.completedText.trim();
+    if (state.timeoutError) {
+      state.reject(state.timeoutError);
+    } else if (params.turn?.status === "failed") {
+      const error = new Error(params.turn?.error?.message || "Codex turn failed.");
+      error.updates = state.updates;
+      error.durationMs = Date.now() - state.startedAt;
+      state.reject(error);
+    } else {
+      state.resolve({
+        content,
+        turn: params.turn,
+        updates: state.updates,
+        durationMs: Date.now() - state.startedAt
+      });
+    }
+    this.releaseSubagentsForState(state);
   }
 
   applyCollaborationItem(state, method, item) {
@@ -930,6 +1260,14 @@ export class CodexAppServerRuntime {
   applySubagentTurnEvent(owner, { method, params }) {
     const state = owner.state;
     if (state.settled) return;
+    const eventTurnId = params.turnId || params.turn?.id;
+    if (method === "turn/started") {
+      owner.turnId = eventTurnId;
+      owner.agentStatus = "running";
+      owner.durationMs = null;
+    } else if (!owner.turnId) owner.turnId = eventTurnId;
+    else if (eventTurnId && owner.turnId !== eventTurnId) return;
+    if (method !== "turn/completed" && (state.run?.stopRequested || state.run?.draining)) this.interruptRun(state.run);
     if (method !== "turn/completed") this.refreshTurnTimeout(state);
     const scope = subagentScope(owner);
     if (method === "item/agentMessage/delta") {
@@ -1021,12 +1359,13 @@ export class CodexAppServerRuntime {
       };
       state.updates.push(update);
       this.emitTurnUpdate(state, update);
-      this.registerSubagent(state, { threadId: owner.threadId, agentStatus: "errored" });
+      // An error notification is not proof that the child turn has terminated.
       return;
     }
     if (method === "turn/completed") {
       this.flushCommandOutput(state);
       const turnStatus = params.turn?.status;
+      if (!["completed", "failed", "interrupted"].includes(turnStatus)) return;
       this.registerSubagent(state, {
         threadId: owner.threadId,
         agentStatus: turnStatus === "completed"
@@ -1035,6 +1374,7 @@ export class CodexAppServerRuntime {
             ? "interrupted"
             : "errored"
       });
+      if (state.run?.stopRequested || state.run?.draining) this.completeStoppedTurn(state);
     }
   }
 
@@ -1138,9 +1478,23 @@ export class CodexAppServerRuntime {
   }
 
   failRuntimeState(error) {
+    for (const run of this.runs.values()) {
+      if (run.result) continue;
+      const state = this.turns.get(run.turnId);
+      const lost = runtimeError("AGENT_RUNTIME_LOST", error.message);
+      if (state) {
+        this.flushCommandOutput(state);
+        lost.updates = state.updates;
+        lost.content = state.chunks.join("").trim() || state.completedText.trim();
+        lost.durationMs = Date.now() - state.startedAt;
+      }
+      if (run.process && this.processInfo?.exitedAt) run.process = { ...run.process, exitedAt: this.processInfo.exitedAt };
+      this.finishRun(run, "unknown");
+      run.cancelStart(lost);
+    }
     for (const [turnId, turn] of this.turns) {
       this.turns.delete(turnId);
-      turn.reject(error);
+      turn.reject(Object.assign(new Error(error.message, { cause: error }), error));
     }
     this.pendingPermissions.clear();
     this.earlyTurnEvents.clear();
@@ -1306,6 +1660,8 @@ function compactItemUpdate(method, item, accumulated = {}) {
   };
   if (item.type === "commandExecution") {
     update.command = boundedText(item.command, 2_000);
+    // Native terminal identifier, not an operating-system PID.
+    update.processId = optionalString(item.processId);
     update.cwd = boundedText(item.cwd, 1_000);
     update.output = boundedTail(item.aggregatedOutput || accumulated.commandOutput, 12_000);
     update.exitCode = Number.isInteger(item.exitCode) ? item.exitCode : null;
@@ -1583,6 +1939,9 @@ function compactObject(value) {
 }
 
 function codexThreadPermissionParams(permissionMode) {
+  if (permissionMode === "proposal") {
+    return { approvalPolicy: "never", approvalsReviewer: "user", sandbox: "read-only" };
+  }
   if (permissionMode === "request-approval") {
     return {
       approvalPolicy: "on-request",
@@ -1612,6 +1971,7 @@ function codexThreadPermissionParams(permissionMode) {
 }
 
 function permissionAccessMode(permissionMode) {
+  if (permissionMode === "proposal") return "read-only";
   if (permissionMode === "request-approval" || permissionMode === "auto-review") {
     return "workspace-write";
   }
@@ -1622,4 +1982,28 @@ function permissionAccessMode(permissionMode) {
 function optionalString(value) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized || null;
+}
+
+function matchesRun(run, target) {
+  if (!target) return true;
+  if (typeof target === "string") return run.threadId === target;
+  return (!target.runId || run.id === target.runId)
+    && (!target.threadId || run.threadId === target.threadId)
+    && (!target.sessionKey || run.sessionKey === target.sessionKey);
+}
+
+function runtimeError(code, message, result = null) {
+  const error = new Error(message);
+  error.code = code;
+  if (result) error.result = result;
+  return error;
+}
+
+async function recoveryDeadline(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([promise, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(runtimeError("AGENT_RUNTIME_RESET_TIMEOUT", "Native runtime recovery did not settle; keep recovery protection active.")), timeoutMs);
+    })]);
+  } finally { clearTimeout(timer); }
 }

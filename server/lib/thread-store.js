@@ -4,6 +4,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { atomicWriteText } from "./atomic-file.js";
+import { orphanThread } from "./thread-anchor-remap.js";
 import {
   appendConversationMessage,
   completeConversationAgentTurn,
@@ -40,14 +41,14 @@ export class ThreadStore {
     return thread;
   }
 
-  async create({ title, selectedText, anchor }) {
+  async create({ title, selectedText, anchor, independent = false, contextScope = "full", sourceThreadId = null, orphaned = false }) {
     return this.withMutation(async () => {
       const data = await this.read();
       const existing = findExistingThread(data.threads, {
         selectedText,
         anchor
       });
-      if (existing) {
+      if (existing && !independent && !orphaned) {
         return existing;
       }
 
@@ -56,7 +57,11 @@ export class ThreadStore {
         id: randomUUID(),
         title,
         selectedText,
-        anchor,
+        anchor: orphaned ? orphanThread({ anchor }).anchor : anchor,
+        orphaned,
+        contextScope,
+        independent,
+        sourceThreadId,
         messages: [],
         createdAt: now,
         updatedAt: now
@@ -211,10 +216,10 @@ export class ThreadStore {
     return hasAssistantReply(requireThread(data, threadId), userMessageId);
   }
 
-  async updateAnchors(patches, deletedThreadIds = []) {
+  async updateAnchors(patches, deletedThreadIds = [], { allowReanchor = false } = {}) {
     return this.withMutation(async () => {
       const data = await this.read();
-      const changed = applyAnchorUpdates(data, patches, deletedThreadIds);
+      const changed = applyAnchorUpdates(data, patches, deletedThreadIds, allowReanchor);
       if (changed) await this.write(data);
       return data.threads;
     });
@@ -282,19 +287,22 @@ export class ThreadStore {
   }
 }
 
-function applyAnchorUpdates(data, patches, deletedThreadIds) {
+function applyAnchorUpdates(data, patches, deletedThreadIds, allowReanchor = false) {
   const patchById = new Map(patches.map((patch) => [patch.id, patch]));
   const deletedIds = new Set(deletedThreadIds);
-  const originalLength = data.threads.length;
-  data.threads = data.threads.filter((thread) => !deletedIds.has(thread.id));
-  let changed = data.threads.length !== originalLength;
+  let changed = false;
   const now = new Date().toISOString();
 
   for (const thread of data.threads) {
     const patch = patchById.get(thread.id);
-    if (!patch) continue;
-    thread.anchor = patch.anchor;
-    if (typeof patch.selectedText === "string") thread.selectedText = patch.selectedText;
+    if (!patch && !deletedIds.has(thread.id)) continue;
+    if (deletedIds.has(thread.id) || patch?.orphaned === true || (thread.orphaned && !allowReanchor)) {
+      Object.assign(thread, orphanThread(thread));
+    } else {
+      thread.anchor = patch.anchor;
+      if (typeof patch.orphaned === "boolean") thread.orphaned = patch.orphaned;
+      if (typeof patch.selectedText === "string") thread.selectedText = patch.selectedText;
+    }
     thread.updatedAt = now;
     changed = true;
   }
@@ -310,7 +318,7 @@ function normalizeStoredThread(thread) {
     firstNodeRoot.agentSession = legacySession;
   }
   return {
-    ...stored,
+    ...(stored.orphaned ? orphanThread(stored) : stored),
     messages
   };
 }
@@ -342,6 +350,7 @@ function findExistingThread(threads, { selectedText, anchor }) {
   const normalizedText = normalizeText(selectedText);
   return (
     threads.find((thread) => {
+      if (thread.independent || thread.orphaned) return false;
       const threadAnchor = thread.anchor || {};
       if (hasAnchorRange) {
         return threadAnchor.start === anchor.start && threadAnchor.end === anchor.end;

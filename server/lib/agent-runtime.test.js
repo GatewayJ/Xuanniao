@@ -44,6 +44,20 @@ test("runtime contract fails at the composition root when an adapter is incomple
   assert.throws(() => assertAgentRuntime({ status() {} }), /missing required method: start/);
 });
 
+test("runtime contract requires busy and asynchronous stop interfaces", async () => {
+  const runtime = createAgentRuntime({ documentPath: "/tmp/plan.md", cwd: "/tmp", env: { XUANNIAO_AGENT_INTERRUPT_GRACE_MS: "250" } });
+  assert.equal(runtime.interruptGraceMs, 250);
+  assert.equal(runtime.isBusy(), false);
+  assert.deepEqual(await runtime.stop(), { status: "idle", terminal: true, runId: null });
+  assert.deepEqual(await runtime.interrupt(), { status: "idle", terminal: true, runId: null });
+  for (const method of ["isBusy", "stop", "interrupt"]) {
+    const adapter = Object.create(runtime);
+    adapter[method] = undefined;
+    assert.throws(() => assertAgentRuntime(adapter), new RegExp(`missing required method: ${method}`));
+  }
+  assert.throws(() => createAgentRuntime({ documentPath: "/tmp/plan.md", cwd: "/tmp", env: { XUANNIAO_AGENT_INTERRUPT_GRACE_MS: "0" } }), /positive numeric/);
+});
+
 test("persisted runtime settings override environment values including explicit defaults", () => {
   assert.deepEqual(runtimeAgentSettingsFromEnv({
     XUANNIAO_CODEX_MODEL: "env-model",

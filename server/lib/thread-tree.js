@@ -50,6 +50,7 @@ export function branchThreadForQuestion(thread, questionMessageId) {
     agentSession,
     parentAgentSession: parentRoot?.agentSession || null,
     branchSelection: normalizeBranchSelection(question.meta?.branchSelection),
+    references: question.meta?.references || [],
     ancestorMessages,
     currentNodeMessages,
     unsyncedCurrentNodeMessages: agentSession ? currentNodeMessages.slice(lastSyncedMessageIndex + 1) : currentNodeMessages,
@@ -107,7 +108,8 @@ function branchRevision(messages) {
     nodeId: message.nodeId || null,
     parentId: message.parentId || null,
     error: Boolean(message.error),
-    branchSelection: message.meta?.branchSelection || null
+    branchSelection: message.meta?.branchSelection || null,
+    references: message.meta?.references || []
   }));
   return createHash("sha256").update(JSON.stringify(state)).digest("hex");
 }

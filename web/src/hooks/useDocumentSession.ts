@@ -117,6 +117,7 @@ export function useDocumentSession({
           threadSnapshot.map((thread) => ({
             id: thread.id,
             selectedText: thread.selectedText,
+            orphaned: thread.orphaned,
             anchor: thread.anchor
           })),
           deletedThreadIds,

@@ -5,6 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { AgentRunBroker } from "./agent-run-broker.js";
+import { DocumentWorkspace } from "./document-workspace.js";
+import { ThreadStore } from "./thread-store.js";
 import {
   DocumentCreationService,
   extractCreatedDocument,
@@ -185,3 +187,87 @@ test("new document writes reject directories that escape through a symlink", asy
     await rm(outsideRoot, { recursive: true, force: true });
   }
 });
+
+test("stopping while the source snapshot is pending never submits a native turn", async (t) => {
+  const { workspaceRoot, document, agentRuns } = await creationFixture(t);
+  let releaseSnapshot;
+  let snapshotStarted;
+  const started = new Promise((resolve) => { snapshotStarted = resolve; });
+  const waiting = new Promise((resolve) => { releaseSnapshot = resolve; });
+  const readSnapshot = document.createAgentSnapshot.bind(document);
+  document.createAgentSnapshot = async () => { snapshotStarted(); await waiting; return readSnapshot(); };
+  let stopping = false;
+  let nativeCalls = 0;
+  const service = new DocumentCreationService({ workspaceRoot, document, agentRuns, agent: {
+    async runTurn() { nativeCalls++; return { content: documentDraft }; }
+  } });
+  const creation = service.create({ instruction: "Create a plan", agentRunId: "stop-during-snapshot" }, { isStopping: () => stopping });
+  const rejected = assert.rejects(creation, { code: "AGENT_INTERRUPTED" });
+  await started;
+  stopping = true;
+  releaseSnapshot();
+  await rejected;
+  assert.equal(nativeCalls, 0);
+  assert.equal(agentRuns.snapshot("stop-during-snapshot").status, "interrupted");
+  await assert.rejects(readFile(path.join(workspaceRoot, "created.md")), { code: "ENOENT" });
+});
+
+test("stopping during final source verification preserves the draft without writing a document", async (t) => {
+  const { workspaceRoot, document, agentRuns } = await creationFixture(t);
+  let stopping = false;
+  const verify = document.verifyAgentSnapshot.bind(document);
+  document.verifyAgentSnapshot = async (snapshot) => { await verify(snapshot); stopping = true; };
+  const updates = [];
+  const service = new DocumentCreationService({ workspaceRoot, document, agentRuns, agent: {
+    async runTurn(input) {
+      assert.equal(input.runId, "stop-before-write");
+      input.onUpdate({ type: "plan", status: "completed" });
+      return { content: documentDraft, updates: [{ type: "agentMessage", status: "completed" }] };
+    }
+  } });
+  await assert.rejects(service.create({ instruction: "Create a plan", agentRunId: "stop-before-write" }, {
+    isStopping: () => stopping, onUpdate: (update) => updates.push(update)
+  }), (error) => error.code === "AGENT_INTERRUPTED" && error.content === documentDraft && error.updates.length === 1);
+  assert.equal(updates.length, 1);
+  assert.equal(agentRuns.snapshot("stop-before-write").status, "interrupted");
+  await assert.rejects(readFile(path.join(workspaceRoot, "created.md")), { code: "ENOENT" });
+});
+
+test("native loss remains unknown even when the source disappears before verification", async (t) => {
+  const { workspaceRoot, document, agentRuns } = await creationFixture(t);
+  const failure = Object.assign(new Error("native connection lost"), {
+    code: "AGENT_RUNTIME_LOST", content: "partial draft", updates: [{ type: "commandExecution", status: "inProgress" }]
+  });
+  const service = new DocumentCreationService({ workspaceRoot, document, agentRuns, agent: {
+    async runTurn() { await rm(document.filePath); throw failure; }
+  } });
+  await assert.rejects(service.create({ instruction: "Create a plan", agentRunId: "source-lost-run" }), (error) => {
+    assert.equal(error, failure);
+    assert.equal(error.code, "AGENT_RUNTIME_LOST");
+    assert.equal(error.content, "partial draft");
+    assert.match(error.verificationError, /ENOENT/);
+    return true;
+  });
+  assert.equal(agentRuns.snapshot("source-lost-run").status, "unknown");
+});
+
+test("stop during asynchronous destination validation prevents the final file write", async (t) => {
+  const { workspaceRoot } = await creationFixture(t);
+  let stopping = false;
+  const writing = writeNewDocument(workspaceRoot, "created.md", "draft", { isStopping: () => stopping });
+  stopping = true;
+  await assert.rejects(writing, { code: "AGENT_INTERRUPTED" });
+  await assert.rejects(readFile(path.join(workspaceRoot, "created.md")), { code: "ENOENT" });
+});
+
+const documentDraft = "<XUANNIAO_DOCUMENT_PATH>created.md</XUANNIAO_DOCUMENT_PATH>\n<XUANNIAO_DOCUMENT_CONTENT>\n# Created\n</XUANNIAO_DOCUMENT_CONTENT>";
+
+async function creationFixture(t) {
+  const workspaceRoot = await mkdtemp(path.join(os.tmpdir(), "xuanniao-create-regression-"));
+  const documentPath = path.join(workspaceRoot, "source.md");
+  await writeFile(documentPath, "# Source\n");
+  const document = new DocumentWorkspace(documentPath, new ThreadStore(path.join(workspaceRoot, "threads.json")));
+  const agentRuns = new AgentRunBroker();
+  t.after(async () => { agentRuns.dispose(); await rm(workspaceRoot, { recursive: true, force: true }); });
+  return { workspaceRoot, document, agentRuns };
+}

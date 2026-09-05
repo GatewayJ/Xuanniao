@@ -70,6 +70,380 @@ const document = {
   content: "# Plan\n\nDetails."
 };
 
+class ControlledRuntime extends StubRuntime {
+  constructor() {
+    super();
+    this.modelCatalog = [];
+    this.interruptGraceMs = 100;
+    this.writes = [];
+  }
+
+  writeMessage(message) { this.writes.push(message); }
+
+  async request(method, params) {
+    if (method === "turn/interrupt" || method === "thread/read") {
+      this.calls.push({ method, params });
+      return {};
+    }
+    const result = await super.request(method, params);
+    if (method === "thread/start") {
+      result.approvalPolicy = params.approvalPolicy;
+      result.sandbox = { type: params.sandbox === "read-only" ? "readOnly" : "dangerFullAccess" };
+    }
+    return result;
+  }
+
+  waitForTurn(...args) { return CodexAppServerRuntime.prototype.waitForTurn.call(this, ...args); }
+}
+
+function turnInput(extra = {}) {
+  return { question: "Inspect the implementation", document, thread: { id: "discussion", messages: [] }, ...extra };
+}
+
+async function eventually(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.fail("Expected runtime transition did not occur");
+}
+
+function complete(runtime, threadId = "thread-1", turnId = "turn-1", status = "interrupted") {
+  runtime.handleNotification({ method: "turn/completed", params: { threadId, turn: { id: turnId, status } } });
+}
+
+test("stop waits for native completion, cancels approvals and is idempotent", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const updates = [];
+  const answer = runtime.runTurn(turnInput({ runId: "run-stop", onUpdate: (update) => updates.push(update) }));
+  assert.equal(runtime.isBusy("discussion"), true);
+  await eventually(() => runtime.turns.size === 1);
+  runtime.handleServerRequest({ id: 10, method: "item/commandExecution/requestApproval", params: { threadId: "thread-1", turnId: "stale", command: "write file" } });
+  assert.equal(runtime.listPermissionRequests().length, 1);
+  let resolved = false;
+  const stopped = runtime.stop({ runId: "run-stop" }).then((result) => { resolved = true; return result; });
+  const repeated = runtime.interrupt("discussion");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolved, false, "RPC acknowledgement must not release the run");
+  assert.equal(runtime.isBusy(), true);
+  assert.deepEqual(runtime.writes, [{ id: 10, result: { decision: "cancel" } }]);
+  runtime.handleServerRequest({ id: 11, method: "item/permissions/requestApproval", params: { threadId: "thread-1", permissions: { fileSystem: { write: ["/tmp"] } } } });
+  assert.deepEqual(runtime.writes.at(-1).result, { permissions: {}, scope: "turn" });
+  assert.equal(runtime.listPermissionRequests().length, 0);
+  complete(runtime);
+  const result = await stopped;
+  assert.equal(result.status, "interrupted");
+  assert.equal(result.terminal, true);
+  assert.deepEqual(await repeated, result);
+  assert.deepEqual(await runtime.stop({ runId: "run-stop" }), result);
+  assert.equal(runtime.calls.filter((call) => call.method === "turn/interrupt").length, 1);
+  await assert.rejects(answer, { code: "AGENT_INTERRUPTED", stopReason: "interrupted" });
+  assert.equal(runtime.isBusy(), false);
+  assert.deepEqual(updates.filter((update) => update.type === "run").map((update) => update.status), ["starting", "running", "stopping", "interrupted"]);
+});
+
+test("stop before initialization finishes never submits a native turn", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  let initialize;
+  runtime.ensureInitialized = () => new Promise((resolve) => { initialize = resolve; });
+  const answer = runtime.runTurn(turnInput());
+  await eventually(() => initialize);
+  assert.equal((await runtime.stop()).status, "interrupted");
+  await assert.rejects(answer, { code: "AGENT_INTERRUPTED" });
+  initialize();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(runtime.calls, []);
+  assert.equal(runtime.isBusy(), false);
+});
+
+test("stop during turn/start uses early notifications without waiting for its response", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const request = runtime.request.bind(runtime);
+  let returnStart;
+  runtime.request = (method, params) => {
+    if (method !== "turn/start") return request(method, params);
+    return new Promise((resolve) => { returnStart = resolve; });
+  };
+  const answer = runtime.runTurn(turnInput());
+  await eventually(() => returnStart);
+  const stopped = runtime.stop();
+  runtime.handleServerRequest({ id: 21, method: "item/fileChange/requestApproval", params: { threadId: "thread-1", turnId: "early" } });
+  runtime.handleNotification({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "early", status: "inProgress" } } });
+  complete(runtime, "thread-1", "early");
+  assert.equal((await stopped).status, "interrupted");
+  await assert.rejects(answer, (error) => error.code === "AGENT_INTERRUPTED" && error.result.turnId === "early");
+  assert.deepEqual(runtime.calls.find((call) => call.method === "turn/interrupt").params, { threadId: "thread-1", turnId: "early" });
+  assert.equal(runtime.listPermissionRequests().length, 0);
+  returnStart({ turn: { id: "early" } });
+});
+
+test("stop timeout reports unknown and retains ownership until a real terminal event", async (t) => {
+  const runtime = new ControlledRuntime();
+  runtime.interruptGraceMs = 10;
+  t.after(() => runtime.dispose());
+  const answer = runtime.runTurn(turnInput({ runId: "slow-stop" }));
+  await eventually(() => runtime.turns.size === 1);
+  await assert.rejects(runtime.stop(), (error) => {
+    assert.equal(error.code, "AGENT_STOP_TIMEOUT");
+    assert.equal(error.result.status, "unknown");
+    assert.equal(error.result.terminal, false);
+    return true;
+  });
+  assert.equal(runtime.isBusy(), true);
+  await assert.rejects(runtime.stop(), { code: "AGENT_STOP_TIMEOUT" });
+  assert.equal(runtime.calls.filter((call) => call.method === "turn/interrupt").length, 1);
+  complete(runtime);
+  await assert.rejects(answer, { code: "AGENT_INTERRUPTED" });
+  assert.equal((await runtime.stop({ runId: "slow-stop" })).status, "interrupted");
+  assert.equal(runtime.isBusy(), false);
+});
+
+test("completion racing with stop retains completed status and partial output", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const answer = runtime.runTurn(turnInput());
+  await eventually(() => runtime.turns.size === 1);
+  runtime.handleNotification({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", delta: "Already done" } });
+  const stopped = runtime.stop();
+  complete(runtime, "thread-1", "turn-1", "completed");
+  assert.equal((await stopped).status, "completed");
+  assert.equal((await answer).content, "Already done");
+});
+
+test("stop drains nested and late children after the root terminal event", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const answer = runtime.runTurn(turnInput());
+  await eventually(() => runtime.turns.size === 1);
+  runtime.handleNotification({ method: "thread/started", params: { thread: { id: "child", parentThreadId: "thread-1", status: { type: "active" } } } });
+  runtime.handleNotification({ method: "turn/started", params: { threadId: "child", turn: { id: "child-turn" } } });
+  const stopped = runtime.stop();
+  complete(runtime);
+  assert.equal(runtime.isBusy(), true);
+  runtime.handleNotification({ method: "thread/started", params: { thread: { id: "grandchild", parentThreadId: "child", status: { type: "active" } } } });
+  runtime.handleNotification({ method: "turn/started", params: { threadId: "grandchild", turn: { id: "grandchild-turn" } } });
+  runtime.handleServerRequest({ id: 31, method: "execCommandApproval", params: { conversationId: "grandchild", turnId: "old" } });
+  assert.deepEqual(runtime.writes.at(-1).result, { decision: "abort" });
+  complete(runtime, "child", "child-turn");
+  assert.equal(runtime.isBusy(), true);
+  complete(runtime, "grandchild", "grandchild-turn");
+  assert.equal((await stopped).status, "interrupted");
+  await assert.rejects(answer, (error) => {
+    assert.equal(error.code, "AGENT_INTERRUPTED");
+    assert.equal(error.updates.filter((update) => update.type === "subagent" && update.agentStatus === "interrupted").length, 2);
+    return true;
+  });
+  assert.deepEqual(runtime.calls.filter((call) => call.method === "turn/interrupt").map((call) => call.params.turnId).sort(), ["child-turn", "grandchild-turn", "turn-1"]);
+});
+
+test("targeted stop does not interrupt unrelated concurrent sessions", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const first = runtime.runTurn(turnInput({ runId: "first" }));
+  const second = runtime.runTurn(turnInput({ runId: "second", thread: { id: "other", messages: [] } }));
+  await eventually(() => runtime.turns.size === 2);
+  await assert.rejects(runtime.stop(), { code: "AGENT_STOP_AMBIGUOUS" });
+  const stopped = runtime.stop({ runId: "first" });
+  const target = runtime.status().runs.find((run) => run.runId === "first");
+  complete(runtime, target.sessionId, target.turnId);
+  await stopped;
+  await assert.rejects(first, { code: "AGENT_INTERRUPTED" });
+  assert.equal(runtime.isBusy("other"), true);
+  const remaining = runtime.status().runs[0];
+  complete(runtime, remaining.sessionId, remaining.turnId, "completed");
+  await second;
+  assert.equal(runtime.calls.filter((call) => call.method === "turn/interrupt").length, 1);
+});
+
+test("lost process reports unknown with provenance and blocks accidental retries", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  runtime.process = { pid: 12345, killed: false, kill() { this.killed = true; } };
+  runtime.processInfo = { pid: 12345, startedAt: "2026-09-05T00:00:00Z" };
+  const answer = runtime.runTurn(turnInput({ runId: "lost" }));
+  await eventually(() => runtime.turns.size === 1);
+  runtime.handleNotification({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", delta: "Result before exit" } });
+  runtime.handleNotification({ method: "item/started", params: { threadId: "thread-1", turnId: "turn-1", item: { id: "command-1", type: "commandExecution", command: "long-running-work", processId: "native-process-1" } } });
+  const stopped = runtime.stop();
+  runtime.handleProcessExit(new Error("process closed"));
+  await assert.rejects(stopped, { code: "AGENT_RUNTIME_LOST" });
+  await assert.rejects(answer, (error) => {
+    assert.equal(error.code, "AGENT_RUNTIME_LOST");
+    assert.equal(error.result.status, "unknown");
+    assert.equal(error.result.process.pid, 12345);
+    assert.equal(error.result.process.servicePid, process.pid);
+    assert.equal(error.result.runId, "lost");
+    assert.equal(error.content, "Result before exit");
+    assert.equal(error.updates.find((update) => update.type === "commandExecution").processId, "native-process-1");
+    assert.ok(error.result.process.exitedAt);
+    return true;
+  });
+  assert.equal(runtime.isBusy(), true);
+  await assert.rejects(runtime.runTurn(turnInput()), { code: "AGENT_RUNTIME_LOST" });
+  assert.ok(runtime.status().process.exitedAt);
+});
+
+test("proposal uses confirmed native read-only policy in a fresh session without changing normal sessions", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  runtime.configure({ permissionMode: "full-access" });
+  const normal = runtime.runTurn(turnInput());
+  await eventually(() => runtime.turns.size === 1);
+  complete(runtime, "thread-1", "turn-1", "completed");
+  const normalSession = (await normal).session;
+  runtime.calls = [];
+  const proposal = runtime.runTurn(turnInput({ mode: "proposal", thread: { id: "discussion", agentSession: normalSession, parentAgentSession: normalSession, selectedText: "quoted source", references: [], messages: [] } }));
+  await eventually(() => runtime.turns.size === 1);
+  const start = runtime.calls.find((call) => call.method === "thread/start");
+  assert.equal(start.params.sandbox, "read-only");
+  assert.equal(start.params.approvalPolicy, "never");
+  assert.equal(start.params.approvalsReviewer, "user");
+  assert.equal(runtime.calls.some((call) => ["thread/resume", "thread/fork"].includes(call.method)), false);
+  const turn = runtime.calls.find((call) => call.method === "turn/start");
+  assert.deepEqual(turn.params.sandboxPolicy, { type: "readOnly", networkAccess: false });
+  assert.equal(turn.params.approvalPolicy, "never");
+  for (const [id, method] of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval", "execCommandApproval", "applyPatchApproval"].entries()) {
+    runtime.handleServerRequest({ id, method, params: { threadId: "thread-2", turnId: "turn-2" } });
+  }
+  assert.equal(runtime.writes.length, 5);
+  assert.equal(runtime.listPermissionRequests().length, 0);
+  assert.equal(runtime.status().permissionMode, "full-access");
+  complete(runtime, "thread-2", "turn-2", "completed");
+  const proposalSession = (await proposal).session;
+  assert.equal(proposalSession.mode, "proposal");
+  assert.notEqual(proposalSession.sessionId, normalSession.sessionId);
+  runtime.calls = [];
+  const next = runtime.runTurn(turnInput({ thread: { id: "discussion", agentSession: normalSession, messages: [] } }));
+  await eventually(() => runtime.turns.size === 1);
+  assert.equal(runtime.calls.find((call) => call.method === "turn/start").params.threadId, normalSession.sessionId);
+  assert.equal(runtime.calls.find((call) => call.method === "turn/start").params.sandboxPolicy, undefined);
+  complete(runtime, normalSession.sessionId, "turn-3", "completed");
+  await next;
+});
+
+test("proposal fails closed when native thread settings do not confirm isolation", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const request = runtime.request.bind(runtime);
+  runtime.request = async (method, params) => {
+    const result = await request(method, params);
+    if (method === "thread/start") result.sandbox = { type: "workspaceWrite" };
+    return result;
+  };
+  await assert.rejects(runtime.runTurn(turnInput({ mode: "proposal" })), { code: "AGENT_PROPOSAL_SANDBOX_UNCONFIRMED" });
+  assert.equal(runtime.calls.some((call) => call.method === "turn/start"), false);
+  assert.equal(runtime.isBusy(), false);
+});
+
+test("proposal sessions cannot be resumed or forked into an ordinary run", async () => {
+  const runtime = new StubRuntime();
+  const proposalSession = { adapter: "codex-app-server", sessionId: "proposal", mode: "proposal" };
+  await runtime.runTurn(turnInput({ thread: { id: "discussion", agentSession: proposalSession, parentAgentSession: proposalSession, messages: [] } }));
+  assert.equal(runtime.calls[0].method, "thread/start");
+  assert.equal(runtime.calls[0].params.sandbox, "workspace-write");
+});
+
+test("default proposal keeps the current document read-only and forwards the parent's proposal context", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const proposal = { target: { start: 8, end: 16 }, source: { title: "Source conclusion", documentPath: document.path, content: "Keep API compatibility", messageId: "internal-source-id", revision: "internal-version" }, previous: "Prior draft" };
+  const answer = runtime.runTurn(turnInput({ mode: "proposal", question: "Only update this paragraph", thread: { id: "discussion", proposal, references: [structuredClone(proposal.source)], messages: [] } }));
+  await eventually(() => runtime.turns.size === 1);
+  assert.equal(runtime.status().permissionMode, "request-approval");
+  const threadStart = runtime.calls.find((call) => call.method === "thread/start");
+  assert.equal(threadStart.params.sandbox, "read-only");
+  assert.equal(threadStart.params.approvalPolicy, "never");
+  const turnStart = runtime.calls.find((call) => call.method === "turn/start");
+  assert.deepEqual(turnStart.params.sandboxPolicy, { type: "readOnly", networkAccess: false });
+  assert.equal(turnStart.params.cwd, runtime.cwd);
+  const prompt = turnStart.params.input[0].text;
+  const markedDocument = document.content.slice(0, 8) + "<XUANNIAO_EDIT_TARGET>" + document.content.slice(8, 16) + "</XUANNIAO_EDIT_TARGET>" + document.content.slice(16);
+  for (const content of [document.path, markedDocument, proposal.source.content, proposal.previous, "Only update this paragraph", "<XUANNIAO_PROPOSAL>"]) assert.ok(prompt.includes(content));
+  assert.equal(prompt.split(proposal.source.content).length - 1, 1);
+  assert.doesNotMatch(prompt, /internal-source-id|internal-version|UTF-16/);
+  runtime.handleNotification({ method: "thread/started", params: { thread: { id: "proposal-child", parentThreadId: "thread-1", status: { type: "active" } } } });
+  runtime.handleServerRequest({ id: 41, method: "item/fileChange/requestApproval", params: { threadId: "proposal-child", turnId: "child-turn", grantRoot: document.path } });
+  assert.deepEqual(runtime.writes.at(-1).result, { decision: "cancel" });
+  assert.equal(runtime.listPermissionRequests().length, 0);
+  complete(runtime, "proposal-child", "child-turn", "completed");
+  complete(runtime, "thread-1", "turn-1", "completed");
+  assert.equal((await answer).mode, "proposal");
+  assert.equal(document.content, "# Plan\n\nDetails.");
+});
+
+test("failed native turn after stop preserves failure and collected output", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const answer = runtime.runTurn(turnInput());
+  await eventually(() => runtime.turns.size === 1);
+  runtime.handleNotification({ method: "item/agentMessage/delta", params: { threadId: "thread-1", turnId: "turn-1", delta: "Partial result" } });
+  const stopped = runtime.stop();
+  complete(runtime, "thread-1", "turn-1", "failed");
+  assert.equal((await stopped).status, "failed");
+  await assert.rejects(answer, { code: "AGENT_TURN_FAILED", content: "Partial result" });
+});
+
+test("stop discovers an active child turn id and does not mistake a child error for termination", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const request = runtime.request.bind(runtime);
+  runtime.request = async (method, params) => {
+    if (method === "thread/read") return { thread: { status: { type: "active" }, turns: [{ id: "hidden-turn", status: "inProgress" }] } };
+    return request(method, params);
+  };
+  const answer = runtime.runTurn(turnInput());
+  await eventually(() => runtime.turns.size === 1);
+  runtime.handleNotification({ method: "thread/started", params: { thread: { id: "child", parentThreadId: "thread-1", status: { type: "active" } } } });
+  const stopped = runtime.stop();
+  await eventually(() => runtime.calls.some((call) => call.method === "turn/interrupt" && call.params.turnId === "hidden-turn"));
+  runtime.handleNotification({ method: "error", params: { threadId: "child", turnId: "hidden-turn", willRetry: false, error: { message: "tool failed" } } });
+  complete(runtime);
+  assert.equal(runtime.isBusy(), true);
+  complete(runtime, "child", "hidden-turn");
+  await stopped;
+  await assert.rejects(answer, { code: "AGENT_INTERRUPTED" });
+});
+
+test("stop without early notifications interrupts once turn/start returns", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const request = runtime.request.bind(runtime);
+  let startReply;
+  runtime.request = (method, params) => method === "turn/start"
+    ? new Promise((resolve) => { startReply = resolve; })
+    : request(method, params);
+  const answer = runtime.runTurn(turnInput());
+  await eventually(() => startReply);
+  runtime.handleServerRequest({ id: 52, method: "item/fileChange/requestApproval", params: { threadId: "thread-1" } });
+  assert.equal(runtime.listPermissionRequests().length, 1);
+  const stopped = runtime.stop();
+  assert.deepEqual(runtime.writes.at(-1), { id: 52, result: { decision: "cancel" } });
+  startReply({ turn: { id: "delayed-turn" } });
+  await eventually(() => runtime.calls.some((call) => call.method === "turn/interrupt"));
+  complete(runtime, "thread-1", "delayed-turn");
+  assert.equal((await stopped).status, "interrupted");
+  await assert.rejects(answer, { code: "AGENT_INTERRUPTED" });
+});
+
+test("native root completion drains remaining children before releasing the runtime", async (t) => {
+  const runtime = new ControlledRuntime();
+  t.after(() => runtime.dispose());
+  const answer = runtime.runTurn(turnInput());
+  await eventually(() => runtime.turns.size === 1);
+  runtime.handleNotification({ method: "thread/started", params: { thread: { id: "child", parentThreadId: "thread-1", status: { type: "active" } } } });
+  runtime.handleNotification({ method: "turn/started", params: { threadId: "child", turn: { id: "child-turn" } } });
+  complete(runtime, "thread-1", "turn-1", "completed");
+  assert.equal(runtime.isBusy(), true);
+  assert.deepEqual(runtime.calls.filter((call) => call.method === "turn/interrupt").map((call) => call.params.turnId), ["child-turn"]);
+  const stopped = runtime.stop();
+  complete(runtime, "child", "child-turn");
+  assert.equal((await stopped).status, "completed");
+  assert.equal((await answer).stopReason, "completed");
+});
+
 test("native runtime persists a semantic session and avoids unchanged context replay", async () => {
   const runtime = new StubRuntime();
   const baseThread = {
@@ -229,7 +603,14 @@ test("native resume failure starts a new thread and rebuilds history", async () 
     messages: [{ role: "user", content: "Old Xuanniao history" }]
   };
 
-  await runtime.runTurn({ question: "Retry in a new thread", document, thread });
+  const updates = [];
+  const answer = await runtime.runTurn({ question: "Retry in a new thread", document, thread, onUpdate: (update) => {
+    if (update.type !== "contextRecovery") return;
+    assert.equal(runtime.calls.some((call) => call.method === "turn/start"), false);
+    updates.push(update);
+  } });
+  assert.equal(answer.contextRecovery, "rebuilt");
+  assert.equal(updates[0].type, "contextRecovery");
   assert.deepEqual(runtime.calls.slice(0, 2).map(({ method }) => method), ["thread/resume", "thread/start"]);
   const prompt = runtime.calls.find(({ method }) => method === "turn/start").params.input[0].text;
   assert.match(prompt, /<XUANNIAO_BRANCH_HISTORY>/);
